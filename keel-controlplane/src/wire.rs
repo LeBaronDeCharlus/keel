@@ -52,6 +52,18 @@ pub struct NodeStatus {
     pub capacity_memory: u64,
     pub committed_cpu: f64,
     pub committed_memory: u64,
+    /// `#[serde(default)]` matters here in a way it might not appear to on
+    /// first read: `NodeStatus` is control-plane-internal state, never
+    /// deserialized by the control plane itself from an external source -
+    /// but it *is* deserialized by every external reader of `GET /nodes`
+    /// (`keel-dashboard`, and any future client), which can be running a
+    /// newer binary than an as-yet-unupgraded control plane during a
+    /// rolling deploy. Without this, such a reader hard-fails on every
+    /// poll instead of just seeing an empty `ingresses` list until the
+    /// control plane itself is upgraded. Confirmed on real infra: this bug
+    /// reproduced exactly this way against the Milestone 21 VPS deployment
+    /// before this field existed there.
+    #[serde(default)]
     pub ingresses: Vec<IngressHealth>,
 }
 
@@ -130,6 +142,18 @@ mod tests {
         let yaml = serde_yaml::to_string(&status).unwrap();
         let parsed: NodeStatus = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, status);
+    }
+
+    #[test]
+    fn node_status_without_an_ingresses_field_defaults_to_empty() {
+        // Mirrors GET /nodes served by a not-yet-upgraded control plane
+        // binary that predates the ingresses field entirely - reproduced
+        // for real against the Milestone 21 VPS deployment.
+        let parsed: NodeStatus = serde_yaml::from_str(
+            "id: node-1\naddr: 192.168.64.4\npod_cidr: 10.0.4.0/24\nstatus: Alive\nlast_seen_secs: 3\ncapacity_cpu: 4\ncapacity_memory: 8589934592\ncommitted_cpu: 1.5\ncommitted_memory: 536870912\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.ingresses, vec![]);
     }
 
     #[test]
