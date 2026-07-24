@@ -967,6 +967,150 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_services_after_a_simulated_restart_does_not_duplicate_an_already_placed_replica() {
+        let state_dir = fresh_state_dir();
+
+        // "Before the restart": apply a service, let it schedule, and record
+        // its placement and address exactly as http.rs's real
+        // execute_replica_actions would after a successful forward().
+        {
+            let commands = spawn(
+                Registry::new(test_cluster_cidr()),
+                Placements::new(),
+                Services::new(test_service_cidr()),
+                UsedAddresses::new(),
+                Standbys::new(),
+                PendingFences::new(),
+                state_dir.clone(),
+            )
+            .1;
+            register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+            apply_service(&commands, "web", 1);
+            record_placement(&commands, "web-0", "node-1");
+            let (addr_tx, addr_rx) = mpsc::channel();
+            commands
+                .send(Command::RecordReplicaAddress(
+                    "web-0".to_string(),
+                    "node-1".to_string(),
+                    "10.0.60.2".parse().unwrap(),
+                    addr_tx,
+                ))
+                .unwrap();
+            addr_rx.recv().unwrap();
+            heartbeat_with_jails(&commands, "node-1", vec![running("web-0")]);
+        }
+
+        // "The restart": a fresh spawn() loading from the same state_dir,
+        // with no explicit re-apply/re-record of anything.
+        let placements: Placements = crate::store::load_or_default(&state_dir.join("placements.yaml"));
+        let used_addresses: UsedAddresses = crate::store::load_or_default(&state_dir.join("used_addresses.yaml"));
+        let services = Services::load(&state_dir, test_service_cidr());
+        let restarted_commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            placements,
+            services,
+            used_addresses,
+            Standbys::new(),
+            PendingFences::new(),
+            state_dir,
+        )
+        .1;
+        register_node(&restarted_commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        heartbeat_with_jails(&restarted_commands, "node-1", vec![running("web-0")]);
+
+        assert_eq!(
+            reconcile(&restarted_commands),
+            vec![],
+            "the already-placed replica must not be seen as missing and rescheduled after a restart"
+        );
+    }
+
+    #[test]
+    fn every_remaining_mutating_command_persists_and_survives_a_simulated_restart() {
+        let state_dir = fresh_state_dir();
+        {
+            let commands = spawn(
+                Registry::new(test_cluster_cidr()),
+                Placements::new(),
+                Services::new(test_service_cidr()),
+                UsedAddresses::new(),
+                Standbys::new(),
+                PendingFences::new(),
+                state_dir.clone(),
+            )
+            .1;
+            register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RecordStandby("db-0".to_string(), "node-2".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RecordPendingFence("db-1".to_string(), "node-3".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+
+            // A second, separately-recorded fence, so its *absence* after
+            // restart is provably due to RemovePendingFence, not just never
+            // having been recorded in the first place.
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RecordPendingFence("db-2".to_string(), "node-4".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RemovePendingFence("db-2".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            commands
+                .send(Command::RecordReplicaAddress("db-3".to_string(), "node-1".to_string(), "10.0.60.5".parse().unwrap(), tx))
+                .unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands
+                .send(Command::RecordReplicaAddress("db-4".to_string(), "node-1".to_string(), "10.0.60.6".parse().unwrap(), tx))
+                .unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::ReleaseReplicaAddress("db-4".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RecordPlacement("db-5".to_string(), "node-1".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RecordPlacement("db-6".to_string(), "node-1".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::RemovePlacement("db-6".to_string(), tx)).unwrap();
+            rx.recv().unwrap();
+
+            apply_service(&commands, "web", 1);
+            apply_service(&commands, "api", 1);
+            let (tx, rx) = mpsc::channel();
+            commands.send(Command::DeleteService("api".to_string(), tx)).unwrap();
+            rx.recv().unwrap().unwrap();
+        }
+
+        let standbys: Standbys = crate::store::load_or_default(&state_dir.join("standbys.yaml"));
+        assert_eq!(standbys.get("db-0"), Some("node-2"), "RecordStandby must survive a restart");
+
+        let pending_fences: PendingFences = crate::store::load_or_default(&state_dir.join("pending_fences.yaml"));
+        assert_eq!(pending_fences.for_node("node-3"), vec!["db-1".to_string()], "RecordPendingFence must survive a restart");
+        assert_eq!(pending_fences.for_node("node-4"), Vec::<String>::new(), "RemovePendingFence must survive a restart");
+
+        let used_addresses: UsedAddresses = crate::store::load_or_default(&state_dir.join("used_addresses.yaml"));
+        assert_eq!(used_addresses.address_of("db-3"), Some("10.0.60.5".parse().unwrap()), "RecordReplicaAddress must survive a restart");
+        assert_eq!(used_addresses.address_of("db-4"), None, "ReleaseReplicaAddress must survive a restart");
+
+        let placements: Placements = crate::store::load_or_default(&state_dir.join("placements.yaml"));
+        assert_eq!(placements.get("db-5"), Some("node-1"), "RecordPlacement must survive a restart");
+        assert_eq!(placements.get("db-6"), None, "RemovePlacement must survive a restart");
+
+        let services = Services::load(&state_dir, test_service_cidr());
+        assert!(services.get("web").is_some(), "ApplyService must survive a restart");
+        assert!(services.get("api").is_none(), "DeleteService must survive a restart");
+    }
+
+    #[test]
     fn reconcile_services_schedules_every_replica_of_a_brand_new_service_across_distinct_nodes() {
         let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
