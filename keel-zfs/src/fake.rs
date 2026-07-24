@@ -129,6 +129,20 @@ impl ZfsManager for FakeZfsManager {
         self.snapshots.lock().unwrap().insert(format!("{dataset}@{snapshot}"));
         Ok(())
     }
+
+    fn list_child_datasets(&self, parent: &str) -> Result<Vec<String>, ZfsError> {
+        let prefix = format!("{parent}/");
+        let mut children: Vec<String> = self
+            .datasets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|name| name.starts_with(&prefix) && !name[prefix.len()..].contains('/'))
+            .cloned()
+            .collect();
+        children.sort();
+        Ok(children)
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +365,31 @@ mod tests {
         let clone = zfs.clone();
         clone.seed_dataset("zroot/keel/volumes/shared");
         assert!(zfs.dataset_exists("zroot/keel/volumes/shared").unwrap(), "expected a clone's mutation to be visible through the original handle");
+    }
+
+    #[test]
+    fn list_child_datasets_returns_only_immediate_children_sorted() {
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/volumes/web-data");
+        zfs.seed_dataset("zroot/keel/volumes/db-data");
+        zfs.seed_dataset("zroot/keel/jails/web-1");
+        assert_eq!(
+            zfs.list_child_datasets("zroot/keel/volumes").unwrap(),
+            vec!["zroot/keel/volumes/db-data".to_string(), "zroot/keel/volumes/web-data".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_child_datasets_excludes_grandchildren() {
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/volumes/web-data");
+        zfs.seed_dataset("zroot/keel/volumes/web-data/nested");
+        assert_eq!(zfs.list_child_datasets("zroot/keel/volumes").unwrap(), vec!["zroot/keel/volumes/web-data".to_string()]);
+    }
+
+    #[test]
+    fn list_child_datasets_on_an_unseeded_parent_is_empty() {
+        let zfs = FakeZfsManager::new();
+        assert_eq!(zfs.list_child_datasets("zroot/keel/volumes").unwrap(), Vec::<String>::new());
     }
 }

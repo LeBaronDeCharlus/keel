@@ -38,4 +38,10 @@ pub trait ZfsManager {
     /// Streams `input` into `zfs receive <dataset>`, creating or advancing
     /// `dataset` from the received stream.
     fn receive_snapshot(&self, dataset: &str, input: &mut dyn Read) -> Result<(), ZfsError>;
+
+    /// Immediate children of `parent` only (not the whole subtree), sorted
+    /// for deterministic output. `Ok(vec![])` if `parent` itself doesn't
+    /// exist yet, mirroring `dataset_exists`'s tolerant handling of ZFS's
+    /// "no such dataset" exit code rather than treating it as an error.
+    fn list_child_datasets(&self, parent: &str) -> Result<Vec<String>, ZfsError>;
 }
