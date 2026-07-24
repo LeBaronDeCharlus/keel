@@ -289,6 +289,13 @@ mod tests {
     fn renders_a_stale_banner_when_the_snapshot_is_stale() {
         let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: true, stale_as_of_unix: Some(1_000_000_000) };
         let html = render(&snapshot, 1_000_000_500);
-        assert!(html.contains("stale"), "got: {html}");
+        assert!(html.contains("control plane unreachable"), "got: {html}");
+    }
+
+    #[test]
+    fn does_not_render_a_stale_banner_when_the_snapshot_is_fresh() {
+        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: false, stale_as_of_unix: None };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(!html.contains("control plane unreachable"), "got: {html}");
     }
 }
