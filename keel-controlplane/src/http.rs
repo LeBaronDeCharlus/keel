@@ -290,6 +290,19 @@ fn handle_force_repin(name: &str, commands: &Sender<Command>, client_config: &Ar
             send_record_replica_address(name, &prep.standby_node_id, prep.address, commands);
             send_record_standby(name, &prep.fresh_standby_node_id, commands);
             send_record_pending_fence(name, &prep.old_node_id, commands);
+            // Attempt to reach the old primary immediately, rather than
+            // waiting only for its own next heartbeat
+            // (check_and_execute_fencing, unchanged, still retries this on
+            // that node's next heartbeat if this attempt fails or no
+            // last-known address is on file at all).
+            if let Some(old_addr) = &prep.old_node_last_known_addr {
+                match forward(old_addr, "DELETE", &format!("/jails/{name}"), &[], client_config) {
+                    Ok((del_status, _)) if (200..300).contains(&del_status) || del_status == 404 => {
+                        send_remove_pending_fence(name, commands);
+                    }
+                    _ => {}
+                }
+            }
             (200, resp_body)
         }
         Ok((status, resp_body)) => error_response(status, String::from_utf8_lossy(&resp_body).to_string()),
@@ -732,6 +745,7 @@ mod tests {
     use crate::tls;
     use crate::worker;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     fn fresh_state_dir() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1046,6 +1060,45 @@ mod tests {
             }
         });
         addr
+    }
+
+    fn start_fake_remote_tls_agentd_recording_deletes(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
+                .unwrap(),
+        );
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let thread_deletes = Arc::clone(&deletes);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                if let Some(first_line) = request_text.lines().next() {
+                    let mut parts = first_line.split_whitespace();
+                    if parts.next() == Some("DELETE") {
+                        if let Some(replica_name) = parts.next().and_then(|path| path.strip_prefix("/jails/")) {
+                            thread_deletes.lock().unwrap().push(replica_name.to_string());
+                        }
+                    }
+                }
+                let response = format!("HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = tls_stream.write_all(response.as_bytes());
+                let _ = tls_stream.flush();
+            }
+        });
+        (addr, deletes)
     }
 
     /// Like `start_fake_remote_tls_agentd`, but the response header declares
@@ -1924,6 +1977,46 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         commands.send(Command::PendingFencesForNode("node-unreachable".to_string(), tx)).unwrap();
         assert_eq!(rx.recv().unwrap(), vec!["db-0".to_string()], "expected the old primary to be fenced");
+    }
+
+    #[test]
+    fn force_repin_immediately_pushes_a_delete_to_the_old_primary_without_waiting_for_its_heartbeat() {
+        let (cp_addr, commands) = start_test_server_with_commands();
+
+        // Registered now, then aged past DEAD_THRESHOLD below -- unlike the
+        // other force-repin tests' "node-unreachable" (never registered at
+        // all, which resolve()-fails identically but leaves no address on
+        // file), this one needs a real address for last_known_addr to find.
+        let (old_primary_addr, old_primary_deletes) = start_fake_remote_tls_agentd_recording_deletes(200);
+        register_node(&cp_addr, "old-primary", &old_primary_addr);
+
+        std::thread::sleep(std::time::Duration::from_secs(16));
+
+        // Registered after the sleep above, so they're freshly Alive (not
+        // also aged past DEAD_THRESHOLD) when force-repin runs.
+        let node_b = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-b", &node_b);
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/register",
+            "id: node-c\naddr: 127.0.0.1:1\nreplicate_addr: 127.0.0.1:2\ncapacity_cpu: 4.0\ncapacity_memory: 8589934592\n",
+        );
+
+        apply_service_with_template_via_http(&cp_addr, "db", 1);
+        record_placement(&commands, "db-0", "old-primary");
+        let (tx, rx) = mpsc::channel();
+        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        rx.recv().unwrap();
+
+        let (status, body) = send_request(&cp_addr, "POST", "/replicas/db-0/force-repin", "");
+        assert_eq!(status, 200, "got: {body}");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            old_primary_deletes.lock().unwrap().contains(&"db-0".to_string()),
+            "expected the immediate push to have sent a DELETE for db-0 to the old primary, with no heartbeat from it ever received"
+        );
     }
 
     fn apply_service_with_template_via_http(cp_addr: &str, name: &str, replicas: u32) {

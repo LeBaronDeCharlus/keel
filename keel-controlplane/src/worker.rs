@@ -32,6 +32,7 @@ pub enum PlacementError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForceRepinPrep {
     pub old_node_id: String,
+    pub old_node_last_known_addr: Option<String>,
     pub standby_node_id: String,
     pub standby_addr: String,
     pub template: keel_spec::JailTemplate,
@@ -479,6 +480,12 @@ fn handle_command(
                 if registry.resolve(&old_node_id, now).is_ok() {
                     return Err(ForceRepinError::PrimaryStillAlive(old_node_id));
                 }
+                // No aliveness check here on purpose (see last_known_addr's
+                // own doc comment): the whole point of the immediate fencing
+                // push is attempting to reach a node the check just above
+                // called Dead, in case it's actually alive and only failing
+                // to heartbeat to the control plane specifically.
+                let old_node_last_known_addr = registry.last_known_addr(&old_node_id);
                 // Deliberately Registry::resolve(), not replicate_addr(): this
                 // is the address the control plane forwards the readiness
                 // GET and the provisioning PUT to (this node's normal HTTP
@@ -526,6 +533,7 @@ fn handle_command(
 
                 Ok(ForceRepinPrep {
                     old_node_id,
+                    old_node_last_known_addr,
                     standby_node_id,
                     standby_addr,
                     template,
