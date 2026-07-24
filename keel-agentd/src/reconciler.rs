@@ -280,17 +280,13 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         Ok(())
     }
 
-    fn provision(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
-        let jail_name = record::jail_name(name);
-        let base_dataset = record::base_dataset_path(&self.pool, &record.spec.spec.image);
-        let jail_dataset = record::jail_dataset_path(&self.pool, name);
+    /// Ensures every volume the spec declares exists and is mounted at its
+    /// target -- idempotent, so it's safe to call unconditionally from both
+    /// `provision` (a fresh jail) and `restart` (an existing one, possibly
+    /// resuming after a crash that happened between `jails.create`
+    /// succeeding and this very loop ever running the first time).
+    fn ensure_volumes(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
         let rootfs = record::jail_rootfs_path(&self.pool, name);
-
-        if !self.zfs.dataset_exists(&base_dataset)? {
-            return Err(ReconcileError::BaseImageNotFound(base_dataset));
-        }
-        self.zfs.clone_from_base(&base_dataset, &jail_dataset)?;
-        self.jails.create(&jail_name, &rootfs, record.spec.spec.network.vnet)?;
         for volume in &record.spec.spec.volumes {
             let dataset = record::volume_dataset_path(&self.pool, &volume.name);
             let target = rootfs.join(volume.mount_path.trim_start_matches('/'));
@@ -302,6 +298,21 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 self.mounts.mount_nullfs(&record::volume_mountpoint(&self.pool, &volume.name), &target)?;
             }
         }
+        Ok(())
+    }
+
+    fn provision(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
+        let jail_name = record::jail_name(name);
+        let base_dataset = record::base_dataset_path(&self.pool, &record.spec.spec.image);
+        let jail_dataset = record::jail_dataset_path(&self.pool, name);
+        let rootfs = record::jail_rootfs_path(&self.pool, name);
+
+        if !self.zfs.dataset_exists(&base_dataset)? {
+            return Err(ReconcileError::BaseImageNotFound(base_dataset));
+        }
+        self.zfs.clone_from_base(&base_dataset, &jail_dataset)?;
+        self.jails.create(&jail_name, &rootfs, record.spec.spec.network.vnet)?;
+        self.ensure_volumes(name, record)?;
         self.configure_networking_and_limits(name, record)?;
         self.jails.start_command(&jail_name, &record.spec.spec.command)?;
         Ok(())
@@ -309,6 +320,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
 
     fn restart(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
         let jail_name = record::jail_name(name);
+        self.ensure_volumes(name, record)?;
         self.configure_networking_and_limits(name, record)?;
         self.jails.start_command(&jail_name, &record.spec.spec.command)?;
         Ok(())
@@ -1020,6 +1032,31 @@ mod tests {
         assert!(reconciler.zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
         let target = record::jail_rootfs_path("zroot", "web-1").join("data");
         assert!(reconciler.mounts.is_mounted(&target).unwrap());
+    }
+
+    #[test]
+    fn restart_ensures_a_declared_volume_is_mounted_even_if_the_jail_was_created_without_it() {
+        // Simulates a crash between `jails.create` succeeding and
+        // `provision`'s volume-mount loop ever running: on restart,
+        // `jail_exists` is true (the jail metadata survived) so
+        // `reconcile_one` dispatches to `restart`, not `provision` -- which
+        // must still ensure the declared volume before starting the jail's
+        // command against what would otherwise be an empty directory.
+        let dir = test_state_dir("restart_ensures_a_declared_volume_is_mounted_even_if_the_jail_was_created_without_it");
+        let mut reconciler = new_reconciler(dir);
+        reconciler.zfs.seed_dataset("zroot/keel/base/14.2-web");
+        reconciler.apply(sample_spec_with_volume("web-1", "web-data", "/data", "1G")).unwrap();
+        let record = reconciler.records["web-1"].clone();
+
+        let rootfs = record::jail_rootfs_path("zroot", "web-1");
+        reconciler.jails.create(&record::jail_name("web-1"), &rootfs, true).unwrap();
+        let target = rootfs.join("data");
+        assert!(!reconciler.mounts.is_mounted(&target).unwrap(), "the volume must not be mounted yet in this scenario");
+
+        reconciler.restart("web-1", &record).unwrap();
+
+        assert!(reconciler.zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
+        assert!(reconciler.mounts.is_mounted(&target).unwrap(), "restart must still ensure the declared volume is mounted");
     }
 
     #[test]
