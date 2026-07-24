@@ -190,6 +190,20 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         Ok(())
     }
 
+    /// Every volume on this node, discovered by enumerating ZFS datasets
+    /// under `<pool>/keel/volumes/` rather than consulting `self.records` -
+    /// see `get_volume`'s doc comment: a volume can outlive every jail
+    /// record that ever referenced it, so `self.records` is never a
+    /// complete list of volumes.
+    pub fn list_volumes(&self) -> Result<Vec<crate::wire::VolumeStatus>, ReconcileError> {
+        let parent = format!("{}/keel/volumes", self.pool);
+        let prefix = format!("{parent}/");
+        let mut names: Vec<String> =
+            self.zfs.list_child_datasets(&parent)?.into_iter().map(|dataset| dataset[prefix.len()..].to_string()).collect();
+        names.sort();
+        Ok(names.into_iter().map(|name| crate::wire::VolumeStatus { name }).collect())
+    }
+
     /// Retargets an *already-running* primary's replication without a full
     /// re-provision -- just updates `replicate_to` on the existing
     /// `JailRecord` and persists it. Bypasses `apply()`/`validate_transition`
@@ -910,6 +924,50 @@ mod tests {
         let dir = test_state_dir("delete_volume_on_a_never_created_name_is_not_found");
         let mut reconciler = new_reconciler(dir);
         assert!(matches!(reconciler.delete_volume("missing"), Err(ReconcileError::Zfs(keel_zfs::ZfsError::NotFound(_)))));
+    }
+
+    #[test]
+    fn list_volumes_returns_every_volume_dataset_sorted_by_name() {
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/volumes/web-data");
+        zfs.seed_dataset("zroot/keel/volumes/db-data");
+        zfs.seed_dataset("zroot/keel/jails/web-1");
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs,
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            test_state_dir("list_volumes_returns_every_volume_dataset_sorted_by_name"),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let volumes = reconciler.list_volumes().unwrap();
+        assert_eq!(volumes, vec![
+            crate::wire::VolumeStatus { name: "db-data".to_string() },
+            crate::wire::VolumeStatus { name: "web-data".to_string() },
+        ]);
+    }
+
+    #[test]
+    fn list_volumes_on_a_pool_with_no_volumes_is_empty() {
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            FakeZfsManager::new(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            test_state_dir("list_volumes_on_a_pool_with_no_volumes_is_empty"),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        assert_eq!(reconciler.list_volumes().unwrap(), vec![]);
     }
 
     #[test]

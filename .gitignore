@@ -4,3 +4,5 @@
 /certs
 /.ovhrc
 testdata/tls/ca-db/*.old
+/deploy
+/.worktrees

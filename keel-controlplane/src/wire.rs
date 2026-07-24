@@ -16,12 +16,23 @@ pub struct Heartbeat {
     pub committed_memory: u64,
     #[serde(default)]
     pub jails: Vec<JailHealth>,
+    #[serde(default)]
+    pub ingresses: Vec<IngressHealth>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JailHealth {
     pub name: String,
     pub running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IngressHealth {
+    pub name: String,
+    pub host: String,
+    pub backend_service: String,
+    pub backend_port: u16,
+    pub cert_expires_at_unix: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -41,6 +52,19 @@ pub struct NodeStatus {
     pub capacity_memory: u64,
     pub committed_cpu: f64,
     pub committed_memory: u64,
+    /// `#[serde(default)]` matters here in a way it might not appear to on
+    /// first read: `NodeStatus` is control-plane-internal state, never
+    /// deserialized by the control plane itself from an external source -
+    /// but it *is* deserialized by every external reader of `GET /nodes`
+    /// (`keel-dashboard`, and any future client), which can be running a
+    /// newer binary than an as-yet-unupgraded control plane during a
+    /// rolling deploy. Without this, such a reader hard-fails on every
+    /// poll instead of just seeing an empty `ingresses` list until the
+    /// control plane itself is upgraded. Confirmed on real infra: this bug
+    /// reproduced exactly this way against the Milestone 21 VPS deployment
+    /// before this field existed there.
+    #[serde(default)]
+    pub ingresses: Vec<IngressHealth>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,10 +137,23 @@ mod tests {
             capacity_memory: 8 * 1024 * 1024 * 1024,
             committed_cpu: 1.5,
             committed_memory: 512 * 1024 * 1024,
+            ingresses: vec![],
         };
         let yaml = serde_yaml::to_string(&status).unwrap();
         let parsed: NodeStatus = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, status);
+    }
+
+    #[test]
+    fn node_status_without_an_ingresses_field_defaults_to_empty() {
+        // Mirrors GET /nodes served by a not-yet-upgraded control plane
+        // binary that predates the ingresses field entirely - reproduced
+        // for real against the Milestone 21 VPS deployment.
+        let parsed: NodeStatus = serde_yaml::from_str(
+            "id: node-1\naddr: 192.168.64.4\npod_cidr: 10.0.4.0/24\nstatus: Alive\nlast_seen_secs: 3\ncapacity_cpu: 4\ncapacity_memory: 8589934592\ncommitted_cpu: 1.5\ncommitted_memory: 536870912\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.ingresses, vec![]);
     }
 
     #[test]
@@ -129,7 +166,8 @@ mod tests {
 
     #[test]
     fn heartbeat_round_trips_through_yaml() {
-        let heartbeat = Heartbeat { committed_cpu: 2.0, committed_memory: 1024 * 1024 * 1024, jails: vec![] };
+        let heartbeat =
+            Heartbeat { committed_cpu: 2.0, committed_memory: 1024 * 1024 * 1024, jails: vec![], ingresses: vec![] };
         let yaml = serde_yaml::to_string(&heartbeat).unwrap();
         let parsed: Heartbeat = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, heartbeat);
@@ -144,6 +182,7 @@ mod tests {
                 JailHealth { name: "web-0".to_string(), running: true },
                 JailHealth { name: "web-1".to_string(), running: false },
             ],
+            ingresses: vec![],
         };
         let yaml = serde_yaml::to_string(&heartbeat).unwrap();
         let parsed: Heartbeat = serde_yaml::from_str(&yaml).unwrap();
@@ -154,6 +193,70 @@ mod tests {
     fn heartbeat_without_a_jails_field_defaults_to_empty() {
         let parsed: Heartbeat = serde_yaml::from_str("committed_cpu: 1\ncommitted_memory: 2\n").unwrap();
         assert_eq!(parsed.jails, vec![]);
+    }
+
+    #[test]
+    fn ingress_health_round_trips_through_yaml() {
+        let health = IngressHealth {
+            name: "blog".to_string(),
+            host: "example.com".to_string(),
+            backend_service: "hugo-site".to_string(),
+            backend_port: 8080,
+            cert_expires_at_unix: Some(1_800_000_000),
+        };
+        let yaml = serde_yaml::to_string(&health).unwrap();
+        let parsed: IngressHealth = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, health);
+    }
+
+    #[test]
+    fn heartbeat_with_ingresses_round_trips_through_yaml() {
+        let heartbeat = Heartbeat {
+            committed_cpu: 2.0,
+            committed_memory: 1024 * 1024 * 1024,
+            jails: vec![],
+            ingresses: vec![IngressHealth {
+                name: "blog".to_string(),
+                host: "example.com".to_string(),
+                backend_service: "hugo-site".to_string(),
+                backend_port: 8080,
+                cert_expires_at_unix: None,
+            }],
+        };
+        let yaml = serde_yaml::to_string(&heartbeat).unwrap();
+        let parsed: Heartbeat = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, heartbeat);
+    }
+
+    #[test]
+    fn heartbeat_without_an_ingresses_field_defaults_to_empty() {
+        let parsed: Heartbeat = serde_yaml::from_str("committed_cpu: 1\ncommitted_memory: 2\n").unwrap();
+        assert_eq!(parsed.ingresses, vec![]);
+    }
+
+    #[test]
+    fn node_status_with_ingresses_round_trips_through_yaml() {
+        let status = NodeStatus {
+            id: "node-1".to_string(),
+            addr: "192.168.64.4".to_string(),
+            pod_cidr: "10.0.4.0/24".to_string(),
+            status: NodeState::Alive,
+            last_seen_secs: 3,
+            capacity_cpu: 4.0,
+            capacity_memory: 8 * 1024 * 1024 * 1024,
+            committed_cpu: 1.5,
+            committed_memory: 512 * 1024 * 1024,
+            ingresses: vec![IngressHealth {
+                name: "blog".to_string(),
+                host: "example.com".to_string(),
+                backend_service: "hugo-site".to_string(),
+                backend_port: 8080,
+                cert_expires_at_unix: Some(1_800_000_000),
+            }],
+        };
+        let yaml = serde_yaml::to_string(&status).unwrap();
+        let parsed: NodeStatus = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, status);
     }
 
     #[test]

@@ -9,7 +9,8 @@ pub struct IngressBackendConfig {
 
 pub fn render_nginx_config(backends: &[IngressBackendConfig]) -> String {
     let mut config = String::from(
-        "user www; worker_processes 1;\nevents { worker_connections 1024; }\nhttp {\n    server {\n        listen 80 default_server;\n        return 301 https://$host$request_uri;\n    }\n",
+        "user www; worker_processes 1;\nevents { worker_connections 1024; }\nhttp {\n    \
+         include /usr/local/etc/nginx/conf.d/*.conf;\n    server {\n        listen 80 default_server;\n        return 301 https://$host$request_uri;\n    }\n",
     );
     for backend in backends {
         config.push_str(&format!(
@@ -44,6 +45,19 @@ mod tests {
         let config = render_nginx_config(&[]);
         assert!(config.contains("listen 80 default_server;"));
         assert!(config.contains("return 301 https://$host$request_uri;"));
+    }
+
+    /// This project regenerates and rewrites the whole nginx.conf on every
+    /// reconcile tick (`keel-agentd::reconciler::reconcile_ingress_config`),
+    /// so any hand-maintained server block placed directly in this file
+    /// would be silently wiped within seconds. This `include` is the one
+    /// stable extension point: content dropped into
+    /// `/usr/local/etc/nginx/conf.d/` (never written by this function)
+    /// survives every future regeneration.
+    #[test]
+    fn includes_the_stable_conf_d_extension_point() {
+        let config = render_nginx_config(&[]);
+        assert!(config.contains("include /usr/local/etc/nginx/conf.d/*.conf;"), "got: {config}");
     }
 
     #[test]

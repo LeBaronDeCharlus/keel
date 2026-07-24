@@ -243,6 +243,7 @@ fn route(
         ("GET", ["jails", name]) => handle_get(Some(name.to_string()), commands),
         ("DELETE", ["jails", name]) => handle_delete(name, commands),
         ("PUT", ["jails", name, "replicate-to"]) => handle_set_replicate_to(name, &request.body, commands),
+        ("GET", ["volumes"]) => handle_list_volumes(commands),
         ("GET", ["volumes", name]) => handle_get_volume(name, commands),
         ("DELETE", ["volumes", name]) => handle_delete_volume(name, commands),
         ("GET", ["replica-targets", name]) => handle_get_replica_target(name, replica_targets),
@@ -416,6 +417,18 @@ fn handle_delete(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     }
     match reply_rx.recv() {
         Ok(Ok(())) => (200, Vec::new()),
+        Ok(Err(e)) => error_response(status_for_error(&e), e.to_string()),
+        Err(_) => error_response(500, "reconciler worker did not respond".to_string()),
+    }
+}
+
+fn handle_list_volumes(commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if commands.send(Command::ListVolumes(reply_tx)).is_err() {
+        return error_response(500, "reconciler worker is not running".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(Ok(volumes)) => yaml_response(200, &volumes),
         Ok(Err(e)) => error_response(status_for_error(&e), e.to_string()),
         Err(_) => error_response(500, "reconciler worker did not respond".to_string()),
     }
@@ -695,6 +708,24 @@ mod tests {
         let (status, body) = send_request(&socket_path, "GET", "/volumes/web-data", "");
         assert_eq!(status, 200);
         assert!(body.contains("web-data"));
+    }
+
+    #[test]
+    fn get_volumes_lists_every_provisioned_volume() {
+        let socket_path = start_test_server("get_volumes_lists_every_provisioned_volume");
+        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml_with_volume("web-1", "web-data"));
+
+        let (status, body) = send_request(&socket_path, "GET", "/volumes", "");
+        assert_eq!(status, 200);
+        assert!(body.contains("web-data"), "got: {body}");
+    }
+
+    #[test]
+    fn get_volumes_on_a_pool_with_no_volumes_returns_an_empty_list() {
+        let socket_path = start_test_server("get_volumes_on_a_pool_with_no_volumes_returns_an_empty_list");
+        let (status, body) = send_request(&socket_path, "GET", "/volumes", "");
+        assert_eq!(status, 200);
+        assert_eq!(body.trim(), "[]");
     }
 
     #[test]

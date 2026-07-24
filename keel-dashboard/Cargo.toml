@@ -1,0 +1,21 @@
+[package]
+name = "keel-dashboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+keel-controlplane = { path = "../keel-controlplane" }
+keel-agentd = { path = "../keel-agentd" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+httparse = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+
+[dev-dependencies]
+keel-spec = { path = "../keel-spec" }
+keel-jail = { path = "../keel-jail" }
+keel-zfs = { path = "../keel-zfs" }
+keel-net = { path = "../keel-net" }
+keel-ingress = { path = "../keel-ingress" }

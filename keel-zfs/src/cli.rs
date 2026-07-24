@@ -183,4 +183,27 @@ impl ZfsManager for CliZfsManager {
         }
         Self::run_checked(&["clone", &snapshot, target_dataset])
     }
+
+    fn list_child_datasets(&self, parent: &str) -> Result<Vec<String>, ZfsError> {
+        let output = Self::run(&["list", "-H", "-o", "name", "-r", parent])?;
+        if !output.status.success() {
+            if output.status.code() == Some(1) {
+                return Ok(Vec::new());
+            }
+            return Err(ZfsError::CommandFailed(
+                format!("zfs list -H -o name -r {parent}"),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let prefix = format!("{parent}/");
+        let mut children: Vec<String> = stdout
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|name| name.starts_with(&prefix) && !name[prefix.len()..].contains('/'))
+            .collect();
+        children.sort();
+        Ok(children)
+    }
 }

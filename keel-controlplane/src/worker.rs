@@ -77,7 +77,7 @@ pub enum ReplicaAction {
 
 pub enum Command {
     Register(String, String, Option<String>, f64, u64, Sender<Result<ipnet::Ipv4Net, PodCidrCollision>>),
-    Heartbeat(String, f64, u64, Vec<crate::wire::JailHealth>, Sender<Result<(), UnknownNode>>),
+    Heartbeat(String, f64, u64, Vec<crate::wire::JailHealth>, Vec<crate::wire::IngressHealth>, Sender<Result<(), UnknownNode>>),
     List(Sender<Vec<NodeStatus>>),
     Resolve(String, Sender<Result<String, ResolveError>>),
     ResolveOrSchedule(String, Sender<Result<(String, String), ScheduleOrResolveError>>),
@@ -168,8 +168,8 @@ fn handle_command(
             let result = registry.register(id, addr, replicate_addr, capacity_cpu, capacity_memory, Instant::now());
             let _ = reply.send(result);
         }
-        Command::Heartbeat(id, committed_cpu, committed_memory, jails, reply) => {
-            let result = registry.heartbeat(&id, committed_cpu, committed_memory, jails, Instant::now());
+        Command::Heartbeat(id, committed_cpu, committed_memory, jails, ingresses, reply) => {
+            let result = registry.heartbeat(&id, committed_cpu, committed_memory, jails, ingresses, Instant::now());
             let _ = reply.send(result);
         }
         Command::List(reply) => {
@@ -584,7 +584,7 @@ mod tests {
         let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new()).1;
 
         let (hb_tx, hb_rx) = mpsc::channel();
-        commands.send(Command::Heartbeat("missing".to_string(), 0.0, 0, vec![], hb_tx)).unwrap();
+        commands.send(Command::Heartbeat("missing".to_string(), 0.0, 0, vec![], vec![], hb_tx)).unwrap();
         assert!(hb_rx.recv().unwrap().is_err());
     }
 
@@ -606,7 +606,7 @@ mod tests {
         reg_rx.recv().unwrap().unwrap();
 
         let (hb_tx, hb_rx) = mpsc::channel();
-        commands.send(Command::Heartbeat("node-1".to_string(), 0.0, 0, vec![], hb_tx)).unwrap();
+        commands.send(Command::Heartbeat("node-1".to_string(), 0.0, 0, vec![], vec![], hb_tx)).unwrap();
         assert!(hb_rx.recv().unwrap().is_ok());
     }
 
@@ -713,7 +713,7 @@ mod tests {
 
     fn heartbeat_node(commands: &Sender<Command>, id: &str, committed_cpu: f64, committed_memory: u64) {
         let (hb_tx, hb_rx) = mpsc::channel();
-        commands.send(Command::Heartbeat(id.to_string(), committed_cpu, committed_memory, vec![], hb_tx)).unwrap();
+        commands.send(Command::Heartbeat(id.to_string(), committed_cpu, committed_memory, vec![], vec![], hb_tx)).unwrap();
         hb_rx.recv().unwrap().unwrap();
     }
 
@@ -910,7 +910,7 @@ mod tests {
 
     fn heartbeat_with_jails(commands: &Sender<Command>, id: &str, jails: Vec<crate::wire::JailHealth>) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::Heartbeat(id.to_string(), 0.0, 0, jails, tx)).unwrap();
+        commands.send(Command::Heartbeat(id.to_string(), 0.0, 0, jails, vec![], tx)).unwrap();
         rx.recv().unwrap().unwrap();
     }
 

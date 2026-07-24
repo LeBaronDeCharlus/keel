@@ -17,6 +17,7 @@ struct NodeRecord {
     committed_memory: u64,
     pod_cidr: Ipv4Net,
     running_jails: HashMap<String, bool>,
+    ingresses: Vec<crate::wire::IngressHealth>,
 }
 
 #[derive(Debug)]
@@ -81,6 +82,7 @@ impl Registry {
                 committed_memory: 0,
                 pod_cidr,
                 running_jails: HashMap::new(),
+                ingresses: Vec::new(),
             },
         );
         Ok(pod_cidr)
@@ -92,6 +94,7 @@ impl Registry {
         committed_cpu: f64,
         committed_memory: u64,
         jails: Vec<crate::wire::JailHealth>,
+        ingresses: Vec<crate::wire::IngressHealth>,
         now: Instant,
     ) -> Result<(), UnknownNode> {
         match self.nodes.get_mut(id) {
@@ -100,6 +103,7 @@ impl Registry {
                 record.committed_cpu = committed_cpu;
                 record.committed_memory = committed_memory;
                 record.running_jails = jails.into_iter().map(|j| (j.name, j.running)).collect();
+                record.ingresses = ingresses;
                 Ok(())
             }
             None => Err(UnknownNode(id.to_string())),
@@ -143,6 +147,7 @@ impl Registry {
                     capacity_memory: record.capacity_memory,
                     committed_cpu: record.committed_cpu,
                     committed_memory: record.committed_memory,
+                    ingresses: record.ingresses.clone(),
                 }
             })
             .collect();
@@ -245,7 +250,7 @@ mod tests {
         registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
 
         let t1 = t0 + Duration::from_secs(10);
-        registry.heartbeat("node-1", 0.0, 0, vec![], t1).unwrap();
+        registry.heartbeat("node-1", 0.0, 0, vec![], vec![], t1).unwrap();
 
         let statuses = registry.list(t1);
         assert_eq!(statuses[0].last_seen_secs, 0);
@@ -254,7 +259,7 @@ mod tests {
     #[test]
     fn heartbeat_on_an_unknown_node_returns_unknown_node_error() {
         let mut registry = Registry::new(test_cluster_cidr());
-        let err = registry.heartbeat("missing", 0.0, 0, vec![], Instant::now()).unwrap_err();
+        let err = registry.heartbeat("missing", 0.0, 0, vec![], vec![], Instant::now()).unwrap_err();
         assert_eq!(err, UnknownNode("missing".to_string()));
         assert_eq!(err.to_string(), "unknown node 'missing'");
     }
@@ -335,7 +340,7 @@ mod tests {
         registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
 
         let t1 = t0 + Duration::from_secs(5);
-        registry.heartbeat("node-1", 2.0, 1024 * 1024 * 1024, vec![], t1).unwrap();
+        registry.heartbeat("node-1", 2.0, 1024 * 1024 * 1024, vec![], vec![], t1).unwrap();
 
         let statuses = registry.list(t1);
         assert_eq!(statuses[0].committed_cpu, 2.0);
@@ -359,12 +364,30 @@ mod tests {
                     crate::wire::JailHealth { name: "web-0".to_string(), running: true },
                     crate::wire::JailHealth { name: "web-1".to_string(), running: false },
                 ],
+                vec![],
                 now,
             )
             .unwrap();
 
         assert!(registry.is_jail_running("node-1", "web-0"));
         assert!(!registry.is_jail_running("node-1", "web-1"));
+    }
+
+    #[test]
+    fn heartbeat_records_ingress_health_and_list_reports_it() {
+        let mut registry = Registry::new("10.0.0.0/16".parse().unwrap());
+        let now = Instant::now();
+        registry.register("node-1".to_string(), "192.168.64.4:7621".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        let ingress = crate::wire::IngressHealth {
+            name: "blog".to_string(),
+            host: "example.com".to_string(),
+            backend_service: "hugo-site".to_string(),
+            backend_port: 8080,
+            cert_expires_at_unix: Some(1_800_000_000),
+        };
+        registry.heartbeat("node-1", 1.0, 512 * 1024 * 1024, vec![], vec![ingress.clone()], now).unwrap();
+        let statuses = registry.list(now);
+        assert_eq!(statuses[0].ingresses, vec![ingress]);
     }
 
     #[test]
@@ -387,11 +410,18 @@ mod tests {
         let t0 = Instant::now();
         registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
         registry
-            .heartbeat("node-1", 0.0, 0, vec![crate::wire::JailHealth { name: "web-0".to_string(), running: true }], t0)
+            .heartbeat(
+                "node-1",
+                0.0,
+                0,
+                vec![crate::wire::JailHealth { name: "web-0".to_string(), running: true }],
+                vec![],
+                t0,
+            )
             .unwrap();
 
         let t1 = t0 + Duration::from_secs(5);
-        registry.heartbeat("node-1", 0.0, 0, vec![], t1).unwrap();
+        registry.heartbeat("node-1", 0.0, 0, vec![], vec![], t1).unwrap();
 
         assert!(!registry.is_jail_running("node-1", "web-0"), "a heartbeat with no jails must clear the previous report");
     }

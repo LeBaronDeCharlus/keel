@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # PROVIDE: keel_agentd
-# REQUIRE: NETWORKING
+# REQUIRE: NETWORKING keel_controlplane
 # KEYWORD: shutdown
 
 . /etc/rc.subr
@@ -16,11 +16,45 @@ load_rc_config "$name"
 : ${keel_agentd_pool:="zroot"}
 : ${keel_agentd_state_dir:="/var/db/keel"}
 : ${keel_agentd_socket:="/var/run/keel-agentd.sock"}
+: ${keel_agentd_node_id:=""}
+: ${keel_agentd_control_plane_addr:=""}
+: ${keel_agentd_advertise_addr:=""}
+: ${keel_agentd_replicate_addr:=""}
+: ${keel_agentd_tls_ca_file:=""}
+: ${keel_agentd_tls_cert_file:=""}
+: ${keel_agentd_tls_key_file:=""}
+: ${keel_agentd_tls_crl_file:=""}
+: ${keel_agentd_public_iface:=""}
+: ${keel_agentd_dns_ovh_config:=""}
+: ${keel_agentd_acme_directory_url:=""}
+: ${keel_agentd_acme_account_key_file:=""}
 
 pidfile="/var/run/${name}.pid"
 command="/usr/sbin/daemon"
+
+# Built up rather than a single quoted string: each of these flags is only
+# passed when the operator has actually set the matching rc.conf variable,
+# since keel-agentd panics on startup if the control-plane/TLS/ACME flag
+# groups are only partially supplied (see keel-agentd/src/main.rs).
+cluster_flags=""
+[ -n "$keel_agentd_node_id" ] && cluster_flags="$cluster_flags --node-id $keel_agentd_node_id"
+[ -n "$keel_agentd_control_plane_addr" ] && cluster_flags="$cluster_flags --control-plane-addr $keel_agentd_control_plane_addr"
+[ -n "$keel_agentd_advertise_addr" ] && cluster_flags="$cluster_flags --advertise-addr $keel_agentd_advertise_addr"
+[ -n "$keel_agentd_replicate_addr" ] && cluster_flags="$cluster_flags --replicate-addr $keel_agentd_replicate_addr"
+[ -n "$keel_agentd_tls_ca_file" ] && cluster_flags="$cluster_flags --tls-ca-file $keel_agentd_tls_ca_file"
+[ -n "$keel_agentd_tls_cert_file" ] && cluster_flags="$cluster_flags --tls-cert-file $keel_agentd_tls_cert_file"
+[ -n "$keel_agentd_tls_key_file" ] && cluster_flags="$cluster_flags --tls-key-file $keel_agentd_tls_key_file"
+[ -n "$keel_agentd_tls_crl_file" ] && cluster_flags="$cluster_flags --tls-crl-file $keel_agentd_tls_crl_file"
+[ -n "$keel_agentd_public_iface" ] && cluster_flags="$cluster_flags --public-iface $keel_agentd_public_iface"
+
+acme_flags=""
+[ -n "$keel_agentd_dns_ovh_config" ] && acme_flags="$acme_flags --dns-ovh-config $keel_agentd_dns_ovh_config"
+[ -n "$keel_agentd_acme_directory_url" ] && acme_flags="$acme_flags --acme-directory-url $keel_agentd_acme_directory_url"
+[ -n "$keel_agentd_acme_account_key_file" ] && acme_flags="$acme_flags --acme-account-key-file $keel_agentd_acme_account_key_file"
+
 command_args="-r -P ${pidfile} -S -T ${name} -- \
   ${keel_agentd_bin} --pool ${keel_agentd_pool} \
-  --state-dir ${keel_agentd_state_dir} --socket ${keel_agentd_socket}"
+  --state-dir ${keel_agentd_state_dir} --socket ${keel_agentd_socket} \
+  ${cluster_flags} ${acme_flags}"
 
 run_rc_command "$1"

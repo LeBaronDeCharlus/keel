@@ -199,6 +199,7 @@ fn main() {
             replicate_addr.clone(),
             control_plane_addr,
             Duration::from_secs(5),
+            config.state_dir.clone(),
             capacity_cpu,
             capacity_memory,
             std::sync::Arc::clone(&reloading_tls),

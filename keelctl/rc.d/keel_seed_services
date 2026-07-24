@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# PROVIDE: keel_seed_services
+# REQUIRE: keel_controlplane keel_agentd
+# KEYWORD:
+
+. /etc/rc.subr
+
+name="keel_seed_services"
+rcvar="keel_seed_services_enable"
+start_cmd="keel_seed_services_run"
+stop_cmd=":"
+status_cmd=":"
+
+load_rc_config "$name"
+
+: ${keel_seed_services_enable:="NO"}
+: ${keel_seed_services_bin:="/usr/local/bin/keelctl"}
+: ${keel_seed_services_dir:="/usr/local/etc/keel/services"}
+: ${keel_seed_services_control_plane_addr:="127.0.0.1:7620"}
+: ${keel_seed_services_tls_ca_file:="/etc/keel/ca.crt"}
+: ${keel_seed_services_tls_cert_file:="/etc/keel/admin.crt"}
+: ${keel_seed_services_tls_key_file:="/etc/keel/admin.key"}
+: ${keel_seed_services_tls_crl_file:="/etc/keel/crl.pem"}
+
+# keel-controlplane keeps Service/Placement/Address state only in memory
+# (see keel-controlplane/src/addresses.rs's doc comment: "no persistence,
+# forgotten on restart"): every restart forgets which Services exist at
+# all, so any Service spec that needs to survive a reboot has to be
+# re-applied once the control plane is back up. Re-applying an unchanged
+# spec is a no-op if the control plane already knows about it, so running
+# this on every boot is safe even when nothing actually restarted.
+keel_seed_services_run()
+{
+	[ -d "${keel_seed_services_dir}" ] || return 0
+	for spec in "${keel_seed_services_dir}"/*.yaml; do
+		[ -e "${spec}" ] || continue
+		attempt=0
+		while [ ${attempt} -lt 10 ]; do
+			if "${keel_seed_services_bin}" \
+				--control-plane-addr "${keel_seed_services_control_plane_addr}" \
+				--tls-ca-file "${keel_seed_services_tls_ca_file}" \
+				--tls-cert-file "${keel_seed_services_tls_cert_file}" \
+				--tls-key-file "${keel_seed_services_tls_key_file}" \
+				--tls-crl-file "${keel_seed_services_tls_crl_file}" \
+				apply -f "${spec}"; then
+				echo "keel_seed_services: applied ${spec}"
+				break
+			fi
+			attempt=$((attempt + 1))
+			sleep 2
+		done
+	done
+}
+
+run_rc_command "$1"
