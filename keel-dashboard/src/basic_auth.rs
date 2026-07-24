@@ -58,4 +58,11 @@ mod tests {
     fn missing_colon_separator_fails() {
         assert!(!check(Some(&format!("Basic {}", STANDARD.encode("no-colon-here"))), "admin", "hunter2"));
     }
+
+    #[test]
+    fn invalid_utf8_payload_fails() {
+        // Base64 encode bytes that are NOT valid UTF-8 (lone continuation byte 0xFF)
+        let invalid_utf8_header = format!("Basic {}", STANDARD.encode([0xFFu8]));
+        assert!(!check(Some(&invalid_utf8_header), "admin", "hunter2"));
+    }
 }
