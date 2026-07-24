@@ -151,7 +151,26 @@ fn main() {
         config.socket.display()
     );
 
-    let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), config.pool.clone());
+    // Built ahead of `worker::spawn` (rather than inside the cluster-mode
+    // block below, where it used to live) because the worker itself now
+    // needs it immediately: `Command::ResumeReplicationLoops` just below
+    // re-spawns any replication loops left over from before a restart, and
+    // those loops need real TLS to authenticate to their standby, not a
+    // config that only becomes available later in this function.
+    let reloading_tls: Option<std::sync::Arc<keel_agentd::tls::ReloadingTls>> = match (
+        config.tls_cert_file.clone(),
+        config.tls_key_file.clone(),
+        config.tls_ca_file.clone(),
+        config.tls_crl_file.clone(),
+    ) {
+        (Some(cert_file), Some(key_file), Some(ca_file), Some(crl_file)) => Some(
+            keel_agentd::tls::ReloadingTls::spawn(cert_file, key_file, ca_file, crl_file, Duration::from_secs(30))
+                .unwrap_or_else(|e| panic!("failed to load TLS configuration: {e}")),
+        ),
+        _ => None,
+    };
+
+    let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), config.pool.clone(), reloading_tls.clone());
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     commands
         .send(Command::ResumeReplicationLoops(resume_tx))
@@ -161,35 +180,16 @@ fn main() {
     let replica_targets = keel_agentd::ReplicaTargetRegistry::load(config.state_dir.clone())
         .expect("failed to load replica-target state");
 
-    if let (
-        Some(node_id),
-        Some(control_plane_addr),
-        Some(advertise_addr),
-        Some(replicate_addr),
-        Some(ca_file),
-        Some(cert_file),
-        Some(key_file),
-        Some(crl_file),
-    ) = (
+    if let (Some(node_id), Some(control_plane_addr), Some(advertise_addr), Some(replicate_addr)) = (
         config.node_id.clone(),
         config.control_plane_addr.clone(),
         config.advertise_addr.clone(),
         config.replicate_addr.clone(),
-        config.tls_ca_file.clone(),
-        config.tls_cert_file.clone(),
-        config.tls_key_file.clone(),
-        config.tls_crl_file.clone(),
     ) {
         let (capacity_cpu, capacity_memory) = keel_agentd::capacity::detect()
             .unwrap_or_else(|e| panic!("failed to detect node capacity via sysctl: {e}"));
-        let reloading_tls = keel_agentd::tls::ReloadingTls::spawn(
-            cert_file,
-            key_file,
-            ca_file,
-            crl_file,
-            Duration::from_secs(30),
-        )
-        .unwrap_or_else(|e| panic!("failed to load TLS configuration: {e}"));
+        let reloading_tls =
+            reloading_tls.expect("validated in parse_args_from: control_plane_addr requires the TLS flags too");
         eprintln!(
             "keel-agentd: registering with control plane at {control_plane_addr} as node '{node_id}' ({advertise_addr}), capacity {capacity_cpu} cores / {capacity_memory} bytes"
         );
@@ -215,8 +215,9 @@ fn main() {
         let tcp_pod_cidr_slot = pod_cidr_slot.clone();
         let tcp_service_vips = service_vips.clone();
         let tcp_replica_targets = replica_targets.clone();
+        let tcp_reloading_tls = std::sync::Arc::clone(&reloading_tls);
         thread::spawn(move || {
-            keel_agentd::http::run_tls(tcp_listener, tcp_commands, reloading_tls, tcp_pod_cidr_slot, tcp_service_vips, tcp_replica_targets)
+            keel_agentd::http::run_tls(tcp_listener, tcp_commands, tcp_reloading_tls, tcp_pod_cidr_slot, tcp_service_vips, tcp_replica_targets)
         });
 
         eprintln!("keel-agentd: serving replication listener on {replicate_addr}");
@@ -225,7 +226,9 @@ fn main() {
         let replicate_zfs = zfs.clone();
         let replicate_pool = config.pool.clone();
         let replicate_targets = replica_targets.clone();
-        thread::spawn(move || keel_agentd::replication::run(replicate_listener, replicate_zfs, replicate_pool, replicate_targets));
+        thread::spawn(move || {
+            keel_agentd::replication::run(replicate_listener, replicate_zfs, replicate_pool, replicate_targets, reloading_tls)
+        });
     }
 
     let timer_commands = commands.clone();

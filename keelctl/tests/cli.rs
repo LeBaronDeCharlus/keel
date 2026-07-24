@@ -31,7 +31,7 @@ fn start_test_server(name: &str) -> PathBuf {
         keel_agentd::ServiceVipSlot::new(),
     )
     .unwrap();
-    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
     // A short, non-descriptive filename (not the full test name) — macOS/BSD
     // cap Unix socket paths at ~104 bytes (SUN_LEN), and the default macOS
@@ -92,7 +92,7 @@ fn start_test_agentd_tcp(name: &str) -> String {
         keel_agentd::ServiceVipSlot::new(),
     )
     .unwrap();
-    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();

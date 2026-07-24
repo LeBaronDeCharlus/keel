@@ -377,6 +377,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         )
         .1
     }
@@ -548,6 +549,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let _handle = spawn(
             "node-1".to_string(),
@@ -590,7 +592,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = mpsc::channel();
         commands
@@ -675,7 +677,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let _handle = spawn(
             "node-1".to_string(),
@@ -727,6 +729,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         // Port 1 on loopback: guaranteed nothing is listening there, so the
@@ -810,6 +813,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let _handle = spawn(
             "node-1".to_string(),
@@ -852,6 +856,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         let _handle = spawn(
@@ -941,6 +946,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         let _handle = spawn(
@@ -1014,6 +1020,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         let _handle = spawn(
