@@ -133,6 +133,7 @@ pub enum Command {
     RecordReplicaAddress(String, String, std::net::Ipv4Addr, Sender<()>),
     ReleaseReplicaAddress(String, Sender<()>),
     RecordStandby(String, String, Sender<()>),
+    RemoveStandby(String, Sender<()>),
     RecordPendingFence(String, String, Sender<()>),
     PendingFencesForNode(String, Sender<Vec<String>>),
     RemovePendingFence(String, Sender<()>),
@@ -151,10 +152,31 @@ pub fn spawn(
     let (tx, rx) = mpsc::channel::<Command>();
     let handle = thread::spawn(move || {
         for command in rx {
-            handle_command(&mut registry, &mut placements, &mut services, &mut used_addresses, &mut standbys, &mut pending_fences, &state_dir, command);
+            run_catching_panics(std::panic::AssertUnwindSafe(|| {
+                handle_command(&mut registry, &mut placements, &mut services, &mut used_addresses, &mut standbys, &mut pending_fences, &state_dir, command);
+            }));
         }
     });
     (handle, tx)
+}
+
+/// Runs `f`, catching any panic so the worker's command loop can move on to
+/// the next command instead of the whole thread dying forever on the first
+/// bug anywhere in `handle_command` -- previously an unrecovered panic here
+/// silently and permanently broke every future command, with the HTTP
+/// server still up and looking alive. The panicking command's own reply
+/// channel is simply dropped (its caller already has to handle a closed
+/// channel as a defined failure mode); every command after it is still
+/// served normally.
+fn run_catching_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+    if let Err(payload) = std::panic::catch_unwind(f) {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        eprintln!("keel-controlplane: worker thread recovered from a panic while handling a command: {message}");
+    }
 }
 
 fn persist_placements(placements: &Placements, state_dir: &Path) {
@@ -282,7 +304,7 @@ fn handle_command(
             // above for the known compute/execute race and why it's an
             // accepted limitation for this milestone rather than a bug.
             let now = Instant::now();
-            let alive_nodes: Vec<scheduler::NodeResources> = registry
+            let mut alive_nodes: Vec<scheduler::NodeResources> = registry
                 .list(now)
                 .into_iter()
                 .filter(|s| s.status == NodeState::Alive)
@@ -350,6 +372,23 @@ fn handle_command(
                     let Ok(node_addr) = registry.resolve(&node_id, now) else { continue };
                     working_used.record(replica_name.clone(), node_id.clone(), address);
                     busy.insert(node_id.clone());
+                    // Reflect this replica's own cost immediately, so the
+                    // next pick in this same pass (whether another replica
+                    // of this service once every node is busy, or another
+                    // service reconciled right after) sees this node's real
+                    // remaining headroom instead of the stale, pre-pass
+                    // value -- otherwise every remaining missing replica in
+                    // the pass can keep piling onto whichever node looked
+                    // best before the pass started, unaware of what it just
+                    // committed here.
+                    if let Some(n) = alive_nodes.iter_mut().find(|n| n.id == node_id) {
+                        if let Ok(cpu_cost) = keel_spec::parse_cpu_cores(&record.template.resources.cpu) {
+                            n.committed_cpu += cpu_cost;
+                        }
+                        if let Ok(memory_cost) = keel_spec::parse_memory_bytes(&record.template.resources.memory) {
+                            n.committed_memory += memory_cost;
+                        }
+                    }
 
                     let (standby_node_id, standby_addr) = if record.template.volumes.is_empty() {
                         (None, None)
@@ -450,6 +489,11 @@ fn handle_command(
         }
         Command::RecordStandby(replica_name, node_id, reply) => {
             standbys.set(replica_name, node_id);
+            persist_standbys(standbys, state_dir);
+            let _ = reply.send(());
+        }
+        Command::RemoveStandby(replica_name, reply) => {
+            standbys.remove(&replica_name);
             persist_standbys(standbys, state_dir);
             let _ = reply.send(());
         }
@@ -582,6 +626,37 @@ mod tests {
     use crate::addresses::UsedAddresses;
     use crate::services::{ApplyServiceError, Owner, Services};
     use keel_spec::{JailTemplate, ResourcesSpec, RestartPolicy, TemplateNetworkSpec, VolumeMount};
+
+    #[test]
+    fn run_catching_panics_contains_a_panic_instead_of_propagating_it() {
+        // Proves the actual mechanism `spawn`'s command loop relies on: a
+        // panic inside the wrapped closure is caught here, not unwound
+        // further up the stack. If this were not true, a single bad
+        // command would still kill the whole worker thread forever, which
+        // is exactly the bug this exists to fix.
+        //
+        // Rust's default panic hook still prints "thread ... panicked at
+        // ..." to stderr for the deliberate panic below even though it's
+        // caught (the hook runs before unwinding starts, catch_unwind
+        // can't suppress it) -- expected, harmless noise from this one
+        // test, not swapped out globally since `cargo test` runs this
+        // binary's tests concurrently and a global hook change here could
+        // swallow an unrelated test's genuine panic message.
+        run_catching_panics(std::panic::AssertUnwindSafe(|| {
+            panic!("deliberate panic for this test");
+        }));
+        // Reaching this line at all is the assertion: the panic above did
+        // not propagate out of `run_catching_panics`.
+    }
+
+    #[test]
+    fn run_catching_panics_still_runs_a_non_panicking_closure_normally() {
+        let mut ran = false;
+        run_catching_panics(std::panic::AssertUnwindSafe(|| {
+            ran = true;
+        }));
+        assert!(ran, "a closure that doesn't panic must still run to completion");
+    }
 
     fn test_cluster_cidr() -> ipnet::Ipv4Net {
         "10.0.0.0/16".parse().unwrap()
@@ -1116,6 +1191,49 @@ mod tests {
         let services = Services::load(&state_dir, test_service_cidr());
         assert!(services.get("web").is_some(), "ApplyService must survive a restart");
         assert!(services.get("api").is_none(), "DeleteService must survive a restart");
+    }
+
+    #[test]
+    fn reconcile_services_tracks_headroom_spent_earlier_in_the_same_pass() {
+        // Both nodes start with identical, empty capacity. `svc-a` is
+        // scheduled first in this pass (services are reconciled in name
+        // order) and consumes most of node-1's capacity. Without per-pass
+        // headroom tracking, `svc-b`'s pick a moment later still sees
+        // node-1's *original* (stale) headroom score and ties with the
+        // untouched node-2, with the alphabetical tie-break piling svc-b
+        // onto the already-heavily-loaded node-1 -- even though node-2 is
+        // still completely idle. With tracking, node-1's just-spent
+        // headroom is visible immediately, and svc-b correctly lands on
+        // node-2 instead.
+        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
+
+        let mut heavy = template();
+        heavy.resources.cpu = "3".to_string();
+        apply_service_with_template(&commands, "svc-a", 1, heavy);
+
+        let mut light = template();
+        light.resources.cpu = "1".to_string();
+        apply_service_with_template(&commands, "svc-b", 1, light);
+
+        let actions = reconcile(&commands);
+        assert_eq!(actions.len(), 2);
+        let node_for = |replica_name: &str| {
+            actions
+                .iter()
+                .find_map(|a| match a {
+                    ReplicaAction::Schedule { replica_name: r, node_id, .. } if r == replica_name => Some(node_id.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no Schedule action found for {replica_name}, got: {actions:?}"))
+        };
+        let svc_a_node = node_for("svc-a-0");
+        let svc_b_node = node_for("svc-b-0");
+        assert_ne!(
+            svc_a_node, svc_b_node,
+            "svc-b must not pile onto the same node svc-a just loaded in this pass while an idle node sits available, got: {actions:?}"
+        );
     }
 
     #[test]

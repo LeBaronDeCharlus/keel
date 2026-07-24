@@ -70,6 +70,17 @@ impl Registry {
                 conflicting_node_id: conflicting_id.clone(),
             });
         }
+        // A re-registration (the common case: a routine agentd reconnect,
+        // not a fresh node) must not reset the scheduler's view of what
+        // this node is already running back to "100% free, nothing
+        // running" -- that view is only ever corrected by this node's own
+        // next heartbeat, which arrives moments later anyway.
+        let (committed_cpu, committed_memory, running_jails, ingresses) = match self.nodes.get(&id) {
+            Some(existing) => {
+                (existing.committed_cpu, existing.committed_memory, existing.running_jails.clone(), existing.ingresses.clone())
+            }
+            None => (0.0, 0, HashMap::new(), Vec::new()),
+        };
         self.nodes.insert(
             id,
             NodeRecord {
@@ -78,11 +89,11 @@ impl Registry {
                 last_heartbeat: now,
                 capacity_cpu,
                 capacity_memory,
-                committed_cpu: 0.0,
-                committed_memory: 0,
+                committed_cpu,
+                committed_memory,
                 pod_cidr,
-                running_jails: HashMap::new(),
-                ingresses: Vec::new(),
+                running_jails,
+                ingresses,
             },
         );
         Ok(pod_cidr)
@@ -341,6 +352,29 @@ mod tests {
         assert_eq!(statuses[0].capacity_memory, 8 * 1024 * 1024 * 1024);
         assert_eq!(statuses[0].committed_cpu, 0.0);
         assert_eq!(statuses[0].committed_memory, 0);
+    }
+
+    #[test]
+    fn re_registering_an_existing_node_preserves_its_committed_resources_and_running_jails() {
+        let mut registry = Registry::new(test_cluster_cidr());
+        let t0 = Instant::now();
+        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+
+        let t1 = t0 + Duration::from_secs(5);
+        registry
+            .heartbeat("node-1", 2.0, 1024 * 1024 * 1024, vec![crate::wire::JailHealth { name: "web-0".to_string(), running: true }], vec![], t1)
+            .unwrap();
+
+        // A routine agentd reconnect re-registers with the same id - this
+        // must not reset the scheduler's view of this node back to
+        // "100% free, nothing running" until the next real heartbeat.
+        let t2 = t1 + Duration::from_secs(1);
+        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t2).unwrap();
+
+        let statuses = registry.list(t2);
+        assert_eq!(statuses[0].committed_cpu, 2.0, "re-registration must not zero committed_cpu");
+        assert_eq!(statuses[0].committed_memory, 1024 * 1024 * 1024, "re-registration must not zero committed_memory");
+        assert!(registry.is_jail_running("node-1", "web-0"), "re-registration must not forget running jails");
     }
 
     #[test]

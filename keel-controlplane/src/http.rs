@@ -530,6 +530,13 @@ fn execute_replica_actions(actions: Vec<ReplicaAction>, commands: &Sender<Comman
                     Ok((status, _)) if (200..300).contains(&status) => {
                         send_remove_placement(&replica_name, commands);
                         send_release_replica_address(&replica_name, commands);
+                        // A torn-down replica's standby pin and any open
+                        // fence against it are stale the moment it's gone
+                        // -- left behind otherwise, a future replica reusing
+                        // this same name could inherit either and feed
+                        // straight into an unrelated force-repin.
+                        send_remove_standby(&replica_name, commands);
+                        send_remove_pending_fence(&replica_name, commands);
                     }
                     Ok((status, resp_body)) => eprintln!(
                         "keel-controlplane: failed to tear down replica '{replica_name}' on node '{node_id}': status {status}, body {:?}",
@@ -554,6 +561,13 @@ fn send_record_replica_address(name: &str, node_id: &str, address: std::net::Ipv
 fn send_record_standby(replica_name: &str, standby_node_id: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
     if commands.send(Command::RecordStandby(replica_name.to_string(), standby_node_id.to_string(), reply_tx)).is_ok() {
+        let _ = reply_rx.recv();
+    }
+}
+
+fn send_remove_standby(replica_name: &str, commands: &Sender<Command>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if commands.send(Command::RemoveStandby(replica_name.to_string(), reply_tx)).is_ok() {
         let _ = reply_rx.recv();
     }
 }
@@ -1713,6 +1727,43 @@ mod tests {
     }
 
     #[test]
+    fn delete_service_removes_the_standby_and_pending_fence_of_every_torn_down_replica() {
+        // Neither standbys nor pending_fences ever get cleaned up on
+        // teardown today: if a replica name is ever reused, a stale entry
+        // from this incarnation can resurface and feed into a future
+        // force-repin. Proves both are gone (on disk, not just in a
+        // freshly re-queried in-memory view) after the service (and its
+        // one stateful replica) is deleted.
+        let (cp_addr, commands, state_dir) = start_test_server_with_commands_and_state_dir();
+        let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-a", &node_addr);
+        send_request(&cp_addr, "PUT", "/services/db", &stateful_service_yaml("db", 1));
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: db-0\n    running: true\n",
+        );
+
+        let (tx, rx) = mpsc::channel();
+        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        rx.recv().unwrap();
+        let (tx, rx) = mpsc::channel();
+        commands.send(Command::RecordPendingFence("db-0".to_string(), "node-a".to_string(), tx)).unwrap();
+        rx.recv().unwrap();
+
+        let (status, _) = send_request(&cp_addr, "DELETE", "/services/db", "");
+        assert_eq!(status, 200);
+
+        let (tx, rx) = mpsc::channel();
+        commands.send(Command::PendingFencesForNode("node-a".to_string(), tx)).unwrap();
+        assert_eq!(rx.recv().unwrap(), Vec::<String>::new(), "pending fence for the torn-down replica must be gone");
+
+        let standbys: crate::standbys::Standbys = crate::store::load_or_default(&state_dir.join("standbys.yaml"));
+        assert_eq!(standbys.get("db-0"), None, "standby for the torn-down replica must be gone");
+    }
+
+    #[test]
     fn delete_service_on_an_unknown_name_returns_404() {
         let cp_addr = start_test_server();
         let (status, _) = send_request(&cp_addr, "DELETE", "/services/missing", "");
@@ -1781,8 +1832,14 @@ mod tests {
     }
 
     fn start_test_server_with_commands() -> (String, Sender<Command>) {
+        let (addr, commands, _state_dir) = start_test_server_with_commands_and_state_dir();
+        (addr, commands)
+    }
+
+    fn start_test_server_with_commands_and_state_dir() -> (String, Sender<Command>, PathBuf) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
+        let state_dir = fresh_state_dir();
         let (_worker_handle, commands) = worker::spawn(
             Registry::new("10.0.0.0/16".parse().unwrap()),
             Placements::new(),
@@ -1790,7 +1847,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
-            fresh_state_dir(),
+            state_dir.clone(),
         );
         let reloading_tls = tls::ReloadingTls::spawn(
             fixture("fixture-node.crt"),
@@ -1802,7 +1859,7 @@ mod tests {
         .unwrap();
         let commands_for_server = commands.clone();
         thread::spawn(move || run(listener, commands_for_server, reloading_tls));
-        (addr, commands)
+        (addr, commands, state_dir)
     }
 
     fn record_pending_fence(commands: &Sender<Command>, replica_name: &str, node_id: &str) {
