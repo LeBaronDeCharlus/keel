@@ -271,6 +271,9 @@ fn handle_command(
                 }
                 services.apply(name, replicas, template, port)
             })();
+            if result.is_ok() {
+                services.persist(state_dir);
+            }
             let _ = reply.send(result);
         }
         Command::ReconcileServices(reply) => {
@@ -429,6 +432,7 @@ fn handle_command(
                     })
                     .collect();
                 services.remove(&name);
+                services.persist(state_dir);
                 Ok(actions)
             };
             let _ = reply.send(result);

@@ -4,8 +4,9 @@ use ipnet::Ipv4Net;
 use keel_spec::JailTemplate;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::Ipv4Addr;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceRecord {
     pub desired_replicas: u32,
     pub template: JailTemplate,
@@ -50,7 +51,28 @@ pub enum ApplyServiceError {
 #[error("unknown service '{0}'")]
 pub struct UnknownService(pub String);
 
+#[derive(Default, Serialize, Deserialize)]
+struct ServicesState {
+    by_name: HashMap<String, ServiceRecord>,
+}
+
 impl Services {
+    /// Loads persisted service definitions from `state_dir`, pairing them
+    /// with `service_cidr` from the current process's own config - never
+    /// from disk, so a changed `--service-cidr` flag across a restart can
+    /// never be silently overridden by stale persisted data.
+    pub fn load(state_dir: &std::path::Path, service_cidr: Ipv4Net) -> Self {
+        let state: ServicesState = crate::store::load_or_default(&state_dir.join("services.yaml"));
+        Self { service_cidr, by_name: state.by_name }
+    }
+
+    pub fn persist(&self, state_dir: &std::path::Path) {
+        let state = ServicesState { by_name: self.by_name.clone() };
+        if let Err(e) = crate::store::save(&state_dir.join("services.yaml"), &state) {
+            eprintln!("keel-controlplane: failed to persist services.yaml: {e}");
+        }
+    }
+
     pub fn new(service_cidr: Ipv4Net) -> Self {
         Self { service_cidr, by_name: HashMap::new() }
     }
@@ -404,5 +426,39 @@ mod tests {
     #[test]
     fn pick_node_for_service_with_no_candidates_at_all_is_no_available_nodes() {
         assert_eq!(pick_node_for_service(vec![], &HashSet::new()), Err(scheduler::ScheduleError::NoAvailableNodes));
+    }
+
+    #[test]
+    fn load_uses_the_passed_in_service_cidr_not_whatever_was_persisted_last() {
+        let dir = std::env::temp_dir().join(format!("keel-controlplane-services-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut original = Services::new("10.0.250.0/24".parse().unwrap());
+        original.apply("web".to_string(), 1, template(), 8080).unwrap();
+        original.persist(&dir);
+
+        // A restart with a *different* --service-cidr flag: the loaded
+        // Services must use the new cidr, not silently keep serving the old
+        // one from disk.
+        let reloaded = Services::load(&dir, "10.0.251.0/24".parse().unwrap());
+        assert_eq!(reloaded.get("web").unwrap().desired_replicas, 1, "the persisted service itself must still be there");
+
+        let mut fresh_apply = reloaded;
+        // A fresh, never-before-seen service name must get a VIP inside the
+        // *new* cidr, proving service_cidr truly came from the argument.
+        fresh_apply.apply("api".to_string(), 1, template(), 8080).unwrap();
+        let vip = fresh_apply.get("api").unwrap().vip;
+        assert!(
+            "10.0.251.0/24".parse::<Ipv4Net>().unwrap().contains(&vip),
+            "expected the new service's VIP {vip} inside the newly-passed-in service_cidr, not the persisted one"
+        );
+    }
+
+    #[test]
+    fn load_on_a_missing_state_dir_returns_an_empty_services() {
+        let dir = std::env::temp_dir().join(format!("keel-controlplane-services-test-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let services = Services::load(&dir, test_service_cidr());
+        assert_eq!(services.list(), vec![]);
     }
 }
