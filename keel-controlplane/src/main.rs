@@ -13,6 +13,7 @@ struct Config {
     tls_cert_file: Option<PathBuf>,
     tls_key_file: Option<PathBuf>,
     tls_crl_file: Option<PathBuf>,
+    state_dir: PathBuf,
 }
 
 impl Default for Config {
@@ -25,6 +26,7 @@ impl Default for Config {
             tls_cert_file: None,
             tls_key_file: None,
             tls_crl_file: None,
+            state_dir: PathBuf::from("/var/db/keel-controlplane"),
         }
     }
 }
@@ -54,6 +56,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
             "--tls-cert-file" => config.tls_cert_file = Some(PathBuf::from(value)),
             "--tls-key-file" => config.tls_key_file = Some(PathBuf::from(value)),
             "--tls-crl-file" => config.tls_crl_file = Some(PathBuf::from(value)),
+            "--state-dir" => config.state_dir = PathBuf::from(value),
             other => panic!("unknown flag: {other}"),
         }
     }
@@ -90,17 +93,30 @@ fn main() {
     )
     .unwrap_or_else(|e| panic!("failed to load TLS configuration: {e}"));
 
-    eprintln!("keel-controlplane: starting (addr={})", config.addr);
+    eprintln!(
+        "keel-controlplane: starting (addr={}, state_dir={})",
+        config.addr,
+        config.state_dir.display()
+    );
 
-    let state_dir = std::path::PathBuf::from("/var/db/keel-controlplane");
+    let placements: Placements =
+        keel_controlplane::store::load_or_default(&config.state_dir.join("placements.yaml"));
+    let used_addresses: keel_controlplane::addresses::UsedAddresses =
+        keel_controlplane::store::load_or_default(&config.state_dir.join("used_addresses.yaml"));
+    let standbys: keel_controlplane::Standbys =
+        keel_controlplane::store::load_or_default(&config.state_dir.join("standbys.yaml"));
+    let pending_fences: keel_controlplane::PendingFences =
+        keel_controlplane::store::load_or_default(&config.state_dir.join("pending_fences.yaml"));
+    let services = keel_controlplane::Services::load(&config.state_dir, service_cidr);
+
     let (_worker_handle, commands) = worker::spawn(
         Registry::new(cluster_cidr),
-        Placements::new(),
-        keel_controlplane::Services::new(service_cidr),
-        keel_controlplane::addresses::UsedAddresses::new(),
-        keel_controlplane::Standbys::new(),
-        keel_controlplane::PendingFences::new(),
-        state_dir,
+        placements,
+        services,
+        used_addresses,
+        standbys,
+        pending_fences,
+        config.state_dir.clone(),
     );
 
     let listener = TcpListener::bind(&config.addr).expect("failed to bind TCP listener");
@@ -225,5 +241,32 @@ mod tests {
             "--tls-key-file", "/etc/keel/controlplane.key",
             "--tls-crl-file", "/etc/keel/crl.pem",
         ]));
+    }
+
+    #[test]
+    fn parses_the_state_dir_flag() {
+        let config = parse_args_from(args(&[
+            "--cluster-cidr", "10.0.0.0/16",
+            "--service-cidr", "10.0.250.0/24",
+            "--tls-ca-file", "/etc/keel/ca.crt",
+            "--tls-cert-file", "/etc/keel/controlplane.crt",
+            "--tls-key-file", "/etc/keel/controlplane.key",
+            "--tls-crl-file", "/etc/keel/crl.pem",
+            "--state-dir", "/custom/state/dir",
+        ]));
+        assert_eq!(config.state_dir, PathBuf::from("/custom/state/dir"));
+    }
+
+    #[test]
+    fn state_dir_defaults_when_not_given() {
+        let config = parse_args_from(args(&[
+            "--cluster-cidr", "10.0.0.0/16",
+            "--service-cidr", "10.0.250.0/24",
+            "--tls-ca-file", "/etc/keel/ca.crt",
+            "--tls-cert-file", "/etc/keel/controlplane.crt",
+            "--tls-key-file", "/etc/keel/controlplane.key",
+            "--tls-crl-file", "/etc/keel/crl.pem",
+        ]));
+        assert_eq!(config.state_dir, PathBuf::from("/var/db/keel-controlplane"));
     }
 }
