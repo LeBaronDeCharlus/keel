@@ -94,6 +94,7 @@ issue_leaf() {
     trap 'rm -f "$tmp_key" "$tmp_crt" "$tmp_csr" "$ext_file"' EXIT
 
     openssl genrsa -out "$tmp_key" 4096
+    chmod 600 "$tmp_key"
     openssl req -new -key "$tmp_key" -subj "/CN=$name" -out "$tmp_csr"
 
     if [ -n "$san_line" ]; then
@@ -133,6 +134,7 @@ case "$cmd" in
             echo "gen-certs: $OUT_DIR/ca.key already exists, reusing it"
         else
             openssl genrsa -out "$OUT_DIR/ca.key" 4096
+            chmod 600 "$OUT_DIR/ca.key"
             openssl req -x509 -new -nodes -key "$OUT_DIR/ca.key" -sha256 -days "$days" \
                 -subj "/CN=keel-cluster-ca" -out "$OUT_DIR/ca.crt"
             echo "gen-certs: wrote $OUT_DIR/ca.crt and $OUT_DIR/ca.key"

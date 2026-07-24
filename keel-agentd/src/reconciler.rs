@@ -9,6 +9,7 @@ use keel_net::NetManager;
 use keel_spec::{IngressSpec, JailSpec};
 use keel_zfs::ZfsManager;
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
@@ -547,7 +548,9 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         let crt_path = certs_dir.join(format!("{host}.crt"));
         let key_path = certs_dir.join(format!("{host}.key"));
         std::fs::write(&crt_path, &cert.cert_pem).map_err(|e| ReconcileError::Store(StoreError::Io(crt_path, e)))?;
-        std::fs::write(&key_path, &cert.key_pem).map_err(|e| ReconcileError::Store(StoreError::Io(key_path, e)))?;
+        std::fs::write(&key_path, &cert.key_pem).map_err(|e| ReconcileError::Store(StoreError::Io(key_path.clone(), e)))?;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| ReconcileError::Store(StoreError::Io(key_path, e)))?;
         Ok(())
     }
 
@@ -1753,6 +1756,21 @@ mod tests {
         let certs_dir = certs_dir_for(&reconciler);
         assert!(fs::read_to_string(certs_dir.join("example.com.crt")).unwrap().contains("example.com"));
         assert!(fs::read_to_string(certs_dir.join("example.com.key")).unwrap().contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn reconcile_certs_writes_the_issued_private_key_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = test_state_dir("reconcile_certs_writes_the_issued_private_key_with_owner_only_permissions");
+        let mut reconciler = test_reconciler_with_acme(&dir, keel_ingress::FakeAcmeClient::new(), keel_ingress::FakeDnsProvider::new());
+        reconciler.apply_ingress(sample_ingress_spec("blog", "example.com")).unwrap();
+
+        reconciler.reconcile_certs(1_800_000_000);
+
+        let certs_dir = certs_dir_for(&reconciler);
+        let key_mode = fs::metadata(certs_dir.join("example.com.key")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(key_mode, 0o600, "the issued private key must not be readable by group/other");
     }
 
     #[test]

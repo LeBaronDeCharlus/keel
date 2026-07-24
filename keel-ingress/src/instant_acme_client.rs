@@ -64,12 +64,7 @@ impl InstantAcmeClient {
 
         let serialized =
             serde_json::to_string(&credentials).map_err(|e| AcmeError::Request(format!("failed to serialize account credentials: {e}")))?;
-        if let Some(parent) = self.account_key_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AcmeError::Request(e.to_string()))?;
-        }
-        let tmp_path = self.account_key_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &serialized).map_err(|e| AcmeError::Request(e.to_string()))?;
-        std::fs::rename(&tmp_path, &self.account_key_path).map_err(|e| AcmeError::Request(e.to_string()))?;
+        persist_account_credentials(&self.account_key_path, &serialized)?;
 
         Ok(account)
     }
@@ -121,5 +116,54 @@ impl InstantAcmeClient {
         let cert_pem = order.poll_certificate(&retry_policy).await.map_err(|e| AcmeError::Request(e.to_string()))?;
 
         Ok(Cert { cert_pem, key_pem })
+    }
+}
+
+/// Persists the ACME account credentials (an account private key plus its
+/// server-issued `kid`) to `account_key_path` via temp-file-then-rename,
+/// owner-only permissions applied before the rename so the credentials are
+/// never briefly world-readable under their final name.
+fn persist_account_credentials(account_key_path: &std::path::Path, serialized: &str) -> Result<(), AcmeError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = account_key_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AcmeError::Request(e.to_string()))?;
+    }
+    let tmp_path = account_key_path.with_extension("tmp");
+    std::fs::write(&tmp_path, serialized).map_err(|e| AcmeError::Request(e.to_string()))?;
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| AcmeError::Request(e.to_string()))?;
+    std::fs::rename(&tmp_path, account_key_path).map_err(|e| AcmeError::Request(e.to_string()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn test_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("keel-ingress-acme-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("acme-account.json")
+    }
+
+    #[test]
+    fn persist_account_credentials_writes_owner_only_permissions() {
+        let path = test_path("owner-only-perms");
+
+        persist_account_credentials(&path, r#"{"kid":"https://example.com/acct/1"}"#).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "persisted ACME account credentials must not be readable by group/other");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"kid":"https://example.com/acct/1"}"#);
+    }
+
+    #[test]
+    fn persist_account_credentials_creates_missing_parent_directories() {
+        let path = test_path("missing-parent").parent().unwrap().join("nested").join("acme-account.json");
+
+        persist_account_credentials(&path, "{}").unwrap();
+
+        assert!(path.is_file());
     }
 }
