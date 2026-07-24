@@ -168,6 +168,12 @@ fn persist_used_addresses(used_addresses: &UsedAddresses, state_dir: &Path) {
     }
 }
 
+fn persist_standbys(standbys: &Standbys, state_dir: &Path) {
+    if let Err(e) = crate::store::save(&state_dir.join("standbys.yaml"), standbys) {
+        eprintln!("keel-controlplane: failed to persist standbys.yaml: {e}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     registry: &mut Registry,
@@ -433,6 +439,7 @@ fn handle_command(
         }
         Command::RecordStandby(replica_name, node_id, reply) => {
             standbys.set(replica_name, node_id);
+            persist_standbys(standbys, state_dir);
             let _ = reply.send(());
         }
         Command::RecordPendingFence(replica_name, node_id, reply) => {
