@@ -6,6 +6,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod services;
 pub mod standbys;
+pub mod store;
 pub mod subnet;
 pub mod tls;
 pub mod wire;
