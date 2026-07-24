@@ -37,14 +37,32 @@ impl BackoffState {
     /// a successful `start_command` carries no information about whether
     /// the process will keep running, so the cooldown must still be armed.
     pub fn record_attempt(&mut self, now: Instant) {
+        self.last_started_at = Some(now);
+        self.next_retry_at = Some(now + self.current_delay);
+        self.current_delay = (self.current_delay * 2).min(MAX_DELAY);
+    }
+
+    /// Call this whenever the jail is actually observed running (the
+    /// "exists && running" happy path in `reconcile_one`, on every tick,
+    /// not just once) — proactively resets the escalated delay back to
+    /// `INITIAL_DELAY` once the jail has been confirmed running for at
+    /// least `RESET_UPTIME_THRESHOLD` since its last (re)start attempt.
+    ///
+    /// This is the only place genuine uptime is observable. A reconciler
+    /// never retries before its own armed cooldown, so the gap between
+    /// successive `record_attempt` calls is mechanically >= the delay just
+    /// armed — using that gap as a stable-uptime signal (as this used to)
+    /// meant escalation could never survive much past
+    /// `RESET_UPTIME_THRESHOLD` of delay: once armed delay reached it, every
+    /// subsequent attempt looked like "plenty of uptime" and reset,
+    /// oscillating short delays forever instead of ever reaching
+    /// `MAX_DELAY` for a jail that never actually ran successfully.
+    pub fn note_running(&mut self, now: Instant) {
         if let Some(last) = self.last_started_at {
             if now.saturating_duration_since(last) >= RESET_UPTIME_THRESHOLD {
                 self.current_delay = INITIAL_DELAY;
             }
         }
-        self.last_started_at = Some(now);
-        self.next_retry_at = Some(now + self.current_delay);
-        self.current_delay = (self.current_delay * 2).min(MAX_DELAY);
     }
 
     /// Read-only snapshot for the HTTP API's `get`/`list` — reports the
@@ -93,15 +111,59 @@ mod tests {
     }
 
     #[test]
-    fn backoff_resets_after_sustained_uptime() {
+    fn backoff_resets_after_confirmed_running_uptime() {
         let mut state = BackoffState::new();
         let t0 = Instant::now();
         state.record_attempt(t0); // current_delay becomes 2s after this
-        // Simulate the jail running fine for 60+ seconds before failing again.
+
+        // The jail is actually observed running (reconcile_one's "exists &&
+        // running" happy path) continuously for 60+ seconds since the
+        // attempt above -- the only genuine signal of real uptime.
         let t1 = t0 + Duration::from_secs(61);
+        state.note_running(t1);
+
+        // It then crashes again: the escalated delay must have been reset
+        // by the confirmed uptime, not still be climbing from the earlier
+        // failure.
         state.record_attempt(t1); // should reset to 1s (not escalate to 4s) before doubling to 2s
         assert!(!state.can_retry(t1 + Duration::from_millis(500)));
         assert!(state.can_retry(t1 + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn note_running_before_sixty_seconds_of_uptime_does_not_reset_the_escalation() {
+        let mut state = BackoffState::new();
+        let t0 = Instant::now();
+        state.record_attempt(t0); // current_delay becomes 2s after this
+        state.record_attempt(t0 + Duration::from_secs(1)); // current_delay becomes 4s
+
+        // Only 30s of confirmed uptime -- must not reset yet.
+        state.note_running(t0 + Duration::from_secs(31));
+        state.record_attempt(t0 + Duration::from_secs(31));
+        assert!(!state.can_retry(t0 + Duration::from_secs(31) + Duration::from_secs(3)));
+        assert!(state.can_retry(t0 + Duration::from_secs(31) + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn backoff_escalates_to_the_cap_under_a_realistic_retry_cadence_without_spuriously_resetting() {
+        // Reproduces a real bug: a reconciler never retries before its own
+        // armed cooldown, so the gap between successive `record_attempt`
+        // calls is mechanically >= the delay just armed. If `record_attempt`
+        // itself treated "long gap since the last attempt" as proof of
+        // stable uptime (rather than requiring an explicit `note_running`
+        // observation), escalation would never survive past ~60s of delay --
+        // oscillating between short delays forever instead of ever reaching
+        // the 5-minute cap, for a jail that never actually ran successfully
+        // even once.
+        let mut state = BackoffState::new();
+        let mut now = Instant::now();
+        for _ in 0..12 {
+            let delay = state.status(now).current_delay_secs.unwrap_or(1);
+            now += Duration::from_secs(delay);
+            state.record_attempt(now);
+        }
+        assert!(!state.can_retry(now + Duration::from_secs(299)));
+        assert!(state.can_retry(now + Duration::from_secs(300)));
     }
 
     #[test]

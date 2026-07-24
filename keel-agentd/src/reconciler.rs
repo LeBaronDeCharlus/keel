@@ -582,6 +582,10 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         } else {
             let running = self.jails.is_running(&jail_name)?;
             if running {
+                // The only place genuine uptime is observable — see
+                // `BackoffState::note_running`'s own doc comment for why
+                // this can't be inferred from attempt timing alone.
+                self.backoff.get_mut(name).unwrap().note_running(now);
                 let pcpu_percent =
                     keel_spec::cores_to_pcpu_percent(keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)?);
                 let memory_bytes = keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)?;
