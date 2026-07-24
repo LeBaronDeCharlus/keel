@@ -131,6 +131,16 @@ impl Registry {
         self.nodes.get(node_id).and_then(|r| r.replicate_addr.clone())
     }
 
+    /// The node's last-registered address, with no aliveness check --
+    /// deliberately bypassing `DEAD_THRESHOLD`. Used only by the immediate
+    /// force-repin fencing push: the entire point is attempting to reach a
+    /// node the heartbeat-derived state currently calls "dead," in case
+    /// it's actually alive and only failing to heartbeat to the control
+    /// plane specifically.
+    pub fn last_known_addr(&self, node_id: &str) -> Option<String> {
+        self.nodes.get(node_id).map(|r| r.addr.clone())
+    }
+
     pub fn list(&self, now: Instant) -> Vec<NodeStatus> {
         let mut statuses: Vec<NodeStatus> = self
             .nodes
@@ -462,5 +472,26 @@ mod tests {
     fn replicate_addr_on_an_unregistered_node_is_none() {
         let registry = Registry::new(test_cluster_cidr());
         assert_eq!(registry.replicate_addr("missing"), None);
+    }
+
+    #[test]
+    fn last_known_addr_returns_the_registered_address_regardless_of_aliveness() {
+        let mut registry = Registry::new(test_cluster_cidr());
+        let t0 = Instant::now();
+        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+
+        // Confirm it reports Dead at this point (the whole reason
+        // last_known_addr needs to bypass this check)...
+        let past_threshold = t0 + DEAD_THRESHOLD;
+        assert!(matches!(registry.resolve("node-1", past_threshold), Err(ResolveError::Dead { .. })));
+
+        // ...yet the address is still returned.
+        assert_eq!(registry.last_known_addr("node-1"), Some("10.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn last_known_addr_on_an_unknown_node_is_none() {
+        let registry = Registry::new(test_cluster_cidr());
+        assert_eq!(registry.last_known_addr("missing"), None);
     }
 }
