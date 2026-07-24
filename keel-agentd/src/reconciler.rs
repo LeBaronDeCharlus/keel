@@ -91,9 +91,12 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
 
     pub fn apply(&mut self, spec: JailSpec) -> Result<(), ReconcileError> {
         keel_spec::validate_name(&spec.metadata.name)?;
+        keel_spec::validate_image(&spec.spec.image)?;
+        keel_spec::validate_bridge(&spec.spec.network.bridge)?;
         keel_spec::validate_address(&spec.spec.network.address)?;
         keel_spec::parse_cpu_cores(&spec.spec.resources.cpu)?;
         keel_spec::parse_memory_bytes(&spec.spec.resources.memory)?;
+        keel_spec::validate_volumes(&spec.spec.volumes)?;
 
         let epair_ordinal = if let Some(existing) = self.records.get(&spec.metadata.name) {
             keel_spec::validate_transition(&existing.spec, &spec)?;
@@ -769,6 +772,35 @@ mod tests {
         let mut invalid = sample_spec("Invalid_Name");
         invalid.metadata.name = "Invalid_Name".to_string();
         let result = reconciler.apply(invalid);
+        assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn apply_rejects_an_image_outside_the_base_namespace() {
+        let dir = test_state_dir("apply_rejects_an_image_outside_the_base_namespace");
+        let mut reconciler = new_reconciler(dir);
+        let mut spec = sample_spec("web-1");
+        spec.spec.image = "jails/some-other-jail".to_string();
+        let result = reconciler.apply(spec);
+        assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn apply_rejects_a_bridge_outside_the_keel_naming_convention() {
+        let dir = test_state_dir("apply_rejects_a_bridge_outside_the_keel_naming_convention");
+        let mut reconciler = new_reconciler(dir);
+        let mut spec = sample_spec("web-1");
+        spec.spec.network.bridge = "lo0".to_string();
+        let result = reconciler.apply(spec);
+        assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn apply_rejects_a_volume_mount_path_with_a_traversal_segment() {
+        let dir = test_state_dir("apply_rejects_a_volume_mount_path_with_a_traversal_segment");
+        let mut reconciler = new_reconciler(dir);
+        let spec = sample_spec_with_volume("web-1", "web-data", "../../../etc", "1G");
+        let result = reconciler.apply(spec);
         assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
     }
 

@@ -22,4 +22,10 @@ pub enum SpecError {
     InvalidHost(String),
     #[error("invalid email '{0}': must be a syntactically well-formed email address")]
     InvalidEmail(String),
+    #[error("invalid image '{0}': must start with 'base/' followed by lowercase alphanumeric segments separated by '-', '.', or '/'")]
+    InvalidImage(String),
+    #[error("invalid mountPath '{0}': must be an absolute path with no '..' segments")]
+    InvalidMountPath(String),
+    #[error("invalid bridge '{0}': must be 'keel' followed by digits, e.g. 'keel0'")]
+    InvalidBridge(String),
 }
