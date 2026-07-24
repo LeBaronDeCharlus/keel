@@ -48,6 +48,7 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
             let Some(replicate_to) = status.record.spec.spec.replicate_to.clone() else {
                 continue; // retargeted away to nothing (shouldn't normally happen); just wait
             };
+            let generation = status.record.spec.spec.generation;
 
             let snapshot_id = format!("keel-repl-{tick}");
             if let Err(e) = zfs.snapshot(&dataset, &snapshot_id) {
@@ -55,7 +56,7 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
                 continue;
             }
 
-            match send_once(&zfs, &replica_name, &dataset, &snapshot_id, last_confirmed_sent.as_deref(), &replicate_to, &tls.client_config()) {
+            match send_once(&zfs, &replica_name, &dataset, &snapshot_id, last_confirmed_sent.as_deref(), &replicate_to, generation, &tls.client_config()) {
                 Ok(()) => {
                     // Prune the previous incremental base now that a new one
                     // has been confirmed: keep exactly one snapshot per
@@ -71,6 +72,18 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
                     eprintln!("keel-agentd: standby for replica '{replica_name}' rejected the incremental base; will send full next tick");
                     last_confirmed_sent = None;
                 }
+                Err(SendOnceError::Fenced) => {
+                    // The standby has already accepted a higher generation
+                    // than ours -- we've been promoted away from without
+                    // ever learning it (a real partition, not just a
+                    // failed connection). Replicating to this standby is no
+                    // longer ours to do; stop for good, the same as the
+                    // "record deleted" exit path above.
+                    eprintln!(
+                        "keel-agentd: replica '{replica_name}' generation {generation} was rejected as stale by its standby, stopping its replication loop"
+                    );
+                    return;
+                }
                 Err(SendOnceError::Io(e)) => {
                     eprintln!("keel-agentd: failed to replicate '{replica_name}' to {replicate_to}: {e}");
                 }
@@ -81,6 +94,7 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
 
 enum SendOnceError {
     NeedFull,
+    Fenced,
     Io(String),
 }
 
@@ -91,17 +105,21 @@ fn send_once<Z: ZfsManager>(
     snapshot_id: &str,
     base: Option<&str>,
     replicate_to: &str,
+    generation: u64,
     client_config: &Arc<rustls::ClientConfig>,
 ) -> Result<(), SendOnceError> {
     let server_name = crate::tls::server_name_from_addr(replicate_to).map_err(SendOnceError::Io)?;
     let tcp_stream = TcpStream::connect(replicate_to).map_err(|e| SendOnceError::Io(e.to_string()))?;
     let conn = ClientConnection::new(Arc::clone(client_config), server_name).map_err(|e| SendOnceError::Io(e.to_string()))?;
     let mut stream = StreamOwned::new(conn, tcp_stream);
-    replication::write_header(&mut stream, replica_name, snapshot_id, base).map_err(|e| SendOnceError::Io(e.to_string()))?;
+    replication::write_header(&mut stream, replica_name, snapshot_id, base, generation).map_err(|e| SendOnceError::Io(e.to_string()))?;
     let mut ack = [0u8; 1];
     stream.read_exact(&mut ack).map_err(|e| SendOnceError::Io(e.to_string()))?;
     if ack[0] == ACK_NEED_FULL {
         return Err(SendOnceError::NeedFull);
+    }
+    if ack[0] == replication::ACK_STALE_GENERATION {
+        return Err(SendOnceError::Fenced);
     }
     zfs.send_snapshot(dataset, snapshot_id, base, &mut stream).map_err(|e| SendOnceError::Io(e.to_string()))?;
     stream.sock.shutdown(std::net::Shutdown::Write).ok();
@@ -147,6 +165,7 @@ mod tests {
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![VolumeMount { name: format!("{name}-data"), mount_path: "/var/db".to_string(), size: "1G".to_string() }],
                 replicate_to: None,
+                generation: 0,
             },
         }
     }
@@ -271,5 +290,53 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("expected the replication loop thread to exit once its replica record was deleted");
+    }
+
+    #[test]
+    fn the_loop_exits_once_the_standby_rejects_its_generation_as_stale() {
+        // Simulates a partitioned former-primary that never learned it was
+        // fenced: its own spec still carries generation 0 (stateful_spec's
+        // default), but the standby has already accepted a higher
+        // generation from the real, promoted primary. The loop must stop
+        // entirely rather than keep retrying forever against a standby
+        // that will never accept it again.
+        let dir = test_state_dir("the_loop_exits_once_the_standby_rejects_its_generation_as_stale");
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/base/14.2-web");
+        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
+
+        let (apply_tx, apply_rx) = std::sync::mpsc::channel();
+        commands.send(Command::Apply(stateful_spec("db-4"), apply_tx)).unwrap();
+        apply_rx.recv().unwrap().unwrap();
+
+        let receiver_zfs = FakeZfsManager::new();
+        let receiver_dir = std::env::temp_dir().join("keel-agentd-replication-loop-test-receiver-the_loop_exits_once_the_standby_rejects_its_generation_as_stale");
+        let _ = std::fs::remove_dir_all(&receiver_dir);
+        let targets = crate::ReplicaTargetRegistry::load(receiver_dir).unwrap();
+        // Seed the standby as if it already accepted a real primary at
+        // generation 1 -- our sender's spec is still generation 0.
+        targets.ensure_for_test("db-4", "zroot/keel/volumes/db-4-data", "127.0.0.1:0");
+        targets.accept_generation_for_test("db-4", 1);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let receiver_zfs_clone = receiver_zfs.clone();
+        let targets_clone = targets.clone();
+        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone, test_reloading_tls()));
+
+        let (rt_tx, rt_rx) = std::sync::mpsc::channel();
+        commands.send(Command::SetReplicateTo("db-4".to_string(), Some(addr), rt_tx)).unwrap();
+        rt_rx.recv().unwrap().unwrap();
+
+        let handle = spawn("db-4".to_string(), "db-4-data".to_string(), "zroot".to_string(), zfs.clone(), commands.clone(), Duration::from_millis(20), test_reloading_tls());
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected the replication loop thread to exit once its generation was rejected as stale");
     }
 }

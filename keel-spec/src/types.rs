@@ -26,6 +26,17 @@ pub struct Spec {
     pub volumes: Vec<VolumeMount>,
     #[serde(rename = "replicateTo", default)]
     pub replicate_to: Option<String>,
+    /// Set by the control plane, never by an operator-authored spec (hence
+    /// no dedicated YAML key -- an incoming apply always starts at 0, same
+    /// treatment as `replicate_to`). Fences a partitioned former-primary
+    /// out of replicating to a standby that's since been promoted: each
+    /// (re)placement of a replica mints a strictly higher generation than
+    /// the last (see `keel-controlplane`'s `Placements::generation`), which
+    /// rides along in the replication wire protocol's header so the
+    /// receiving standby can reject a stale sender using only its own
+    /// local state, with no control-plane connectivity required.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +134,7 @@ impl JailTemplate {
                     })
                     .collect(),
                 replicate_to: None,
+                generation: 0,
             },
         }
     }
@@ -366,6 +378,19 @@ spec:
         let service: ServiceSpec = serde_yaml::from_str(SERVICE_EXAMPLE_YAML).unwrap();
         let jail = service.spec.template.to_jail_spec("web-0", "10.0.60.2/24");
         assert_eq!(jail.spec.replicate_to, None);
+    }
+
+    #[test]
+    fn generation_defaults_to_zero_when_absent() {
+        let spec: JailSpec = serde_yaml::from_str(EXAMPLE_YAML).unwrap();
+        assert_eq!(spec.spec.generation, 0);
+    }
+
+    #[test]
+    fn to_jail_spec_always_starts_at_generation_zero() {
+        let service: ServiceSpec = serde_yaml::from_str(SERVICE_EXAMPLE_YAML).unwrap();
+        let jail = service.spec.template.to_jail_spec("web-0", "10.0.60.2/24");
+        assert_eq!(jail.spec.generation, 0, "the control plane sets a real generation separately, same as replicate_to");
     }
 }
 

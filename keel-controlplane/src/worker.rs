@@ -40,6 +40,14 @@ pub struct ForceRepinPrep {
     pub fresh_standby_addr: String,
     pub address: std::net::Ipv4Addr,
     pub prefix_len: u8,
+    /// The generation the promoted standby's `JailSpec` must carry -- see
+    /// `Placements::generation`'s doc comment. Always strictly higher than
+    /// whatever generation the old primary was running, so the old
+    /// primary's replication loop (if it's merely partitioned rather than
+    /// actually dead, and so never learns of this promotion at all) gets
+    /// rejected by the standby's own wire-protocol check the moment it
+    /// tries to reconnect.
+    pub next_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -69,6 +77,7 @@ pub enum ReplicaAction {
         prefix_len: u8,
         standby_node_id: Option<String>,
         standby_addr: Option<String>,
+        generation: u64,
     },
     TearDown {
         replica_name: String,
@@ -401,6 +410,15 @@ fn handle_command(
                             .unwrap_or((None, None))
                     };
 
+                    // The generation this placement *will* become once
+                    // `RecordPlacement` actually lands (see
+                    // `Placements::set`) -- not yet true here, since
+                    // execute_replica_actions only calls RecordPlacement
+                    // after a successful forward(). If this attempt never
+                    // lands, the next retry computes this same value again,
+                    // since the counter only advances on a real `set`.
+                    let generation = placements.generation(&replica_name) + 1;
+
                     actions.push(ReplicaAction::Schedule {
                         replica_name,
                         node_id,
@@ -410,6 +428,7 @@ fn handle_command(
                         prefix_len: pod_cidr.prefix_len(),
                         standby_node_id,
                         standby_addr,
+                        generation,
                     });
                 }
 
@@ -574,6 +593,7 @@ fn handle_command(
 
                 let pod_cidr = registry.pod_cidr(&standby_node_id).ok_or(ForceRepinError::NoFreeAddress)?;
                 let address = addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses).ok_or(ForceRepinError::NoFreeAddress)?;
+                let next_generation = placements.generation(&replica_name) + 1;
 
                 Ok(ForceRepinPrep {
                     old_node_id,
@@ -585,6 +605,7 @@ fn handle_command(
                     fresh_standby_addr,
                     address,
                     prefix_len: pod_cidr.prefix_len(),
+                    next_generation,
                 })
             })();
             let _ = reply.send(result);

@@ -4,6 +4,16 @@ use std::collections::HashMap;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Placements {
     by_jail: HashMap<String, String>,
+    /// Monotonic per-replica-name counter, bumped on every `set` (including
+    /// the first). Deliberately never cleared by `remove` -- a replica name
+    /// reused after teardown must still get a strictly higher generation
+    /// than any prior incarnation, so a partitioned former-primary's
+    /// outdated generation can never look valid again just because the
+    /// name was freed and reused. See `keel_spec::Spec::generation`'s doc
+    /// comment for how this rides through to the replication wire
+    /// protocol.
+    #[serde(default)]
+    generations: HashMap<String, u64>,
 }
 
 impl Placements {
@@ -15,7 +25,12 @@ impl Placements {
         self.by_jail.get(jail_name).map(|s| s.as_str())
     }
 
+    pub fn generation(&self, jail_name: &str) -> u64 {
+        self.generations.get(jail_name).copied().unwrap_or(0)
+    }
+
     pub fn set(&mut self, jail_name: String, node_id: String) {
+        *self.generations.entry(jail_name.clone()).or_insert(0) += 1;
         self.by_jail.insert(jail_name, node_id);
     }
 
@@ -59,6 +74,36 @@ mod tests {
         placements.set("web-1".to_string(), "node-1".to_string());
         placements.remove("web-1");
         assert_eq!(placements.get("web-1"), None);
+    }
+
+    #[test]
+    fn generation_is_zero_for_a_jail_that_has_never_been_placed() {
+        let placements = Placements::new();
+        assert_eq!(placements.generation("web-1"), 0);
+    }
+
+    #[test]
+    fn generation_increments_on_every_set_including_the_first() {
+        let mut placements = Placements::new();
+        placements.set("web-1".to_string(), "node-1".to_string());
+        assert_eq!(placements.generation("web-1"), 1);
+        placements.set("web-1".to_string(), "node-2".to_string());
+        assert_eq!(placements.generation("web-1"), 2);
+    }
+
+    #[test]
+    fn remove_does_not_reset_the_generation_counter() {
+        // A stale sender fenced via a real DELETE and a later re-placement
+        // of the same replica name must never see its generation counter
+        // restart from zero -- doing so would let an old, partitioned
+        // primary's outdated generation look valid again after the name is
+        // reused, defeating the whole point of the counter.
+        let mut placements = Placements::new();
+        placements.set("web-1".to_string(), "node-1".to_string());
+        placements.set("web-1".to_string(), "node-2".to_string());
+        placements.remove("web-1");
+        placements.set("web-1".to_string(), "node-3".to_string());
+        assert_eq!(placements.generation("web-1"), 3, "generation must keep counting up across a remove, never restart from zero");
     }
 
     #[test]

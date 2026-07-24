@@ -91,6 +91,7 @@ mod tests {
                     restart_policy: RestartPolicy::Always,
                     volumes: vec![],
                     replicate_to: None,
+                    generation: 0,
                 },
             },
             epair_ordinal: 1,

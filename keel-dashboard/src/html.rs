@@ -205,6 +205,7 @@ mod tests {
                     restart_policy: keel_spec::RestartPolicy::Always,
                     volumes: vec![],
                     replicate_to: None,
+                    generation: 0,
                 },
             },
             epair_ordinal: 0,

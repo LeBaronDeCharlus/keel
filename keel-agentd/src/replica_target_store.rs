@@ -51,6 +51,7 @@ mod tests {
             volume_dataset: format!("zroot/keel/volumes/{name}-data"),
             source_node_addr: "10.0.0.4:7621".to_string(),
             last_snapshot: None,
+            highest_generation_seen: 0,
         }
     }
 

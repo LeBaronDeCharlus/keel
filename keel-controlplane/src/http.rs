@@ -282,6 +282,7 @@ fn handle_force_repin(name: &str, commands: &Sender<Command>, client_config: &Ar
     let cidr = format!("{}/{}", prep.address, prep.prefix_len);
     let mut spec = prep.template.to_jail_spec(name, &cidr);
     spec.spec.replicate_to = Some(prep.fresh_standby_addr.clone());
+    spec.spec.generation = prep.next_generation;
     let body = serde_yaml::to_string(&spec).expect("JailSpec serialization should not fail");
 
     match forward(&prep.standby_addr, "PUT", &format!("/jails/{name}"), body.as_bytes(), client_config) {
@@ -503,10 +504,11 @@ fn send_remove_pending_fence(replica_name: &str, commands: &Sender<Command>) {
 fn execute_replica_actions(actions: Vec<ReplicaAction>, commands: &Sender<Command>, client_config: &Arc<rustls::ClientConfig>) {
     for action in actions {
         match action {
-            ReplicaAction::Schedule { replica_name, node_id, node_addr, template, address, prefix_len, standby_node_id, standby_addr } => {
+            ReplicaAction::Schedule { replica_name, node_id, node_addr, template, address, prefix_len, standby_node_id, standby_addr, generation } => {
                 let cidr = format!("{address}/{prefix_len}");
                 let mut spec = template.to_jail_spec(&replica_name, &cidr);
                 spec.spec.replicate_to = standby_addr.clone();
+                spec.spec.generation = generation;
                 let body = serde_yaml::to_string(&spec).expect("JailSpec serialization should not fail");
                 match forward(&node_addr, "PUT", &format!("/jails/{replica_name}"), body.as_bytes(), client_config) {
                     Ok((status, _)) if (200..300).contains(&status) => {
@@ -1113,6 +1115,47 @@ mod tests {
             }
         });
         (addr, deletes)
+    }
+
+    /// Like `start_fake_remote_tls_agentd_recording_deletes`, but records
+    /// every `PUT /jails/<name>` request's raw body instead of `DELETE`
+    /// paths, so a test can inspect the exact `JailSpec` YAML the control
+    /// plane actually sent when scheduling a replica.
+    fn start_fake_remote_tls_agentd_recording_put_bodies(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
+                .unwrap(),
+        );
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let thread_bodies = Arc::clone(&bodies);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                let is_put = request_text.lines().next().map(|line| line.starts_with("PUT ")).unwrap_or(false);
+                if is_put {
+                    if let Some(body) = request_text.split("\r\n\r\n").nth(1) {
+                        thread_bodies.lock().unwrap().push(body.to_string());
+                    }
+                }
+                let response = format!("HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = tls_stream.write_all(response.as_bytes());
+                let _ = tls_stream.flush();
+            }
+        });
+        (addr, bodies)
     }
 
     /// Like `start_fake_remote_tls_agentd`, but the response header declares
@@ -1793,6 +1836,26 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_a_replica_stamps_the_jail_spec_with_a_real_generation() {
+        // The JailSpec pushed to the node must carry the replica's real
+        // generation (from Placements), not the always-zero default
+        // to_jail_spec produces on its own -- this is the wire-protocol
+        // side of the fencing-token mechanism that stops a partitioned
+        // former-primary from replicating to a standby that's since been
+        // promoted.
+        let cp_addr = start_test_server();
+        let (node_addr, bodies) = start_fake_remote_tls_agentd_recording_put_bodies(200);
+        register_node(&cp_addr, "node-a", &node_addr);
+        send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
+        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\n");
+        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n");
+
+        let recorded = bodies.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "expected exactly one PUT /jails/web-0, got: {recorded:?}");
+        assert!(recorded[0].contains("generation: 1"), "expected the first placement to carry generation 1, got body: {}", recorded[0]);
+    }
+
+    #[test]
     fn reloading_tls_keeps_serving_the_last_good_config_if_the_replacement_is_malformed() {
         let cert_dir = std::env::temp_dir()
             .join(format!("keel-controlplane-reload-bad-test-{}", std::process::id()));
@@ -2034,6 +2097,41 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         commands.send(Command::PendingFencesForNode("node-unreachable".to_string(), tx)).unwrap();
         assert_eq!(rx.recv().unwrap(), vec!["db-0".to_string()], "expected the old primary to be fenced");
+    }
+
+    #[test]
+    fn force_repin_stamps_the_promoted_jail_spec_with_a_higher_generation_than_the_old_primary() {
+        let (cp_addr, commands) = start_test_server_with_commands();
+        // Applied before any node is registered, so ApplyService's own
+        // piggybacked reconcile has no alive node to auto-schedule onto --
+        // keeps this test's only PUT to node-b being force-repin's own
+        // promotion, so its generation is unambiguous.
+        apply_service_with_template_via_http(&cp_addr, "db", 1);
+        let (node_b, node_b_bodies) = start_fake_remote_tls_agentd_recording_put_bodies(200);
+        register_node(&cp_addr, "node-b", &node_b);
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/register",
+            "id: node-c\naddr: 127.0.0.1:1\nreplicate_addr: 127.0.0.1:2\ncapacity_cpu: 4.0\ncapacity_memory: 8589934592\n",
+        );
+        // The old primary's own placement is generation 1 (Placements::set
+        // bumps on every call, including the first).
+        record_placement(&commands, "db-0", "node-unreachable");
+        let (tx, rx) = mpsc::channel();
+        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        rx.recv().unwrap();
+
+        let (status, _) = send_request(&cp_addr, "POST", "/replicas/db-0/force-repin", "");
+        assert_eq!(status, 200);
+
+        let recorded = node_b_bodies.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "expected exactly one PUT /jails/db-0 to the promoted node, got: {recorded:?}");
+        assert!(
+            recorded[0].contains("generation: 2"),
+            "expected the promoted primary's generation (2) to be strictly higher than the old primary's (1), got body: {}",
+            recorded[0]
+        );
     }
 
     #[test]

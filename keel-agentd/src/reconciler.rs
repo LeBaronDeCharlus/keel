@@ -389,6 +389,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 restart_policy: keel_spec::RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
+                generation: 0,
             },
         };
         self.apply(spec)
@@ -673,6 +674,7 @@ mod tests {
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
+                generation: 0,
             },
         }
     }

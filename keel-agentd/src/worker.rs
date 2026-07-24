@@ -216,6 +216,7 @@ mod tests {
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
+                generation: 0,
             },
         }
     }
@@ -416,6 +417,7 @@ mod tests {
                             size: "1G".to_string(),
                         }],
                         replicate_to: None,
+                        generation: 0,
                     },
                 },
                 apply_tx,
@@ -523,6 +525,7 @@ mod tests {
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![VolumeMount { name: format!("{name}-data"), mount_path: "/var/db".to_string(), size: "1G".to_string() }],
                 replicate_to: Some(replicate_to.to_string()),
+                generation: 0,
             },
         }
     }
