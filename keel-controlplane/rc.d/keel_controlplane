@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# PROVIDE: keel_controlplane
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="keel_controlplane"
+rcvar="keel_controlplane_enable"
+
+load_rc_config "$name"
+
+: ${keel_controlplane_enable:="NO"}
+: ${keel_controlplane_bin:="/usr/local/bin/keel-controlplane"}
+: ${keel_controlplane_addr:="0.0.0.0:7620"}
+: ${keel_controlplane_cluster_cidr:=""}
+: ${keel_controlplane_service_cidr:=""}
+: ${keel_controlplane_tls_ca_file:=""}
+: ${keel_controlplane_tls_cert_file:=""}
+: ${keel_controlplane_tls_key_file:=""}
+: ${keel_controlplane_tls_crl_file:=""}
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-r -P ${pidfile} -S -T ${name} -- \
+  ${keel_controlplane_bin} --addr ${keel_controlplane_addr} \
+  --cluster-cidr ${keel_controlplane_cluster_cidr} \
+  --service-cidr ${keel_controlplane_service_cidr} \
+  --tls-ca-file ${keel_controlplane_tls_ca_file} \
+  --tls-cert-file ${keel_controlplane_tls_cert_file} \
+  --tls-key-file ${keel_controlplane_tls_key_file} \
+  --tls-crl-file ${keel_controlplane_tls_crl_file}"
+
+run_rc_command "$1"
