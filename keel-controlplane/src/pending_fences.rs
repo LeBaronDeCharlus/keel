@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PendingFences {
     by_replica: HashMap<String, String>, // replica_name -> node_id owed a forced delete
 }
@@ -58,5 +59,15 @@ mod tests {
         let mut fences = PendingFences::new();
         fences.set("db-0".to_string(), "node-1".to_string());
         assert_eq!(fences.for_node("node-9"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn pending_fences_round_trips_through_yaml() {
+        let mut fences = PendingFences::new();
+        fences.set("db-0".to_string(), "node-1".to_string());
+        let path = std::env::temp_dir().join(format!("keel-controlplane-pending-fences-test-{}.yaml", std::process::id()));
+        crate::store::save(&path, &fences).unwrap();
+        let loaded: PendingFences = crate::store::load_or_default(&path);
+        assert_eq!(loaded.for_node("node-1"), vec!["db-0".to_string()]);
     }
 }

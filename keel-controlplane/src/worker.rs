@@ -174,6 +174,12 @@ fn persist_standbys(standbys: &Standbys, state_dir: &Path) {
     }
 }
 
+fn persist_pending_fences(pending_fences: &PendingFences, state_dir: &Path) {
+    if let Err(e) = crate::store::save(&state_dir.join("pending_fences.yaml"), pending_fences) {
+        eprintln!("keel-controlplane: failed to persist pending_fences.yaml: {e}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     registry: &mut Registry,
@@ -444,6 +450,7 @@ fn handle_command(
         }
         Command::RecordPendingFence(replica_name, node_id, reply) => {
             pending_fences.set(replica_name, node_id);
+            persist_pending_fences(pending_fences, state_dir);
             let _ = reply.send(());
         }
         Command::PendingFencesForNode(node_id, reply) => {
@@ -451,6 +458,7 @@ fn handle_command(
         }
         Command::RemovePendingFence(replica_name, reply) => {
             pending_fences.remove(&replica_name);
+            persist_pending_fences(pending_fences, state_dir);
             let _ = reply.send(());
         }
         Command::PrepareForceRepin(replica_name, reply) => {
