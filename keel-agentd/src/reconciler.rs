@@ -385,12 +385,13 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         if let Err(e) = self.ensure_ingress_jail() {
             eprintln!("keel-agentd: failed to ensure the ingress jail exists: {e}");
         }
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        self.reconcile_certs(now_unix);
-        self.reconcile_ingress_config();
+        // Provision/restart every tracked jail -- including, on a fresh
+        // node's first Ingress apply, the ingress jail itself -- *before*
+        // reconcile_certs/reconcile_ingress_config write anything into the
+        // ingress jail's rootfs. Those writes assume that rootfs is already
+        // a real, cloned ZFS dataset; running them first would create plain
+        // directories at a path a real `zfs clone` then has to contend with
+        // as its own mountpoint.
         let names: Vec<String> = self.records.keys().cloned().collect();
         let mut failures = Vec::new();
         for name in names {
@@ -398,6 +399,12 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 failures.push((name, e));
             }
         }
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.reconcile_certs(now_unix);
+        self.reconcile_ingress_config();
         failures
     }
 
@@ -1564,6 +1571,100 @@ mod tests {
         reconciler.delete_ingress("blog").unwrap();
         reconciler.reconcile(Instant::now());
         assert!(reconciler.jails.jail_exists("keel-ingress").unwrap());
+    }
+
+    /// Wraps `FakeZfsManager`, recording (for the ingress jail's dataset
+    /// specifically) whether a given real filesystem path already exists at
+    /// the moment `clone_from_base` is called -- the only way to prove
+    /// `reconcile()`'s ordering is correct, since the fake itself has no
+    /// concept of a ZFS mountpoint colliding with a plain directory that was
+    /// already written to (unlike a real `zfs clone`, which does).
+    struct IngressCloneOrderSpyZfs {
+        inner: FakeZfsManager,
+        ingress_dataset: String,
+        watched_path: PathBuf,
+        path_existed_at_clone_time: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    }
+
+    impl ZfsManager for IngressCloneOrderSpyZfs {
+        fn dataset_exists(&self, dataset: &str) -> Result<bool, keel_zfs::ZfsError> {
+            self.inner.dataset_exists(dataset)
+        }
+        fn clone_from_base(&self, base_dataset: &str, target_dataset: &str) -> Result<(), keel_zfs::ZfsError> {
+            if target_dataset == self.ingress_dataset {
+                *self.path_existed_at_clone_time.lock().unwrap() = Some(self.watched_path.exists());
+            }
+            self.inner.clone_from_base(base_dataset, target_dataset)
+        }
+        fn create_volume(&self, dataset: &str, quota: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.create_volume(dataset, quota)
+        }
+        fn destroy_dataset(&self, dataset: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.destroy_dataset(dataset)
+        }
+        fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.snapshot(dataset, snapshot)
+        }
+        fn destroy_snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.destroy_snapshot(dataset, snapshot)
+        }
+        fn send_snapshot(&self, dataset: &str, snapshot: &str, base: Option<&str>, out: &mut dyn std::io::Write) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.send_snapshot(dataset, snapshot, base, out)
+        }
+        fn receive_snapshot(&self, dataset: &str, input: &mut dyn std::io::Read) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.receive_snapshot(dataset, input)
+        }
+        fn list_child_datasets(&self, parent: &str) -> Result<Vec<String>, keel_zfs::ZfsError> {
+            self.inner.list_child_datasets(parent)
+        }
+    }
+
+    #[test]
+    fn reconcile_provisions_the_ingress_jail_before_writing_its_certificate_into_it() {
+        // Reproduces the ordering bug directly: `write_cert_to_ingress_jail`
+        // used to run (via reconcile_certs) before the ingress jail's
+        // dataset was ever cloned, so on a fresh node the first Ingress
+        // apply wrote real cert files into a plain directory that a real
+        // `zfs clone` then had to contend with as its own mountpoint.
+        let dir = test_state_dir("reconcile_provisions_the_ingress_jail_before_writing_its_certificate_into_it");
+        let pool = dir.strip_prefix("/").unwrap_or(&dir).to_string_lossy().into_owned();
+        let ingress_dataset = record::jail_dataset_path(&pool, "ingress");
+        let cert_path =
+            record::jail_rootfs_path(&pool, "ingress").join("usr/local/etc/nginx/certs").join("example.com.crt");
+
+        let inner = FakeZfsManager::new();
+        inner.seed_dataset(&record::base_dataset_path(&pool, "base/keel-ingress"));
+        let path_existed_at_clone_time = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let zfs = IngressCloneOrderSpyZfs {
+            inner,
+            ingress_dataset,
+            watched_path: cert_path.clone(),
+            path_existed_at_clone_time: path_existed_at_clone_time.clone(),
+        };
+
+        let mut reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs,
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            pool,
+            dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+
+        reconciler.apply_ingress(sample_ingress_spec("blog", "example.com")).unwrap();
+        reconciler.reconcile(Instant::now());
+
+        assert_eq!(
+            *path_existed_at_clone_time.lock().unwrap(),
+            Some(false),
+            "the cert file must not exist yet at the moment the ingress jail's dataset is cloned"
+        );
+        assert!(cert_path.is_file(), "the cert must still get written by the end of reconcile");
     }
 
     // `write_cert_to_ingress_jail` performs a genuine `std::fs::write` under
