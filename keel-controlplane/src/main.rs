@@ -92,6 +92,7 @@ fn main() {
 
     eprintln!("keel-controlplane: starting (addr={})", config.addr);
 
+    let state_dir = std::path::PathBuf::from("/var/db/keel-controlplane");
     let (_worker_handle, commands) = worker::spawn(
         Registry::new(cluster_cidr),
         Placements::new(),
@@ -99,6 +100,7 @@ fn main() {
         keel_controlplane::addresses::UsedAddresses::new(),
         keel_controlplane::Standbys::new(),
         keel_controlplane::PendingFences::new(),
+        state_dir,
     );
 
     let listener = TcpListener::bind(&config.addr).expect("failed to bind TCP listener");

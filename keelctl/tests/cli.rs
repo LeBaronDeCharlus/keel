@@ -12,6 +12,15 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
 }
 
+fn fresh_controlplane_state_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("keelctl-test-controlplane-{}-{id}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 fn start_test_server(name: &str) -> PathBuf {
     let state_dir = std::env::temp_dir().join(format!("keelctl-test-state-{name}"));
     let _ = std::fs::remove_dir_all(&state_dir);
@@ -118,6 +127,7 @@ fn start_test_control_plane_with_node(node_id: &str, node_addr: &str) -> String 
         keel_controlplane::addresses::UsedAddresses::new(),
         keel_controlplane::Standbys::new(),
         keel_controlplane::PendingFences::new(),
+        fresh_controlplane_state_dir(),
     );
 
     let (reg_tx, reg_rx) = std::sync::mpsc::channel();

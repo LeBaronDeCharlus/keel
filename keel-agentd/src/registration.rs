@@ -330,6 +330,15 @@ mod tests {
         std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
     }
 
+    fn fresh_controlplane_state_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("keel-agentd-registration-test-controlplane-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     fn start_test_control_plane() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -340,6 +349,7 @@ mod tests {
             keel_controlplane::addresses::UsedAddresses::new(),
             keel_controlplane::Standbys::new(),
             keel_controlplane::PendingFences::new(),
+            fresh_controlplane_state_dir(),
         );
         let reloading_tls = keel_controlplane::tls::ReloadingTls::spawn(
             fixture("fixture-node.crt"),

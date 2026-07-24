@@ -733,6 +733,15 @@ mod tests {
     use crate::worker;
     use std::path::PathBuf;
 
+    fn fresh_state_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("keel-controlplane-http-test-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     #[test]
     fn apply_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -757,6 +766,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            fresh_state_dir(),
         );
         let reloading_tls = tls::ReloadingTls::spawn(
             fixture("fixture-node.crt"),
@@ -1429,6 +1439,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            fresh_state_dir(),
         );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -1703,6 +1714,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            fresh_state_dir(),
         );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -1725,6 +1737,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            fresh_state_dir(),
         );
         let reloading_tls = tls::ReloadingTls::spawn(
             fixture("fixture-node.crt"),
