@@ -4,6 +4,7 @@
 
 pub mod basic_auth;
 pub mod control_plane_client;
+pub mod html;
 pub mod poller;
 pub mod snapshot;
 pub mod tls;
