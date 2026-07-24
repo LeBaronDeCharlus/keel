@@ -100,15 +100,19 @@ pub fn load_or_default<T: Default + serde::de::DeserializeOwned>(path: &Path) ->
     }
 }
 
-pub fn save<T: serde::Serialize>(state_dir: &Path, filename: &str, value: &T) -> io::Result<()> {
-    fs::create_dir_all(state_dir)?;
-    let path = state_dir.join(filename);
-    let tmp_path = state_dir.join(format!("{filename}.tmp"));
+pub fn save<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("yaml.tmp");
     let content = serde_yaml::to_string(value).expect("state serialization should not fail");
     fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, &path)
+    fs::rename(&tmp_path, path)
 }
 ```
+
+Both take a full file path (symmetric with each other), so every call site
+looks the same shape whether loading or saving: `store::save(&state_dir.join("placements.yaml"), &placements)`.
 
 (A malformed state file panics at startup rather than silently discarding
 data, the same choice `keel-agentd`'s `Reconciler::new` makes implicitly by
@@ -144,7 +148,7 @@ impl Services {
 
     fn persist(&self, state_dir: &Path) {
         let state = ServicesState { by_name: self.by_name.clone() };
-        if let Err(e) = store::save(state_dir, "services.yaml", &state) {
+        if let Err(e) = store::save(&state_dir.join("services.yaml"), &state) {
             eprintln!("keel-controlplane: failed to persist services.yaml: {e}");
         }
     }
@@ -229,12 +233,34 @@ pub fn last_known_addr(&self, node_id: &str) -> Option<String> {
 }
 ```
 
+`Registry` (and therefore this method) only lives inside the worker thread,
+never in `http.rs`, so `handle_force_repin` cannot call it directly. Rather
+than adding a whole new `Command` round-trip just to fetch one address,
+`ForceRepinPrep` gains one new field, computed in the same
+`Command::PrepareForceRepin` handler that already builds the rest of the
+struct (right where `registry` is already in scope):
+
+```rust
+pub struct ForceRepinPrep {
+    pub old_node_id: String,
+    pub old_node_last_known_addr: Option<String>, // new
+    pub standby_node_id: String,
+    // ...unchanged fields...
+}
+```
+
+```rust
+// inside the existing Command::PrepareForceRepin handler in worker.rs,
+// after old_node_id is resolved and the PrimaryStillAlive check has passed:
+let old_node_last_known_addr = registry.last_known_addr(&old_node_id);
+```
+
 In `handle_force_repin` (`http.rs`), immediately after
 `send_record_pending_fence(name, &prep.old_node_id, commands)` succeeds:
 
 ```rust
-if let Some(old_addr) = get_last_known_addr(&prep.old_node_id, commands) {
-    match forward(&old_addr, "DELETE", &format!("/jails/{name}"), &[], client_config) {
+if let Some(old_addr) = &prep.old_node_last_known_addr {
+    match forward(old_addr, "DELETE", &format!("/jails/{name}"), &[], client_config) {
         Ok((status, _)) if (200..300).contains(&status) || status == 404 => {
             send_remove_pending_fence(name, commands);
         }
@@ -277,10 +303,31 @@ conflicting state.
   `spawn()` over the same `state_dir`), and confirm `ReconcileServices`
   computes zero actions, i.e. the previously-placed replica is not seen
   as missing and does not get a duplicate scheduled.
-- Fencing: a test driving `handle_force_repin` against a fake node HTTP
-  server that's reachable but has never sent a heartbeat, confirming the
-  `DELETE` arrives without needing to simulate any heartbeat at all, proving
-  the push no longer depends on the old node calling in first.
+- Fencing, two tiers (a real constraint surfaced while reviewing this spec:
+  every existing `PrimaryStillAlive`-adjacent test in this codebase stands in
+  for "the old primary is Dead" by using a node id that was *never
+  registered at all* -- `registry.resolve()` fails for it exactly like a
+  genuinely Dead node, with no need to wait out the real 15-second
+  `DEAD_THRESHOLD`. That trick doesn't work for testing the immediate push
+  specifically, since an unregistered node has no address on file for
+  `last_known_addr` to return -- there'd be nothing to push to):
+  - A fast, direct `Registry`-level unit test (no `worker`/`Command` channel
+    involved, matching `registry.rs`'s own existing style of advancing an
+    arithmetic `Instant` rather than sleeping): register a node, call
+    `resolve()` with a `now` past `DEAD_THRESHOLD` to confirm it reports
+    Dead, then call `last_known_addr()` with that same registered id and
+    confirm it still returns the address regardless.
+  - One true end-to-end integration test proving `handle_force_repin`
+    actually performs the immediate push through the full pipeline (real
+    `worker::spawn`, a real fake node HTTP server, a real `forward()` call):
+    register the old primary with a real reachable fake address, then
+    `std::thread::sleep` past the real 15-second `DEAD_THRESHOLD` (unavoidable
+    here -- `Command::PrepareForceRepin`'s `now` comes from a live
+    `Instant::now()` inside `handle_command`, with no test-only override, and
+    adding one would be a larger, separate change touching several other
+    commands' shapes for a single test's benefit) before triggering the
+    force-repin and confirming the `DELETE` arrives at the fake server with
+    no heartbeat ever sent from it.
 
 ## Verification plan
 
