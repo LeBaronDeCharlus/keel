@@ -6,13 +6,26 @@ use crate::snapshot::{NodeSnapshot, ServiceSnapshot, Snapshot};
 /// per binary (see `keel-dashboard/src/tls.rs`'s doc comment).
 const RENEWAL_THRESHOLD_SECS: i64 = 30 * 24 * 60 * 60;
 
+/// Escapes a string for safe interpolation into HTML text/attribute
+/// contexts. Every dynamic string value rendered by this module (node
+/// ids/addresses, jail names, service names/VIPs, replica placement
+/// strings, volume names, ingress hosts/backend names) is expected to
+/// have passed `keel-spec` validation before it ever reaches here, but
+/// this escaping is cheap insurance against that upstream invariant
+/// rather than a load-bearing security boundary.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 pub fn render(snapshot: &Snapshot, now_unix: i64) -> String {
     format!(
-        "<!doctype html>\n<html><head><title>keel dashboard</title><meta http-equiv=\"refresh\" content=\"5\">\
+        "<!doctype html>\n<html><head><title>keel dashboard</title>\
          <style>body{{font-family:sans-serif;margin:2em}}table{{border-collapse:collapse;margin-bottom:2em}}\
          td,th{{border:1px solid #ccc;padding:4px 8px;text-align:left}}.stale{{background:#fee;padding:8px;margin-bottom:1em}}\
          </style></head><body>\n\
-         {stale_banner}<h1>keel dashboard</h1>\n{nodes}\n{jails}\n{services}\n{volumes}\n{ingress}\n</body></html>\n",
+         {stale_banner}<h1>keel dashboard</h1>\n{nodes}\n{jails}\n{services}\n{volumes}\n{ingress}\n\
+         <script>setInterval(function(){{fetch('/api/snapshot').then(function(){{location.reload();}}).catch(function(){{}});}}, 5000);</script>\n\
+         </body></html>\n",
         stale_banner = render_stale_banner(snapshot, now_unix),
         nodes = render_nodes(&snapshot.nodes),
         jails = render_jails(&snapshot.nodes),
@@ -37,8 +50,8 @@ fn render_nodes(nodes: &[NodeSnapshot]) -> String {
         rows.push_str(&format!(
             "<tr><td>{id}</td><td>{addr}</td><td>{status:?}</td><td>{committed_cpu:.2}/{capacity_cpu:.2}</td>\
              <td>{committed_memory}/{capacity_memory}</td><td>{last_seen_secs}s</td>{stale}</tr>",
-            id = s.id,
-            addr = s.addr,
+            id = escape_html(&s.id),
+            addr = escape_html(&s.addr),
             status = s.status,
             committed_cpu = s.committed_cpu,
             capacity_cpu = s.capacity_cpu,
@@ -68,8 +81,8 @@ fn render_jails(nodes: &[NodeSnapshot]) -> String {
             };
             rows.push_str(&format!(
                 "<tr><td>{node_id}</td><td>{name}</td><td>{state}</td></tr>",
-                node_id = node.status.id,
-                name = jail.record.spec.metadata.name,
+                node_id = escape_html(&node.status.id),
+                name = escape_html(&jail.record.spec.metadata.name),
                 state = state,
             ));
         }
@@ -81,7 +94,11 @@ fn render_volumes(nodes: &[NodeSnapshot]) -> String {
     let mut rows = String::new();
     for node in nodes {
         for volume in &node.volumes {
-            rows.push_str(&format!("<tr><td>{node_id}</td><td>{name}</td></tr>", node_id = node.status.id, name = volume.name));
+            rows.push_str(&format!(
+                "<tr><td>{node_id}</td><td>{name}</td></tr>",
+                node_id = escape_html(&node.status.id),
+                name = escape_html(&volume.name)
+            ));
         }
     }
     format!("<h2>Volumes</h2><table><tr><th>Node</th><th>Name</th></tr>{rows}</table>")
@@ -95,16 +112,20 @@ fn render_services(services: &[ServiceSnapshot]) -> String {
             .detail
             .as_ref()
             .map(|d| {
-                d.replicas.iter().map(|r| format!("{} ({}@{})", r.name, r.node, r.address)).collect::<Vec<_>>().join(", ")
+                d.replicas
+                    .iter()
+                    .map(|r| format!("{} ({}@{})", escape_html(&r.name), escape_html(&r.node), escape_html(&r.address)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             })
             .unwrap_or_default();
         let actual_replicas = service.detail.as_ref().map(|d| d.replicas.len()).unwrap_or(0);
         rows.push_str(&format!(
             "<tr><td>{name}</td><td>{actual}/{desired}</td><td>{vip}:{port}</td><td>{placement}</td>{stale}</tr>",
-            name = s.name,
+            name = escape_html(&s.name),
             actual = actual_replicas,
             desired = s.desired_replicas,
-            vip = s.vip,
+            vip = escape_html(&s.vip),
             port = s.port,
             placement = replica_placement,
             stale = if service.data_stale { "<td>stale</td>" } else { "<td></td>" },
@@ -121,7 +142,7 @@ fn render_ingress(nodes: &[NodeSnapshot], now_unix: i64) -> String {
     for node in nodes {
         for ingress in &node.status.ingresses {
             let expiry_cell = match ingress.cert_expires_at_unix {
-                Some(expires_at) if expires_at - now_unix <= RENEWAL_THRESHOLD_SECS => {
+                Some(expires_at) if expires_at - now_unix < RENEWAL_THRESHOLD_SECS => {
                     format!(
                         "<td class=\"expiry-warning\" style=\"color:#a00;font-weight:bold\">{expires_at} (renewing soon)</td>"
                     )
@@ -131,8 +152,8 @@ fn render_ingress(nodes: &[NodeSnapshot], now_unix: i64) -> String {
             };
             rows.push_str(&format!(
                 "<tr><td>{host}</td><td>{backend_service}:{backend_port}</td>{expiry_cell}</tr>",
-                host = ingress.host,
-                backend_service = ingress.backend_service,
+                host = escape_html(&ingress.host),
+                backend_service = escape_html(&ingress.backend_service),
                 backend_port = ingress.backend_port,
                 expiry_cell = expiry_cell,
             ));
@@ -297,5 +318,56 @@ mod tests {
         let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: false, stale_as_of_unix: None };
         let html = render(&snapshot, 1_000_000_000);
         assert!(!html.contains("control plane unreachable"), "got: {html}");
+    }
+
+    #[test]
+    fn renders_a_stale_marker_cell_for_a_stale_node() {
+        let node = NodeSnapshot { status: sample_node_status(), jails: vec![], volumes: vec![], data_stale: true };
+        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(html.contains("<td>stale</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn renders_a_stale_marker_cell_for_a_stale_service() {
+        let service = ServiceSnapshot {
+            summary: ServiceSummary { name: "web".to_string(), desired_replicas: 3, vip: "10.0.250.7".to_string(), port: 8080 },
+            detail: None,
+            data_stale: true,
+        };
+        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![service], stale: false, stale_as_of_unix: None };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(html.contains("<td>stale</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn renders_none_for_an_ingress_with_no_cert_expiry() {
+        let mut node_status = sample_node_status();
+        node_status.ingresses[0].cert_expires_at_unix = None;
+        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
+        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(html.contains("<td>none</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn escapes_html_special_characters_in_dynamic_values() {
+        let mut node_status = sample_node_status();
+        node_status.id = "<script>alert(1)</script>".to_string();
+        node_status.ingresses[0].host = "a & b".to_string();
+        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
+        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(!html.contains("<script>alert(1)</script>"), "got: {html}");
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "got: {html}");
+        assert!(html.contains("a &amp; b"), "got: {html}");
+    }
+
+    #[test]
+    fn renders_a_js_fetch_poll_loop_instead_of_a_meta_refresh() {
+        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: false, stale_as_of_unix: None };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(html.contains("fetch('/api/snapshot')"), "got: {html}");
+        assert!(!html.contains("http-equiv=\"refresh\""), "got: {html}");
     }
 }
