@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use keel_controlplane::wire::{NodeState, NodeStatus, ServiceReplica, ServiceSummary};
 use keel_dashboard::control_plane_client::FakeControlPlaneClient;
 use std::io::{Read, Write};
@@ -45,7 +44,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
-fn request(addr: std::net::SocketAddr, path: &str, user: &str, password: &str) -> (u16, String) {
+fn request(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
     keel_dashboard::tls::ensure_crypto_provider();
     let client_config = rustls::ClientConfig::builder()
         .dangerous()
@@ -55,8 +54,7 @@ fn request(addr: std::net::SocketAddr, path: &str, user: &str, password: &str) -
     let tcp = std::net::TcpStream::connect(addr).unwrap();
     let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
     let mut stream = rustls::StreamOwned::new(conn, tcp);
-    let auth = format!("Basic {}", STANDARD.encode(format!("{user}:{password}")));
-    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: {auth}\r\nContent-Length: 0\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     stream.write_all(req.as_bytes()).unwrap();
     stream.sock.shutdown(std::net::Shutdown::Write).ok();
     let mut response = Vec::new();
@@ -112,19 +110,14 @@ fn a_poll_cycle_is_reflected_in_both_the_json_api_and_the_rendered_html() {
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        keel_dashboard::http::run(listener, tls_config, snapshot, "admin".to_string(), "hunter2".to_string())
-    });
+    std::thread::spawn(move || keel_dashboard::http::run(listener, tls_config, snapshot));
 
-    let (unauth_status, _) = request(addr, "/", "admin", "wrongpassword");
-    assert_eq!(unauth_status, 401, "wrong credentials must be rejected even after a successful poll");
-
-    let (json_status, json_body) = request(addr, "/api/snapshot", "admin", "hunter2");
+    let (json_status, json_body) = request(addr, "/api/snapshot");
     assert_eq!(json_status, 200);
     assert!(json_body.contains("\"node-1\""), "got: {json_body}");
     assert!(json_body.contains("\"web\""), "got: {json_body}");
 
-    let (html_status, html_body) = request(addr, "/", "admin", "hunter2");
+    let (html_status, html_body) = request(addr, "/");
     assert_eq!(html_status, 200);
     assert!(html_body.contains("node-1"), "got: {html_body}");
     assert!(html_body.contains("10.0.250.7"), "got: {html_body}");

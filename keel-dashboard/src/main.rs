@@ -11,8 +11,6 @@ struct Config {
     listen_addr: String,
     dashboard_tls_cert_file: Option<PathBuf>,
     dashboard_tls_key_file: Option<PathBuf>,
-    basic_auth_user: Option<String>,
-    basic_auth_password_file: Option<PathBuf>,
     poll_interval_secs: u64,
 }
 
@@ -27,8 +25,6 @@ impl Default for Config {
             listen_addr: "0.0.0.0:8443".to_string(),
             dashboard_tls_cert_file: None,
             dashboard_tls_key_file: None,
-            basic_auth_user: None,
-            basic_auth_password_file: None,
             poll_interval_secs: 5,
         }
     }
@@ -52,8 +48,6 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
             "--listen-addr" => config.listen_addr = value,
             "--dashboard-tls-cert-file" => config.dashboard_tls_cert_file = Some(PathBuf::from(value)),
             "--dashboard-tls-key-file" => config.dashboard_tls_key_file = Some(PathBuf::from(value)),
-            "--basic-auth-user" => config.basic_auth_user = Some(value),
-            "--basic-auth-password-file" => config.basic_auth_password_file = Some(PathBuf::from(value)),
             "--poll-interval-secs" => {
                 config.poll_interval_secs =
                     value.parse().unwrap_or_else(|e| panic!("invalid --poll-interval-secs '{value}': {e}"))
@@ -72,9 +66,6 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
     if config.dashboard_tls_cert_file.is_none() || config.dashboard_tls_key_file.is_none() {
         panic!("--dashboard-tls-cert-file and --dashboard-tls-key-file are required");
     }
-    if config.basic_auth_user.is_none() || config.basic_auth_password_file.is_none() {
-        panic!("--basic-auth-user and --basic-auth-password-file are required");
-    }
     config
 }
 
@@ -87,12 +78,6 @@ fn main() {
     let tls_crl_file = config.tls_crl_file.expect("validated as required in parse_args_from");
     let dashboard_tls_cert_file = config.dashboard_tls_cert_file.expect("validated as required in parse_args_from");
     let dashboard_tls_key_file = config.dashboard_tls_key_file.expect("validated as required in parse_args_from");
-    let basic_auth_user = config.basic_auth_user.expect("validated as required in parse_args_from");
-    let basic_auth_password_file = config.basic_auth_password_file.expect("validated as required in parse_args_from");
-    let basic_auth_password = std::fs::read_to_string(&basic_auth_password_file)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", basic_auth_password_file.display()))
-        .trim()
-        .to_string();
 
     let client_config = Arc::new(
         keel_dashboard::tls::load_client_config(&tls_cert_file, &tls_key_file, &tls_ca_file, &tls_crl_file)
@@ -109,7 +94,7 @@ fn main() {
 
     eprintln!("keel-dashboard: starting (listen_addr={})", config.listen_addr);
     let listener = std::net::TcpListener::bind(&config.listen_addr).expect("failed to bind TCP listener");
-    keel_dashboard::http::run(listener, server_config, snapshot, basic_auth_user, basic_auth_password);
+    keel_dashboard::http::run(listener, server_config, snapshot);
 }
 
 #[cfg(test)]
@@ -129,8 +114,6 @@ mod tests {
             "--tls-crl-file", "/etc/keel/crl.pem",
             "--dashboard-tls-cert-file", "/etc/keel/dashboard-browser.crt",
             "--dashboard-tls-key-file", "/etc/keel/dashboard-browser.key",
-            "--basic-auth-user", "admin",
-            "--basic-auth-password-file", "/etc/keel/dashboard-password",
         ]
     }
 
@@ -162,14 +145,5 @@ mod tests {
         let mut partial: Vec<&str> = full_args().into_iter().take(10).collect();
         partial.retain(|f| *f != "--dashboard-tls-cert-file" && *f != "/etc/keel/dashboard-browser.crt");
         parse_args_from(args(&partial));
-    }
-
-    #[test]
-    #[should_panic(expected = "--basic-auth-user and --basic-auth-password-file are required")]
-    fn missing_basic_auth_flag_panics() {
-        let full = full_args();
-        let without_auth: Vec<&str> =
-            full.into_iter().take_while(|f| *f != "--basic-auth-user").collect();
-        parse_args_from(args(&without_auth));
     }
 }
