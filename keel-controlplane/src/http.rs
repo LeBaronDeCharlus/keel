@@ -154,6 +154,7 @@ fn route(
             }
             (status, body)
         }
+        ("GET", ["nodes", id, "volumes"]) => handle_forward(id, "GET", "/volumes", &[], commands, client_config),
         ("GET", ["nodes", id, "volumes", name]) => {
             handle_forward(id, "GET", &format!("/volumes/{name}"), &[], commands, client_config)
         }
@@ -1113,6 +1114,17 @@ mod tests {
         register_node(&cp_addr, "node-1", &node_addr);
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/volumes/web-data", "");
+        assert_eq!(status, 200);
+        assert!(body.contains("web-data"), "expected relayed body, got: {body}");
+    }
+
+    #[test]
+    fn get_nodes_id_volumes_forwards_to_the_nodes_list_route() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "- name: web-data\n");
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/volumes", "");
         assert_eq!(status, 200);
         assert!(body.contains("web-data"), "expected relayed body, got: {body}");
     }
