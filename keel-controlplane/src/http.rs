@@ -11,11 +11,22 @@ use std::time::Duration;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
+/// Every accepted connection gets its own OS thread with no concurrency cap,
+/// so a client that connects and never sends anything would otherwise pin a
+/// thread forever -- before the TLS handshake even starts. A read timeout
+/// bounds that.
+const INBOUND_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn apply_read_timeout(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(INBOUND_READ_TIMEOUT));
+}
+
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
 pub fn run(listener: TcpListener, commands: Sender<Command>, reloading_tls: Arc<tls::ReloadingTls>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_read_timeout(&stream);
         let commands = commands.clone();
         let tls_config = reloading_tls.server_config();
         let client_config = reloading_tls.client_config();
@@ -670,7 +681,12 @@ fn forward(
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                response.extend_from_slice(&chunk[..n]);
+                if response.len() > MAX_MESSAGE_BYTES {
+                    return Err(format!("response from node exceeded the {MAX_MESSAGE_BYTES}-byte limit"));
+                }
+            }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e.to_string()),
         }
@@ -716,6 +732,16 @@ mod tests {
     use crate::tls;
     use crate::worker;
     use std::path::PathBuf;
+
+    #[test]
+    fn apply_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(INBOUND_READ_TIMEOUT));
+    }
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
@@ -1049,6 +1075,54 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// Like `start_fake_remote_tls_agentd`, but after the handshake it writes
+    /// far more than `MAX_MESSAGE_BYTES` and never stops — standing in for a
+    /// buggy or compromised (but still mTLS-authenticated) node, to prove
+    /// `forward()`'s response read is bounded rather than growing forever.
+    fn start_fake_remote_tls_agentd_with_unbounded_body() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
+                .unwrap(),
+        );
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
+                }
+                let header = "HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nContent-Type: application/yaml\r\nConnection: close\r\n\r\n";
+                if tls_stream.write_all(header.as_bytes()).is_err() {
+                    continue;
+                }
+                let chunk = vec![b'x'; 65536];
+                loop {
+                    if tls_stream.write_all(&chunk).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn forward_rejects_a_response_larger_than_the_message_cap() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd_with_unbounded_body();
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
+        assert_eq!(status, 500, "expected an oversized response to be rejected, got {status} with body: {body}");
     }
 
     fn register_node(cp_addr: &str, id: &str, node_addr: &str) {

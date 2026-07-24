@@ -4,14 +4,27 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
 use std::thread;
+use std::time::Duration;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Every accepted connection gets its own OS thread with no concurrency cap,
+/// so a client that connects and never sends anything would otherwise pin a
+/// thread forever -- before the TLS handshake even starts. A read timeout
+/// bounds that. This listener is meant to be internet-facing, so it matters
+/// more here than almost anywhere else in the codebase.
+const INBOUND_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn apply_read_timeout(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(INBOUND_READ_TIMEOUT));
+}
 
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
 pub fn run(listener: TcpListener, tls_config: Arc<rustls::ServerConfig>, snapshot: Arc<RwLock<Snapshot>>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_read_timeout(&stream);
         let tls_config = Arc::clone(&tls_config);
         let snapshot = Arc::clone(&snapshot);
         thread::spawn(move || {
@@ -121,6 +134,16 @@ mod tests {
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn apply_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(INBOUND_READ_TIMEOUT));
+    }
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)

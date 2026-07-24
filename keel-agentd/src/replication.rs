@@ -7,9 +7,28 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+/// Every listener in this crate accepts one OS thread per connection with no
+/// concurrency cap, so a client that connects and never sends anything would
+/// otherwise pin a thread forever -- before the header is even read, let
+/// alone authenticated. A read timeout bounds that.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn apply_read_timeout(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+}
 
 pub const ACK_PROCEED: u8 = 0;
 pub const ACK_NEED_FULL: u8 = 1;
+
+/// `read_len_prefixed` only ever carries a replica name or a snapshot id
+/// (both well under keel's own 63-character name limit), never the bulk
+/// snapshot stream itself. A generous but bounded cap stops an attacker-
+/// controlled length prefix from driving an unbounded `vec![0u8; len]`
+/// allocation, which aborts the whole process on failure rather than just
+/// the connection.
+const MAX_FRAME_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
@@ -28,6 +47,9 @@ fn read_len_prefixed(stream: &mut dyn Read) -> io::Result<String> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame length {len} exceeds max of {MAX_FRAME_BYTES}")));
+    }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -157,6 +179,7 @@ fn handle_connection<Z: ZfsManager>(mut stream: TcpStream, zfs: &Z, pool: &str, 
 pub fn run<Z: ZfsManager + Clone + Send + 'static>(listener: TcpListener, zfs: Z, pool: String, targets: ReplicaTargetRegistry) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_read_timeout(&stream);
         let zfs = zfs.clone();
         let pool = pool.clone();
         let targets = targets.clone();
@@ -178,6 +201,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keel-agentd-replication-test-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn apply_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+    }
+
+    #[test]
+    fn read_len_prefixed_rejects_a_length_prefix_beyond_the_max_frame_size() {
+        let len_buf = (MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
+        let result = read_len_prefixed(&mut len_buf.as_slice());
+        assert!(result.is_err(), "an oversized length prefix must be rejected before allocating");
+    }
+
+    #[test]
+    fn read_len_prefixed_accepts_a_length_prefix_at_the_max_frame_size() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(3u32).to_be_bytes());
+        buf.extend_from_slice(b"abc");
+        assert_eq!(read_len_prefixed(&mut buf.as_slice()).unwrap(), "abc");
     }
 
     #[test]

@@ -11,8 +11,23 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Every listener here accepts one OS thread per connection with no
+/// concurrency cap, so a client that connects and never sends anything would
+/// otherwise pin a thread forever -- before the TLS handshake even starts,
+/// let alone a request being parsed. A read timeout bounds that.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn apply_unix_read_timeout(stream: &UnixStream) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+}
+
+fn apply_tcp_read_timeout(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+}
 
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
@@ -25,6 +40,7 @@ pub fn run(
 ) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_unix_read_timeout(&stream);
         let commands = commands.clone();
         let pod_cidr_slot = pod_cidr_slot.clone();
         let service_vips = service_vips.clone();
@@ -45,6 +61,7 @@ pub fn run_tls(
 ) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_tcp_read_timeout(&stream);
         let commands = commands.clone();
         let tls_config = reloading_tls.server_config();
         let pod_cidr_slot = pod_cidr_slot.clone();
@@ -490,6 +507,27 @@ mod tests {
     use keel_zfs::FakeZfsManager;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn apply_unix_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let socket_path = short_unique_socket_path();
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let _client = UnixStream::connect(&socket_path).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_unix_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+    }
+
+    #[test]
+    fn apply_tcp_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_tcp_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+    }
 
     fn sample_spec_yaml(name: &str) -> String {
         format!(
