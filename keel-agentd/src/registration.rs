@@ -3,6 +3,7 @@ use keel_controlplane::wire::{NodeState, NodeStatus};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -46,6 +47,7 @@ pub fn spawn(
     replicate_addr: String,
     control_plane_addr: String,
     heartbeat_interval: Duration,
+    state_dir: PathBuf,
     capacity_cpu: f64,
     capacity_memory: u64,
     reloading_tls: Arc<tls::ReloadingTls>,
@@ -68,7 +70,7 @@ pub fn spawn(
                     Err(e) => eprintln!("keel-agentd: registration failed: {e}"),
                 }
             } else {
-                match heartbeat_once(&control_plane_addr, &node_id, &commands, &client_config) {
+                match heartbeat_once(&control_plane_addr, &node_id, &commands, &client_config, &state_dir) {
                     Ok(entries) => {
                         service_vips.set_all(&entries);
                         crate::proxy::reconcile_services(&entries, &mut proxied_services, &commands);
@@ -116,6 +118,7 @@ fn heartbeat_once(
     node_id: &str,
     commands: &Sender<crate::worker::Command>,
     client_config: &Arc<rustls::ClientConfig>,
+    state_dir: &std::path::Path,
 ) -> Result<Vec<keel_controlplane::wire::ServiceProxyEntry>, String> {
     let (resources_tx, resources_rx) = std::sync::mpsc::channel();
     commands
@@ -133,7 +136,20 @@ fn heartbeat_once(
         .map(|s| keel_controlplane::wire::JailHealth { name: s.record.spec.metadata.name, running: s.running })
         .collect();
 
-    let heartbeat = keel_controlplane::wire::Heartbeat { committed_cpu, committed_memory, jails, ingresses: vec![] };
+    let ingress_records =
+        crate::ingress_store::load_all(state_dir).map_err(|e| format!("failed to load ingress records: {e}"))?;
+    let ingresses: Vec<keel_controlplane::wire::IngressHealth> = ingress_records
+        .into_iter()
+        .map(|r| keel_controlplane::wire::IngressHealth {
+            name: r.spec.metadata.name,
+            host: r.spec.spec.host,
+            backend_service: r.spec.spec.backend.service,
+            backend_port: r.spec.spec.backend.port,
+            cert_expires_at_unix: r.cert_expires_at_unix,
+        })
+        .collect();
+
+    let heartbeat = keel_controlplane::wire::Heartbeat { committed_cpu, committed_memory, jails, ingresses };
     let body = serde_yaml::to_string(&heartbeat).map_err(|e| format!("failed to serialize heartbeat: {e}"))?;
     let response_body = send_request(control_plane_addr, "POST", &format!("/nodes/{node_id}/heartbeat"), &body, client_config)?;
     serde_yaml::from_slice(&response_body).map_err(|e| format!("malformed heartbeat response: {e}"))
@@ -486,6 +502,7 @@ mod tests {
             "127.0.0.1:0".to_string(),
             control_plane_addr.clone(),
             Duration::from_millis(50),
+            std::env::temp_dir().join("keel-agentd-registration-test-heartbeat_populates_the_service_vip_slot"),
             1.0,
             1_073_741_824,
             node_reloading_tls(),
@@ -514,6 +531,7 @@ mod tests {
     fn registers_and_then_keeps_heartbeating() {
         let control_plane_addr = start_test_control_plane();
         let zfs = keel_zfs::FakeZfsManager::new();
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-registers_and_then_keeps_heartbeating");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -521,7 +539,7 @@ mod tests {
                 keel_net::FakeNetManager::new(),
                 keel_jail::FakeMountManager::new(),
                 "zroot".to_string(),
-                std::env::temp_dir().join("keel-agentd-registration-test-registers_and_then_keeps_heartbeating"),
+                state_dir.clone(),
                 Box::new(keel_ingress::FakeAcmeClient::new()),
                 Box::new(keel_ingress::FakeDnsProvider::new()),
                 Box::new(crate::nginx::FakeNginxController::new()),
@@ -537,6 +555,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr.clone(),
             Duration::from_millis(50),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             node_reloading_tls(),
@@ -557,13 +576,14 @@ mod tests {
         let control_plane_addr = start_test_control_plane();
         let zfs = keel_zfs::FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-heartbeats_report_the_reconcilers_committed_resources");
         let reconciler = crate::Reconciler::new(
             keel_jail::FakeJailRuntime::new(),
             zfs.clone(),
             keel_net::FakeNetManager::new(),
             keel_jail::FakeMountManager::new(),
             "zroot".to_string(),
-            std::env::temp_dir().join("keel-agentd-registration-test-heartbeats_report_the_reconcilers_committed_resources"),
+            state_dir.clone(),
             Box::new(keel_ingress::FakeAcmeClient::new()),
             Box::new(keel_ingress::FakeDnsProvider::new()),
             Box::new(crate::nginx::FakeNginxController::new()),
@@ -605,6 +625,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr_clone,
             Duration::from_millis(50),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             node_reloading_tls(),
@@ -620,6 +641,65 @@ mod tests {
     }
 
     #[test]
+    fn heartbeats_report_ingress_health_gathered_from_the_ingress_store() {
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-heartbeats_report_ingress_health");
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let record = crate::IngressRecord {
+            spec: keel_spec::IngressSpec {
+                api_version: "keel/v1".to_string(),
+                kind: "Ingress".to_string(),
+                metadata: keel_spec::Metadata { name: "blog".to_string() },
+                spec: keel_spec::IngressSpecBody {
+                    host: "example.com".to_string(),
+                    backend: keel_spec::IngressBackend { service: "hugo-site".to_string(), port: 8080 },
+                    tls: keel_spec::IngressTls { email: "admin@example.com".to_string() },
+                },
+            },
+            cert_expires_at_unix: Some(1_800_000_000),
+        };
+        crate::ingress_store::save(&state_dir, &record).unwrap();
+
+        let control_plane_addr = start_test_control_plane();
+        let zfs = keel_zfs::FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/base/14.2-web");
+        let reconciler = crate::Reconciler::new(
+            keel_jail::FakeJailRuntime::new(),
+            zfs.clone(),
+            keel_net::FakeNetManager::new(),
+            keel_jail::FakeMountManager::new(),
+            "zroot".to_string(),
+            state_dir.clone(),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string());
+
+        let _handle = spawn(
+            "node-1".to_string(),
+            "10.0.0.1".to_string(),
+            "10.0.0.9:7622".to_string(),
+            control_plane_addr.clone(),
+            Duration::from_millis(50),
+            state_dir,
+            4.0,
+            8 * 1024 * 1024 * 1024,
+            node_reloading_tls(),
+            commands,
+            crate::PodCidrSlot::new(),
+            crate::ServiceVipSlot::new(),
+        );
+
+        thread::sleep(Duration::from_millis(200));
+        let body = get_nodes(&control_plane_addr);
+        assert!(body.contains("backend_service: hugo-site"), "expected reported ingress health, got: {body}");
+        assert!(body.contains("host: example.com"), "got: {body}");
+        assert!(body.contains("cert_expires_at_unix: 1800000000"), "got: {body}");
+    }
+
+    #[test]
     fn a_heartbeat_aliases_and_proxies_an_applied_service() {
         let control_plane_addr = start_test_control_plane();
         let client_config = node_client_config();
@@ -630,6 +710,7 @@ mod tests {
         let net = keel_net::FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
         let zfs = keel_zfs::FakeZfsManager::new();
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-a_heartbeat_aliases_and_proxies_an_applied_service");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -637,7 +718,7 @@ mod tests {
                 net.clone(),
                 keel_jail::FakeMountManager::new(),
                 "zroot".to_string(),
-                std::env::temp_dir().join("keel-agentd-registration-test-a_heartbeat_aliases_and_proxies_an_applied_service"),
+                state_dir.clone(),
                 Box::new(keel_ingress::FakeAcmeClient::new()),
                 Box::new(keel_ingress::FakeDnsProvider::new()),
                 Box::new(crate::nginx::FakeNginxController::new()),
@@ -665,6 +746,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr.clone(),
             Duration::from_millis(50),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             node_reloading_tls(),
@@ -711,6 +793,7 @@ mod tests {
     fn registration_with_a_wrong_ca_certificate_never_registers() {
         let control_plane_addr = start_test_control_plane();
         let zfs = keel_zfs::FakeZfsManager::new();
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-registration_with_a_wrong_ca_certificate_never_registers");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -718,7 +801,7 @@ mod tests {
                 keel_net::FakeNetManager::new(),
                 keel_jail::FakeMountManager::new(),
                 "zroot".to_string(),
-                std::env::temp_dir().join("keel-agentd-registration-test-registration_with_a_wrong_ca_certificate_never_registers"),
+                state_dir.clone(),
                 Box::new(keel_ingress::FakeAcmeClient::new()),
                 Box::new(keel_ingress::FakeDnsProvider::new()),
                 Box::new(crate::nginx::FakeNginxController::new()),
@@ -734,6 +817,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr.clone(),
             Duration::from_millis(50),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             wrong_ca_reloading_tls(),
@@ -751,6 +835,7 @@ mod tests {
     fn a_successful_registration_stores_the_returned_pod_cidr_in_the_slot() {
         let control_plane_addr = start_test_control_plane();
         let zfs = keel_zfs::FakeZfsManager::new();
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-a_successful_registration_stores_the_returned_pod_cidr_in_the_slot");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -758,7 +843,7 @@ mod tests {
                 keel_net::FakeNetManager::new(),
                 keel_jail::FakeMountManager::new(),
                 "zroot".to_string(),
-                std::env::temp_dir().join("keel-agentd-registration-test-a_successful_registration_stores_the_returned_pod_cidr_in_the_slot"),
+                state_dir.clone(),
                 Box::new(keel_ingress::FakeAcmeClient::new()),
                 Box::new(keel_ingress::FakeDnsProvider::new()),
                 Box::new(crate::nginx::FakeNginxController::new()),
@@ -775,6 +860,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr,
             Duration::from_millis(50),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             node_reloading_tls(),
@@ -838,6 +924,7 @@ mod tests {
 
         let net = keel_net::FakeNetManager::new();
         let zfs = keel_zfs::FakeZfsManager::new();
+        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-route_reconciliation_adds_a_route_for_a_peer");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -845,7 +932,7 @@ mod tests {
                 net.clone(),
                 keel_jail::FakeMountManager::new(),
                 "zroot".to_string(),
-                std::env::temp_dir().join("keel-agentd-registration-test-route_reconciliation_adds_a_route_for_a_peer"),
+                state_dir.clone(),
                 Box::new(keel_ingress::FakeAcmeClient::new()),
                 Box::new(keel_ingress::FakeDnsProvider::new()),
                 Box::new(crate::nginx::FakeNginxController::new()),
@@ -862,6 +949,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr,
             Duration::from_millis(50),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             node_reloading_tls(),
@@ -908,6 +996,8 @@ mod tests {
 
         let net = keel_net::FakeNetManager::new();
         let zfs = keel_zfs::FakeZfsManager::new();
+        let state_dir =
+            std::env::temp_dir().join("keel-agentd-registration-test-route_reconciliation_withdraws_a_route_once_the_peer_is_reported_dead");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -915,7 +1005,7 @@ mod tests {
                 net.clone(),
                 keel_jail::FakeMountManager::new(),
                 "zroot".to_string(),
-                std::env::temp_dir().join("keel-agentd-registration-test-route_reconciliation_withdraws_a_route_once_the_peer_is_reported_dead"),
+                state_dir.clone(),
                 Box::new(keel_ingress::FakeAcmeClient::new()),
                 Box::new(keel_ingress::FakeDnsProvider::new()),
                 Box::new(crate::nginx::FakeNginxController::new()),
@@ -932,6 +1022,7 @@ mod tests {
             "10.0.0.9:7622".to_string(),
             control_plane_addr,
             Duration::from_millis(500),
+            state_dir,
             4.0,
             8 * 1024 * 1024 * 1024,
             node_reloading_tls(),
