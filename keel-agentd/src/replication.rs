@@ -1,15 +1,44 @@
 use crate::replica_target::ReplicaTarget;
 use crate::replica_target_store;
+use crate::tls::ReloadingTls;
 use keel_zfs::ZfsManager;
+use rustls::{ServerConnection, StreamOwned};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+/// Node-to-node replication carries live volume data and previously had no
+/// authentication or encryption at all -- any reachable host could invent a
+/// replica name and get an arbitrary stream `zfs receive`d, or align a
+/// guessed snapshot id to poison an existing standby. Requiring the same
+/// mTLS the rest of this crate's peer-to-peer traffic already uses closes
+/// both gaps at once instead of inventing a second auth mechanism.
+type TlsStream = StreamOwned<ServerConnection, TcpStream>;
+
+/// Every listener in this crate accepts one OS thread per connection with no
+/// concurrency cap, so a client that connects and never sends anything would
+/// otherwise pin a thread forever -- before the header is even read, let
+/// alone authenticated. A read timeout bounds that.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn apply_read_timeout(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+}
 
 pub const ACK_PROCEED: u8 = 0;
 pub const ACK_NEED_FULL: u8 = 1;
+
+/// `read_len_prefixed` only ever carries a replica name or a snapshot id
+/// (both well under keel's own 63-character name limit), never the bulk
+/// snapshot stream itself. A generous but bounded cap stops an attacker-
+/// controlled length prefix from driving an unbounded `vec![0u8; len]`
+/// allocation, which aborts the whole process on failure rather than just
+/// the connection.
+const MAX_FRAME_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
@@ -28,6 +57,9 @@ fn read_len_prefixed(stream: &mut dyn Read) -> io::Result<String> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame length {len} exceeds max of {MAX_FRAME_BYTES}")));
+    }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -133,11 +165,11 @@ impl ReplicaTargetRegistry {
 /// directly. The volume/dataset name is reconstructed from it here using
 /// the "one volume named `data` per stateful replica" convention already
 /// hardcoded in `worker.rs`'s `Command::Apply` handler.
-fn handle_connection<Z: ZfsManager>(mut stream: TcpStream, zfs: &Z, pool: &str, targets: &ReplicaTargetRegistry) -> io::Result<()> {
-    let header = read_header(&mut stream)?;
+fn handle_connection<Z: ZfsManager>(stream: &mut TlsStream, zfs: &Z, pool: &str, targets: &ReplicaTargetRegistry) -> io::Result<()> {
+    let header = read_header(stream)?;
     let volume_name = format!("{}-data", header.replica_name);
     let dataset = crate::record::volume_dataset_path(pool, &volume_name);
-    let peer_addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    let peer_addr = stream.sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     let target = targets
         .ensure(&header.replica_name, &dataset, &peer_addr)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -148,20 +180,51 @@ fn handle_connection<Z: ZfsManager>(mut stream: TcpStream, zfs: &Z, pool: &str, 
     }
     stream.write_all(&[ACK_PROCEED])?;
 
-    zfs.receive_snapshot(&dataset, &mut stream).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    // The sender signals "done" with a raw TCP half-close (`sock.shutdown
+    // (Write)`), not a TLS `close_notify` alert -- the same one-directional
+    // half-close idiom keel-controlplane's own `forward()` already uses over
+    // TLS. rustls surfaces that as `ErrorKind::UnexpectedEof` on the next
+    // read rather than `Ok(0)`; translate it back to a clean EOF here so
+    // `ZfsManager::receive_snapshot` (which just calls a generic `Read` to
+    // completion, real or fake) sees the same clean end-of-stream a raw,
+    // non-TLS socket would have given it.
+    let mut reader = EofTolerantRead(stream);
+    zfs.receive_snapshot(&dataset, &mut reader).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     targets
         .record_snapshot(&header.replica_name, &header.snapshot_id)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
 }
 
-pub fn run<Z: ZfsManager + Clone + Send + 'static>(listener: TcpListener, zfs: Z, pool: String, targets: ReplicaTargetRegistry) {
+struct EofTolerantRead<'a, R: Read>(&'a mut R);
+
+impl<R: Read> Read for EofTolerantRead<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.0.read(buf) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+pub fn run<Z: ZfsManager + Clone + Send + 'static>(
+    listener: TcpListener,
+    zfs: Z,
+    pool: String,
+    targets: ReplicaTargetRegistry,
+    reloading_tls: Arc<ReloadingTls>,
+) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_read_timeout(&stream);
         let zfs = zfs.clone();
         let pool = pool.clone();
         let targets = targets.clone();
+        let tls_config = reloading_tls.server_config();
         thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, &zfs, &pool, &targets) {
+            let Ok(conn) = ServerConnection::new(tls_config) else { return };
+            let mut tls_stream = TlsStream::new(conn, stream);
+            if let Err(e) = handle_connection(&mut tls_stream, &zfs, &pool, &targets) {
                 eprintln!("keel-agentd: replication connection failed: {e}");
             }
         });
@@ -178,6 +241,55 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keel-agentd-replication-test-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
+    }
+
+    fn test_reloading_tls() -> Arc<ReloadingTls> {
+        ReloadingTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), fixture("ca.crt"), fixture("crl.pem"), Duration::from_secs(3600))
+            .unwrap()
+    }
+
+    type ClientTlsStream = StreamOwned<rustls::ClientConnection, TcpStream>;
+
+    /// A real, mTLS-authenticated client connection to a `run()`-served
+    /// listener, standing in for another node's own replication sender.
+    fn connect_tls(addr: std::net::SocketAddr) -> ClientTlsStream {
+        let client_config = Arc::new(
+            crate::tls::load_client_config(&fixture("fixture-client.crt"), &fixture("fixture-client.key"), &fixture("ca.crt"), &fixture("crl.pem"))
+                .unwrap(),
+        );
+        let server_name = crate::tls::server_name_from_addr(&addr.to_string()).unwrap();
+        let tcp_stream = TcpStream::connect(addr).unwrap();
+        let conn = rustls::ClientConnection::new(client_config, server_name).unwrap();
+        rustls::StreamOwned::new(conn, tcp_stream)
+    }
+
+    #[test]
+    fn apply_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+    }
+
+    #[test]
+    fn read_len_prefixed_rejects_a_length_prefix_beyond_the_max_frame_size() {
+        let len_buf = (MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
+        let result = read_len_prefixed(&mut len_buf.as_slice());
+        assert!(result.is_err(), "an oversized length prefix must be rejected before allocating");
+    }
+
+    #[test]
+    fn read_len_prefixed_accepts_a_length_prefix_at_the_max_frame_size() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(3u32).to_be_bytes());
+        buf.extend_from_slice(b"abc");
+        assert_eq!(read_len_prefixed(&mut buf.as_slice()).unwrap(), "abc");
     }
 
     #[test]
@@ -213,16 +325,17 @@ mod tests {
         let pool = "zroot".to_string();
         let targets_clone = targets.clone();
         let receiver_zfs_clone = receiver_zfs.clone();
-        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone));
+        let reloading_tls = test_reloading_tls();
+        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
 
-        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut stream = connect_tls(addr);
         write_header(&mut stream, "db-0", "keel-repl-1", None).unwrap();
         let mut ack = [0u8; 1];
         stream.read_exact(&mut ack).unwrap();
         assert_eq!(ack[0], ACK_PROCEED);
 
         sender_zfs.send_snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1", None, &mut stream).unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        stream.sock.shutdown(std::net::Shutdown::Write).unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(receiver_zfs.dataset_exists("zroot/keel/volumes/db-0-data").unwrap());
@@ -241,9 +354,10 @@ mod tests {
         let pool = "zroot".to_string();
         let targets_clone = targets.clone();
         let receiver_zfs_clone = receiver_zfs.clone();
-        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone));
+        let reloading_tls = test_reloading_tls();
+        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
 
-        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut stream = connect_tls(addr);
         // This node has no ReplicaTarget yet (last_snapshot is None), so
         // claiming a base of "keel-repl-9" must be rejected.
         write_header(&mut stream, "db-0", "keel-repl-10", Some("keel-repl-9")).unwrap();
@@ -253,5 +367,36 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(!receiver_zfs.dataset_exists("zroot/keel/volumes/db-0-data").unwrap());
+    }
+
+    #[test]
+    fn a_plain_tcp_connection_with_no_tls_handshake_never_reaches_the_protocol() {
+        let dir = test_state_dir("a_plain_tcp_connection_with_no_tls_handshake_never_reaches_the_protocol");
+        let targets = ReplicaTargetRegistry::load(dir).unwrap();
+        let receiver_zfs = FakeZfsManager::new();
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pool = "zroot".to_string();
+        let targets_clone = targets.clone();
+        let receiver_zfs_clone = receiver_zfs.clone();
+        let reloading_tls = test_reloading_tls();
+        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
+
+        // A bare TCP client that skips the TLS handshake entirely and just
+        // writes the wire header as plaintext -- what any of the previous
+        // (pre-TLS) attackers/peers would have done. The server reads these
+        // bytes as a TLS record, fails to parse them as one (logged as
+        // "replication connection failed: received corrupt message..."), and
+        // drops the connection without ever calling `handle_connection`. Not
+        // asserted here: whatever raw bytes come back on the wire (e.g. a
+        // TLS alert record's leading byte can satisfy a naive `read_exact`
+        // without being a real protocol ack) -- only that the protocol was
+        // genuinely never reached, checked below via the target registry.
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write_header(&mut stream, "db-0", "keel-repl-1", None).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(targets.get("db-0").is_none(), "a non-TLS connection must never reach the replica-target bookkeeping");
     }
 }

@@ -208,6 +208,7 @@ mod tests {
                 },
             },
             epair_ordinal: 0,
+            deleting: false,
         }
     }
 

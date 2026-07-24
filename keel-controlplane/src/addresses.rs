@@ -1,11 +1,13 @@
 use ipnet::Ipv4Net;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 /// Which addresses are currently assigned to a replica, per node -- lives
-/// next to `Placements`/`Services`: no persistence, forgotten on restart,
-/// populated when a replica is scheduled and freed when it's torn down.
-#[derive(Debug, Default, Clone)]
+/// next to `Placements`/`Services`, persisted the same way (see
+/// `keel-controlplane/src/store.rs`), populated when a replica is scheduled
+/// and freed when it's torn down.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UsedAddresses {
     used_by_node: HashMap<String, HashSet<Ipv4Addr>>,
     by_jail: HashMap<String, (String, Ipv4Addr)>,
@@ -128,5 +130,16 @@ mod tests {
         let mut used = UsedAddresses::new();
         used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
         assert_eq!(first_free_address(cidr("10.0.60.0/30"), "node-1", &used), None);
+    }
+
+    #[test]
+    fn used_addresses_round_trips_through_yaml() {
+        let mut used = UsedAddresses::new();
+        used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
+        let path = std::env::temp_dir().join(format!("keel-controlplane-used-addresses-test-{}.yaml", std::process::id()));
+        crate::store::save(&path, &used).unwrap();
+        let loaded: UsedAddresses = crate::store::load_or_default(&path);
+        assert_eq!(loaded.address_of("web-0"), Some(addr("10.0.60.2")));
+        assert!(loaded.is_used("node-1", addr("10.0.60.2")));
     }
 }

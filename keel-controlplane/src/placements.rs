@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Placements {
     by_jail: HashMap<String, String>,
 }
@@ -68,5 +69,17 @@ mod tests {
         let mut entries: Vec<(&str, &str)> = placements.iter().collect();
         entries.sort();
         assert_eq!(entries, vec![("web-1", "node-1"), ("web-2", "node-2")]);
+    }
+
+    #[test]
+    fn placements_round_trips_through_yaml() {
+        let mut placements = Placements::new();
+        placements.set("web-0".to_string(), "node-1".to_string());
+        placements.set("web-1".to_string(), "node-2".to_string());
+        let path = std::env::temp_dir().join(format!("keel-controlplane-placements-test-{}.yaml", std::process::id()));
+        crate::store::save(&path, &placements).unwrap();
+        let loaded: Placements = crate::store::load_or_default(&path);
+        assert_eq!(loaded.get("web-0"), Some("node-1"));
+        assert_eq!(loaded.get("web-1"), Some("node-2"));
     }
 }

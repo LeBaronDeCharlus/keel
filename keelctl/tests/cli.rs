@@ -12,6 +12,15 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
 }
 
+fn fresh_controlplane_state_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("keelctl-test-controlplane-{}-{id}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 fn start_test_server(name: &str) -> PathBuf {
     let state_dir = std::env::temp_dir().join(format!("keelctl-test-state-{name}"));
     let _ = std::fs::remove_dir_all(&state_dir);
@@ -31,7 +40,7 @@ fn start_test_server(name: &str) -> PathBuf {
         keel_agentd::ServiceVipSlot::new(),
     )
     .unwrap();
-    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
     // A short, non-descriptive filename (not the full test name) — macOS/BSD
     // cap Unix socket paths at ~104 bytes (SUN_LEN), and the default macOS
@@ -92,7 +101,7 @@ fn start_test_agentd_tcp(name: &str) -> String {
         keel_agentd::ServiceVipSlot::new(),
     )
     .unwrap();
-    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+    let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -118,6 +127,7 @@ fn start_test_control_plane_with_node(node_id: &str, node_addr: &str) -> String 
         keel_controlplane::addresses::UsedAddresses::new(),
         keel_controlplane::Standbys::new(),
         keel_controlplane::PendingFences::new(),
+        fresh_controlplane_state_dir(),
     );
 
     let (reg_tx, reg_rx) = std::sync::mpsc::channel();

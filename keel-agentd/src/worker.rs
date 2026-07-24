@@ -1,10 +1,12 @@
 use crate::reconciler::{ReconcileError, Reconciler};
+use crate::tls::ReloadingTls;
 use crate::wire::JailStatus;
 use keel_jail::{JailRuntime, MountManager};
 use keel_net::NetManager;
 use keel_spec::{IngressSpec, JailSpec};
 use keel_zfs::ZfsManager;
 use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,18 @@ pub enum Command {
     DeleteIngress(String, Sender<Result<(), ReconcileError>>),
 }
 
-pub fn spawn<J, Z, N, M>(mut reconciler: Reconciler<J, Z, N, M>, zfs: Z, pool: String) -> (JoinHandle<()>, Sender<Command>)
+/// `replicate_tls` is the TLS material the replication *sender* side
+/// (`replication_loop::spawn`) authenticates itself with -- `None` in tests
+/// that never apply a stateful+replicated spec (the vast majority), `Some`
+/// wherever a real cluster or a test specifically exercises replication,
+/// mirroring the same `ReloadingTls` the replication *listener* itself
+/// verifies incoming connections against.
+pub fn spawn<J, Z, N, M>(
+    mut reconciler: Reconciler<J, Z, N, M>,
+    zfs: Z,
+    pool: String,
+    replicate_tls: Option<Arc<ReloadingTls>>,
+) -> (JoinHandle<()>, Sender<Command>)
 where
     J: JailRuntime + Send + 'static,
     Z: ZfsManager + Clone + Send + 'static,
@@ -44,7 +57,7 @@ where
     let handle = thread::spawn(move || {
         let mut replicating: std::collections::HashSet<String> = std::collections::HashSet::new();
         for command in rx {
-            handle_command(&mut reconciler, command, &zfs, &pool, &commands_for_thread, &mut replicating);
+            handle_command(&mut reconciler, command, &zfs, &pool, &commands_for_thread, &mut replicating, &replicate_tls);
         }
     });
     (handle, tx)
@@ -58,6 +71,7 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
     pool: &str,
     commands: &Sender<Command>,
     replicating: &mut std::collections::HashSet<String>,
+    replicate_tls: &Option<Arc<ReloadingTls>>,
 ) {
     match command {
         Command::Apply(spec, reply) => {
@@ -72,13 +86,27 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
             // discarded here (same treatment as a plain `Tick`).
             let _ = reconciler.reconcile(Instant::now());
             if result.is_ok() && is_stateful_and_replicated && replicating.insert(name.clone()) {
-                let volume_name = format!("{name}-data");
-                crate::replication_loop::spawn(name, volume_name, pool.to_string(), zfs.clone(), commands.clone(), Duration::from_secs(30));
+                match replicate_tls {
+                    Some(tls) => {
+                        let volume_name = format!("{name}-data");
+                        crate::replication_loop::spawn(name, volume_name, pool.to_string(), zfs.clone(), commands.clone(), Duration::from_secs(30), Arc::clone(tls));
+                    }
+                    None => eprintln!("keel-agentd: '{name}' is stateful and replicated, but no replication TLS configuration is available -- not starting its replication loop"),
+                }
             }
             let _ = reply.send(result);
         }
         Command::Delete(name, reply) => {
             let result = reconciler.delete(&name);
+            if result.is_ok() {
+                // Only once the delete has genuinely completed (not merely
+                // been attempted -- `delete` returns `Err` and leaves the
+                // record marked `deleting` on a transient failure, to be
+                // resumed by a later reconcile) -- otherwise a name could be
+                // freed up for re-insertion while its old replication loop
+                // is still shutting down.
+                replicating.remove(&name);
+            }
             let _ = reconciler.reconcile(Instant::now());
             let _ = reply.send(result);
         }
@@ -127,8 +155,13 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
                 let spec = &status.record.spec.spec;
                 let name = status.record.spec.metadata.name.clone();
                 if !spec.volumes.is_empty() && spec.replicate_to.is_some() && replicating.insert(name.clone()) {
-                    let volume_name = format!("{name}-data");
-                    crate::replication_loop::spawn(name, volume_name, pool.to_string(), zfs.clone(), commands.clone(), Duration::from_secs(30));
+                    match replicate_tls {
+                        Some(tls) => {
+                            let volume_name = format!("{name}-data");
+                            crate::replication_loop::spawn(name, volume_name, pool.to_string(), zfs.clone(), commands.clone(), Duration::from_secs(30), Arc::clone(tls));
+                        }
+                        None => eprintln!("keel-agentd: '{name}' is stateful and replicated, but no replication TLS configuration is available -- not resuming its replication loop"),
+                    }
                 }
             }
             let _ = reply.send(());
@@ -209,7 +242,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_handle, commands) = spawn(reconciler, zfs, "zroot".to_string());
+        let (_handle, commands) = spawn(reconciler, zfs, "zroot".to_string(), None);
         commands
     }
 
@@ -336,7 +369,7 @@ mod tests {
         // Reconciler owns its own NetManager instance internally; assert
         // through the command channel's observable success instead of a
         // second handle to the same fake.
-        let (_worker_handle, commands) = spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let (tx, rx) = mpsc::channel();
         commands.send(Command::AddServiceAlias("keel0".to_string(), "10.0.250.7".to_string(), tx)).unwrap();
@@ -468,6 +501,15 @@ mod tests {
         assert!(matches!(delete_rx.recv().unwrap(), Err(ReconcileError::NotFound(_))));
     }
 
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
+    }
+
+    fn test_reloading_tls() -> Arc<ReloadingTls> {
+        ReloadingTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), fixture("ca.crt"), fixture("crl.pem"), Duration::from_secs(3600))
+            .unwrap()
+    }
+
     fn stateful_replicated_spec(name: &str, replicate_to: &str) -> JailSpec {
         JailSpec {
             api_version: "keel/v1".to_string(),
@@ -483,6 +525,54 @@ mod tests {
                 replicate_to: Some(replicate_to.to_string()),
             },
         }
+    }
+
+    #[test]
+    fn deleting_a_stateful_replicated_jail_clears_it_from_the_replicating_guard() {
+        // Reproduces "replication is permanently lost after delete+recreate
+        // of the same jail name in one daemon run": `replicating` gates
+        // `replication_loop::spawn` against double-spawning, but if `Delete`
+        // never clears a name out of it, re-applying the same
+        // stateful+replicated name later in the same process silently
+        // spawns no new loop at all. Drives `handle_command` directly
+        // (rather than through the 30s-interval-hardcoded `spawn()` path)
+        // so this stays a fast, direct test of the guard itself.
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/base/14.2-web");
+        let mut reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            test_state_dir("deleting_a_stateful_replicated_jail_clears_it_from_the_replicating_guard"),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (commands, _rx) = mpsc::channel();
+        let mut replicating: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let tls = Some(test_reloading_tls());
+
+        let (apply_tx, apply_rx) = mpsc::channel();
+        handle_command(&mut reconciler, Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), apply_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        apply_rx.recv().unwrap().unwrap();
+        assert!(replicating.contains("db-0"), "expected the initial apply to start tracking its replication loop");
+
+        let (delete_tx, delete_rx) = mpsc::channel();
+        handle_command(&mut reconciler, Command::Delete("db-0".to_string(), delete_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        delete_rx.recv().unwrap().unwrap();
+        assert!(!replicating.contains("db-0"), "delete must clear the name out of the replicating guard");
+
+        // Re-applying the same name later must be able to start a fresh
+        // loop -- i.e. `replicating.insert` must return `true` again, not
+        // silently no-op forever because the name was never removed.
+        let (reapply_tx, reapply_rx) = mpsc::channel();
+        handle_command(&mut reconciler, Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), reapply_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        reapply_rx.recv().unwrap().unwrap();
+        assert!(replicating.contains("db-0"), "expected the re-apply to start tracking a new replication loop");
     }
 
     #[test]
@@ -510,7 +600,8 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let receiver_zfs_clone = receiver_zfs.clone();
         let targets_clone = targets.clone();
-        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone));
+        let reloading_tls = test_reloading_tls();
+        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone, reloading_tls));
 
         // The "previous process": apply and reconcile directly against a
         // `Reconciler`, never touching `worker::spawn` or `Command::Apply`,
@@ -550,7 +641,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = spawn(restarted_reconciler, zfs.clone(), "zroot".to_string());
+        let (_worker_handle, commands) = spawn(restarted_reconciler, zfs.clone(), "zroot".to_string(), Some(test_reloading_tls()));
 
         let (resume_tx, resume_rx) = mpsc::channel();
         commands.send(Command::ResumeReplicationLoops(resume_tx)).unwrap();

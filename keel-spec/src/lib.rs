@@ -10,11 +10,16 @@ pub use types::{
     NetworkSpec, RestartPolicy, ResourcesSpec, ServiceSpec, ServiceSpecBody, Spec,
     TemplateNetworkSpec, VolumeMount,
 };
-pub use validate::{validate_address, validate_email, validate_host, validate_name, validate_transition, validate_volumes};
+pub use validate::{
+    validate_address, validate_bridge, validate_email, validate_host, validate_image, validate_mount_path,
+    validate_name, validate_transition, validate_volumes,
+};
 
 pub fn parse_and_validate(yaml: &str) -> Result<JailSpec, SpecError> {
     let spec: JailSpec = serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
     validate::validate_name(&spec.metadata.name)?;
+    validate::validate_image(&spec.spec.image)?;
+    validate::validate_bridge(&spec.spec.network.bridge)?;
     validate::validate_address(&spec.spec.network.address)?;
     resources::parse_cpu_cores(&spec.spec.resources.cpu)?;
     resources::parse_memory_bytes(&spec.spec.resources.memory)?;
@@ -25,6 +30,8 @@ pub fn parse_and_validate(yaml: &str) -> Result<JailSpec, SpecError> {
 pub fn parse_and_validate_service(yaml: &str) -> Result<ServiceSpec, SpecError> {
     let spec: ServiceSpec = serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
     validate::validate_name(&spec.metadata.name)?;
+    validate::validate_image(&spec.spec.template.image)?;
+    validate::validate_bridge(&spec.spec.template.network.bridge)?;
     resources::parse_cpu_cores(&spec.spec.template.resources.cpu)?;
     resources::parse_memory_bytes(&spec.spec.template.resources.memory)?;
     validate::validate_volumes(&spec.spec.template.volumes)?;
@@ -194,5 +201,52 @@ spec:
     #[test]
     fn sniff_kind_reads_ingress() {
         assert_eq!(sniff_kind(VALID_INGRESS_YAML).unwrap(), "Ingress");
+    }
+
+    const VALID_JAIL_YAML: &str = r#"
+apiVersion: keel/v1
+kind: Jail
+metadata:
+  name: web-1
+spec:
+  image: base/14.2-web
+  command: ["/usr/local/bin/myapp"]
+  network:
+    vnet: true
+    bridge: keel0
+    address: 10.0.0.5/24
+  resources:
+    cpu: "2"
+    memory: "512M"
+  restartPolicy: Always
+"#;
+
+    #[test]
+    fn parse_and_validate_accepts_a_well_formed_jail() {
+        assert!(parse_and_validate(VALID_JAIL_YAML).is_ok());
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_an_image_outside_the_base_namespace() {
+        let yaml = VALID_JAIL_YAML.replace("image: base/14.2-web", "image: jails/other-jail");
+        assert!(matches!(parse_and_validate(&yaml), Err(SpecError::InvalidImage(_))));
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_a_bridge_outside_the_keel_naming_convention() {
+        let yaml = VALID_JAIL_YAML.replace("bridge: keel0", "bridge: lo0");
+        assert!(matches!(parse_and_validate(&yaml), Err(SpecError::InvalidBridge(_))));
+    }
+
+    #[test]
+    fn parse_and_validate_service_rejects_an_image_outside_the_base_namespace() {
+        let yaml = VALID_SERVICE_YAML.replace("image: base/14.2-web", "image: volumes/web-data");
+        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidImage(_))));
+    }
+
+    #[test]
+    fn parse_and_validate_service_rejects_a_bridge_outside_the_keel_naming_convention() {
+        let yaml = VALID_SERVICE_YAML.replace("bridge: keel0", "bridge: em0");
+        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidBridge(_))));
     }
 }

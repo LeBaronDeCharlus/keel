@@ -337,7 +337,7 @@ mod tests {
             keel_agentd::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = keel_agentd::worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = keel_agentd::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let service_vips = keel_agentd::ServiceVipSlot::new();
         let proxy_entries: Vec<_> = known_services

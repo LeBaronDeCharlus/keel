@@ -2,11 +2,13 @@ use crate::MountError;
 use crate::MountManager;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
+/// `Arc`-backed so a clone shares the same underlying mount table, needed by
+/// tests that simulate a daemon restart against the same real mount state.
+#[derive(Default, Clone)]
 pub struct FakeMountManager {
-    mounted: Mutex<HashSet<PathBuf>>,
+    mounted: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl FakeMountManager {

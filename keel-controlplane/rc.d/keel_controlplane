@@ -20,9 +20,19 @@ load_rc_config "$name"
 : ${keel_controlplane_tls_cert_file:=""}
 : ${keel_controlplane_tls_key_file:=""}
 : ${keel_controlplane_tls_crl_file:=""}
+: ${keel_controlplane_state_dir:=""}
 
 pidfile="/var/run/${name}.pid"
 command="/usr/sbin/daemon"
+
+# state_dir is optional (the binary defaults to /var/db/keel-controlplane on
+# its own), so it's only passed when the operator has actually set it -
+# named controlplane_extra_flags, not the generic "flags", since that name
+# collides with rc.subr's own reserved ${name}_flags convention (see
+# keel-dashboard's rc.d script for where this bug class was first found).
+controlplane_extra_flags=""
+[ -n "$keel_controlplane_state_dir" ] && controlplane_extra_flags="--state-dir $keel_controlplane_state_dir"
+
 command_args="-r -P ${pidfile} -S -T ${name} -- \
   ${keel_controlplane_bin} --addr ${keel_controlplane_addr} \
   --cluster-cidr ${keel_controlplane_cluster_cidr} \
@@ -30,6 +40,7 @@ command_args="-r -P ${pidfile} -S -T ${name} -- \
   --tls-ca-file ${keel_controlplane_tls_ca_file} \
   --tls-cert-file ${keel_controlplane_tls_cert_file} \
   --tls-key-file ${keel_controlplane_tls_key_file} \
-  --tls-crl-file ${keel_controlplane_tls_crl_file}"
+  --tls-crl-file ${keel_controlplane_tls_crl_file} \
+  ${controlplane_extra_flags}"
 
 run_rc_command "$1"

@@ -21,6 +21,8 @@ load_rc_config "$name"
 : ${keel_dashboard_listen_addr:="0.0.0.0:8443"}
 : ${keel_dashboard_dashboard_tls_cert_file:=""}
 : ${keel_dashboard_dashboard_tls_key_file:=""}
+: ${keel_dashboard_basic_auth_user:=""}
+: ${keel_dashboard_basic_auth_password_file:=""}
 : ${keel_dashboard_poll_interval_secs:=""}
 
 pidfile="/var/run/${name}.pid"
@@ -28,8 +30,8 @@ command="/usr/sbin/daemon"
 
 # Built up rather than a single quoted string: each of these flags is only
 # passed when the operator has actually set the matching rc.conf variable,
-# since keel-dashboard panics on startup if the control-plane/TLS flag
-# groups are only partially supplied (see keel-dashboard/src/main.rs).
+# since keel-dashboard panics on startup if the control-plane/TLS/basic-auth
+# flag groups are only partially supplied (see keel-dashboard/src/main.rs).
 # Named dashboard_flags, not the generic "flags" - that name collides with
 # rc.subr's own reserved ${name}_flags/"$flags" convention (run_rc_command
 # inserts it automatically between $command and $command_args), which
@@ -43,6 +45,8 @@ dashboard_flags=""
 [ -n "$keel_dashboard_tls_crl_file" ] && dashboard_flags="$dashboard_flags --tls-crl-file $keel_dashboard_tls_crl_file"
 [ -n "$keel_dashboard_dashboard_tls_cert_file" ] && dashboard_flags="$dashboard_flags --dashboard-tls-cert-file $keel_dashboard_dashboard_tls_cert_file"
 [ -n "$keel_dashboard_dashboard_tls_key_file" ] && dashboard_flags="$dashboard_flags --dashboard-tls-key-file $keel_dashboard_dashboard_tls_key_file"
+[ -n "$keel_dashboard_basic_auth_user" ] && dashboard_flags="$dashboard_flags --basic-auth-user $keel_dashboard_basic_auth_user"
+[ -n "$keel_dashboard_basic_auth_password_file" ] && dashboard_flags="$dashboard_flags --basic-auth-password-file $keel_dashboard_basic_auth_password_file"
 [ -n "$keel_dashboard_poll_interval_secs" ] && dashboard_flags="$dashboard_flags --poll-interval-secs $keel_dashboard_poll_interval_secs"
 
 command_args="-r -P ${pidfile} -S -T ${name} -- \

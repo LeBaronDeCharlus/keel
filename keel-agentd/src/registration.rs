@@ -330,6 +330,15 @@ mod tests {
         std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/tls")).join(name)
     }
 
+    fn fresh_controlplane_state_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("keel-agentd-registration-test-controlplane-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     fn start_test_control_plane() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -340,6 +349,7 @@ mod tests {
             keel_controlplane::addresses::UsedAddresses::new(),
             keel_controlplane::Standbys::new(),
             keel_controlplane::PendingFences::new(),
+            fresh_controlplane_state_dir(),
         );
         let reloading_tls = keel_controlplane::tls::ReloadingTls::spawn(
             fixture("fixture-node.crt"),
@@ -377,6 +387,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         )
         .1
     }
@@ -548,6 +559,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let _handle = spawn(
             "node-1".to_string(),
@@ -590,7 +602,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = mpsc::channel();
         commands
@@ -675,7 +687,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let _handle = spawn(
             "node-1".to_string(),
@@ -727,6 +739,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         // Port 1 on loopback: guaranteed nothing is listening there, so the
@@ -810,6 +823,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let _handle = spawn(
             "node-1".to_string(),
@@ -852,6 +866,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         let _handle = spawn(
@@ -941,6 +956,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         let _handle = spawn(
@@ -1014,6 +1030,7 @@ mod tests {
             .unwrap(),
             zfs,
             "zroot".to_string(),
+            None,
         );
         let pod_cidr_slot = crate::PodCidrSlot::new();
         let _handle = spawn(

@@ -11,8 +11,23 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Every listener here accepts one OS thread per connection with no
+/// concurrency cap, so a client that connects and never sends anything would
+/// otherwise pin a thread forever -- before the TLS handshake even starts,
+/// let alone a request being parsed. A read timeout bounds that.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn apply_unix_read_timeout(stream: &UnixStream) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+}
+
+fn apply_tcp_read_timeout(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+}
 
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
@@ -25,6 +40,7 @@ pub fn run(
 ) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_unix_read_timeout(&stream);
         let commands = commands.clone();
         let pod_cidr_slot = pod_cidr_slot.clone();
         let service_vips = service_vips.clone();
@@ -45,6 +61,7 @@ pub fn run_tls(
 ) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        apply_tcp_read_timeout(&stream);
         let commands = commands.clone();
         let tls_config = reloading_tls.server_config();
         let pod_cidr_slot = pod_cidr_slot.clone();
@@ -491,6 +508,27 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    #[test]
+    fn apply_unix_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let socket_path = short_unique_socket_path();
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let _client = UnixStream::connect(&socket_path).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_unix_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+    }
+
+    #[test]
+    fn apply_tcp_read_timeout_sets_the_configured_timeout_on_a_real_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        apply_tcp_read_timeout(&server_stream);
+        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+    }
+
     fn sample_spec_yaml(name: &str) -> String {
         format!(
             "apiVersion: keel/v1\nkind: Jail\nmetadata:\n  name: {name}\nspec:\n  image: base/14.2-web\n  command: [\"/usr/local/bin/myapp\"]\n  network:\n    vnet: true\n    bridge: keel0\n    address: 10.0.0.5/24\n  resources:\n    cpu: \"2\"\n    memory: 512M\n  restartPolicy: Always\n"
@@ -523,7 +561,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let socket_path = short_unique_socket_path();
         let _ = std::fs::remove_file(&socket_path);
@@ -539,7 +577,7 @@ mod tests {
         zfs.seed_dataset("zroot/keel/base/14.2-web");
         let replica_targets = crate::ReplicaTargetRegistry::load(state_dir.clone()).unwrap();
         let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let pod_cidr_slot = PodCidrSlot::new();
         if let Some(cidr) = pod_cidr {
@@ -560,7 +598,7 @@ mod tests {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
         let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let socket_path = short_unique_socket_path();
         let _ = std::fs::remove_file(&socket_path);
@@ -588,7 +626,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let service_vips = crate::ServiceVipSlot::new();
         let proxy_entries: Vec<_> = entries
@@ -948,7 +986,7 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -1139,7 +1177,7 @@ mod tests {
         let replica_targets = crate::ReplicaTargetRegistry::load(state_dir.clone()).unwrap();
         let reconciler =
             Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -1185,7 +1223,7 @@ mod tests {
         let replica_targets = crate::ReplicaTargetRegistry::load(state_dir.clone()).unwrap();
         let reconciler =
             Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string());
+        let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();

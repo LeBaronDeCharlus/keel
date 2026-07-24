@@ -29,8 +29,66 @@ pub fn validate_volumes(volumes: &[crate::types::VolumeMount]) -> Result<(), Spe
             return Err(SpecError::DuplicateVolumeName(volume.name.clone()));
         }
         crate::resources::parse_zfs_quota(&volume.size)?;
+        validate_mount_path(&volume.mount_path)?;
     }
     Ok(())
+}
+
+/// A mount path is an absolute, in-jail path with no `..` segments. Enforced
+/// because the reconciler joins this onto the jail's rootfs with only a
+/// leading-slash trim, not real path normalization — an unvalidated `..`
+/// segment lets a spec mount onto the host filesystem outside the jail.
+pub fn validate_mount_path(mount_path: &str) -> Result<(), SpecError> {
+    let valid = mount_path.starts_with('/')
+        && mount_path != "/"
+        && mount_path.split('/').all(|segment| segment != "..");
+    if valid {
+        Ok(())
+    } else {
+        Err(SpecError::InvalidMountPath(mount_path.to_string()))
+    }
+}
+
+/// `image` is interpolated verbatim into a ZFS dataset path
+/// (`<pool>/keel/<image>`) that's then cloned as the jail's rootfs. Requiring
+/// the `base/` prefix keeps it inside the intended base-image namespace and
+/// out of `jails/`/`volumes/`, which share the same `<pool>/keel/` parent and
+/// hold other tenants' live datasets.
+pub fn validate_image(image: &str) -> Result<(), SpecError> {
+    let valid = image
+        .strip_prefix("base/")
+        .is_some_and(|rest| {
+            !rest.is_empty()
+                && rest.split('/').all(|segment| {
+                    !segment.is_empty()
+                        && segment != "."
+                        && segment != ".."
+                        && segment
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+                })
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(SpecError::InvalidImage(image.to_string()))
+    }
+}
+
+/// Bridges follow keel's own naming convention (`keel0`, `keel1`, ...).
+/// `keel-net::ensure_bridge_exists` treats an already-existing interface as
+/// success and skips creation, so accepting an arbitrary name here would let
+/// a spec attach jail traffic to any pre-existing host interface (`lo0`, a
+/// WAN NIC, another node's bridge).
+pub fn validate_bridge(bridge: &str) -> Result<(), SpecError> {
+    let valid = bridge
+        .strip_prefix("keel")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+    if valid {
+        Ok(())
+    } else {
+        Err(SpecError::InvalidBridge(bridge.to_string()))
+    }
 }
 
 pub fn validate_transition(old: &crate::types::JailSpec, new: &crate::types::JailSpec) -> Result<(), SpecError> {
@@ -158,6 +216,94 @@ mod tests {
     fn validate_volumes_rejects_a_malformed_size() {
         let volumes = vec![volume("web-data", "/data", "not-a-size")];
         assert!(matches!(validate_volumes(&volumes), Err(SpecError::InvalidMemory(_))));
+    }
+
+    #[test]
+    fn validate_volumes_rejects_a_traversal_mount_path() {
+        let volumes = vec![volume("web-data", "../../../etc", "1G")];
+        assert_eq!(
+            validate_volumes(&volumes),
+            Err(SpecError::InvalidMountPath("../../../etc".to_string()))
+        );
+    }
+
+    #[test]
+    fn accepts_well_formed_mount_paths() {
+        assert!(validate_mount_path("/data").is_ok());
+        assert!(validate_mount_path("/var/db").is_ok());
+    }
+
+    #[test]
+    fn rejects_relative_mount_paths() {
+        assert_eq!(
+            validate_mount_path("data"),
+            Err(SpecError::InvalidMountPath("data".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_mount_path_traversal_segments() {
+        assert_eq!(
+            validate_mount_path("/data/../../etc"),
+            Err(SpecError::InvalidMountPath("/data/../../etc".to_string()))
+        );
+        assert_eq!(
+            validate_mount_path("../../../etc"),
+            Err(SpecError::InvalidMountPath("../../../etc".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_the_bare_root_mount_path() {
+        assert_eq!(validate_mount_path("/"), Err(SpecError::InvalidMountPath("/".to_string())));
+    }
+
+    #[test]
+    fn accepts_well_formed_images() {
+        assert!(validate_image("base/14.2-web").is_ok());
+        assert!(validate_image("base/keel-ingress").is_ok());
+    }
+
+    #[test]
+    fn rejects_images_outside_the_base_namespace() {
+        assert_eq!(
+            validate_image("jails/web-1"),
+            Err(SpecError::InvalidImage("jails/web-1".to_string()))
+        );
+        assert_eq!(
+            validate_image("volumes/web-data"),
+            Err(SpecError::InvalidImage("volumes/web-data".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_image_traversal_segments() {
+        assert_eq!(
+            validate_image("base/../jails/web-1"),
+            Err(SpecError::InvalidImage("base/../jails/web-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_images() {
+        assert!(validate_image("").is_err());
+        assert!(validate_image("base/").is_err());
+        assert!(validate_image("base").is_err());
+        assert!(validate_image("base/Has_Upper").is_err());
+    }
+
+    #[test]
+    fn accepts_well_formed_bridges() {
+        assert!(validate_bridge("keel0").is_ok());
+        assert!(validate_bridge("keel12").is_ok());
+    }
+
+    #[test]
+    fn rejects_bridges_outside_the_keel_naming_convention() {
+        assert_eq!(validate_bridge("lo0"), Err(SpecError::InvalidBridge("lo0".to_string())));
+        assert_eq!(validate_bridge("em0"), Err(SpecError::InvalidBridge("em0".to_string())));
+        assert_eq!(validate_bridge("bridge0"), Err(SpecError::InvalidBridge("bridge0".to_string())));
+        assert_eq!(validate_bridge("keel"), Err(SpecError::InvalidBridge("keel".to_string())));
     }
 
     fn sample_spec() -> JailSpec {

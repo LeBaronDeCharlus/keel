@@ -91,9 +91,12 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
 
     pub fn apply(&mut self, spec: JailSpec) -> Result<(), ReconcileError> {
         keel_spec::validate_name(&spec.metadata.name)?;
+        keel_spec::validate_image(&spec.spec.image)?;
+        keel_spec::validate_bridge(&spec.spec.network.bridge)?;
         keel_spec::validate_address(&spec.spec.network.address)?;
         keel_spec::parse_cpu_cores(&spec.spec.resources.cpu)?;
         keel_spec::parse_memory_bytes(&spec.spec.resources.memory)?;
+        keel_spec::validate_volumes(&spec.spec.volumes)?;
 
         let epair_ordinal = if let Some(existing) = self.records.get(&spec.metadata.name) {
             keel_spec::validate_transition(&existing.spec, &spec)?;
@@ -104,14 +107,26 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
             ordinal
         };
 
-        let record = JailRecord { spec: spec.clone(), epair_ordinal };
+        let record = JailRecord { spec: spec.clone(), epair_ordinal, deleting: false };
         store::save(&self.state_dir, &record)?;
         self.records.insert(spec.metadata.name.clone(), record);
         Ok(())
     }
 
     pub fn delete(&mut self, name: &str) -> Result<(), ReconcileError> {
-        let record = self.records.get(name).ok_or_else(|| ReconcileError::NotFound(name.to_string()))?.clone();
+        let mut record = self.records.get(name).ok_or_else(|| ReconcileError::NotFound(name.to_string()))?.clone();
+        // Persisted before any destructive action below: a crash between
+        // here and the final `store::remove` leaves a record on disk that
+        // still says "delete me," not "provision me" -- `reconcile_one`
+        // resumes (rather than reprovisions) any record it finds marked
+        // this way. Skipped if already set, so a retried delete (e.g. after
+        // a transient "device busy" failure) doesn't re-persist a no-op
+        // write on every attempt.
+        if !record.deleting {
+            record.deleting = true;
+            store::save(&self.state_dir, &record)?;
+            self.records.insert(name.to_string(), record.clone());
+        }
         let jail_name = record::jail_name(name);
         let epair_base = record::epair_base_name(record.epair_ordinal);
         let jail_dataset = record::jail_dataset_path(&self.pool, name);
@@ -265,17 +280,13 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         Ok(())
     }
 
-    fn provision(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
-        let jail_name = record::jail_name(name);
-        let base_dataset = record::base_dataset_path(&self.pool, &record.spec.spec.image);
-        let jail_dataset = record::jail_dataset_path(&self.pool, name);
+    /// Ensures every volume the spec declares exists and is mounted at its
+    /// target -- idempotent, so it's safe to call unconditionally from both
+    /// `provision` (a fresh jail) and `restart` (an existing one, possibly
+    /// resuming after a crash that happened between `jails.create`
+    /// succeeding and this very loop ever running the first time).
+    fn ensure_volumes(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
         let rootfs = record::jail_rootfs_path(&self.pool, name);
-
-        if !self.zfs.dataset_exists(&base_dataset)? {
-            return Err(ReconcileError::BaseImageNotFound(base_dataset));
-        }
-        self.zfs.clone_from_base(&base_dataset, &jail_dataset)?;
-        self.jails.create(&jail_name, &rootfs, record.spec.spec.network.vnet)?;
         for volume in &record.spec.spec.volumes {
             let dataset = record::volume_dataset_path(&self.pool, &volume.name);
             let target = rootfs.join(volume.mount_path.trim_start_matches('/'));
@@ -287,6 +298,21 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 self.mounts.mount_nullfs(&record::volume_mountpoint(&self.pool, &volume.name), &target)?;
             }
         }
+        Ok(())
+    }
+
+    fn provision(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
+        let jail_name = record::jail_name(name);
+        let base_dataset = record::base_dataset_path(&self.pool, &record.spec.spec.image);
+        let jail_dataset = record::jail_dataset_path(&self.pool, name);
+        let rootfs = record::jail_rootfs_path(&self.pool, name);
+
+        if !self.zfs.dataset_exists(&base_dataset)? {
+            return Err(ReconcileError::BaseImageNotFound(base_dataset));
+        }
+        self.zfs.clone_from_base(&base_dataset, &jail_dataset)?;
+        self.jails.create(&jail_name, &rootfs, record.spec.spec.network.vnet)?;
+        self.ensure_volumes(name, record)?;
         self.configure_networking_and_limits(name, record)?;
         self.jails.start_command(&jail_name, &record.spec.spec.command)?;
         Ok(())
@@ -294,6 +320,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
 
     fn restart(&mut self, name: &str, record: &JailRecord) -> Result<(), ReconcileError> {
         let jail_name = record::jail_name(name);
+        self.ensure_volumes(name, record)?;
         self.configure_networking_and_limits(name, record)?;
         self.jails.start_command(&jail_name, &record.spec.spec.command)?;
         Ok(())
@@ -370,12 +397,13 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         if let Err(e) = self.ensure_ingress_jail() {
             eprintln!("keel-agentd: failed to ensure the ingress jail exists: {e}");
         }
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        self.reconcile_certs(now_unix);
-        self.reconcile_ingress_config();
+        // Provision/restart every tracked jail -- including, on a fresh
+        // node's first Ingress apply, the ingress jail itself -- *before*
+        // reconcile_certs/reconcile_ingress_config write anything into the
+        // ingress jail's rootfs. Those writes assume that rootfs is already
+        // a real, cloned ZFS dataset; running them first would create plain
+        // directories at a path a real `zfs clone` then has to contend with
+        // as its own mountpoint.
         let names: Vec<String> = self.records.keys().cloned().collect();
         let mut failures = Vec::new();
         for name in names {
@@ -383,6 +411,12 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 failures.push((name, e));
             }
         }
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.reconcile_certs(now_unix);
+        self.reconcile_ingress_config();
         failures
     }
 
@@ -526,6 +560,16 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
             return Ok(());
         }
 
+        if record.deleting {
+            // Resuming a delete left incomplete by a crash (or retrying one
+            // that failed, e.g. a transient "device busy"): reuses this
+            // name's existing backoff state rather than a separate cadence.
+            // Recorded *before* calling `delete`, since a successful delete
+            // removes this very backoff entry.
+            self.backoff.get_mut(name).unwrap().record_attempt(now);
+            return self.delete(name);
+        }
+
         let exists = self.jails.jail_exists(&jail_name)?;
 
         if !exists {
@@ -538,6 +582,10 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         } else {
             let running = self.jails.is_running(&jail_name)?;
             if running {
+                // The only place genuine uptime is observable — see
+                // `BackoffState::note_running`'s own doc comment for why
+                // this can't be inferred from attempt timing alone.
+                self.backoff.get_mut(name).unwrap().note_running(now);
                 let pcpu_percent =
                     keel_spec::cores_to_pcpu_percent(keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)?);
                 let memory_bytes = keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)?;
@@ -570,13 +618,27 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         names.iter().filter_map(|name| self.get(name, now)).collect()
     }
 
+    /// Sums resources across every tracked record. Deliberately tolerant of
+    /// a record whose `resources` no longer parse: `Reconciler::new` loads
+    /// records from disk with no re-validation, so a state file written by
+    /// an older/different code version (or a hand-edited/corrupted one)
+    /// could otherwise reach this on every heartbeat -- panicking here would
+    /// kill the worker thread permanently (the daemon looks alive but never
+    /// reconciles again) rather than just that one jail's contribution.
     pub fn committed_resources(&self) -> (f64, u64) {
         self.records.values().fold((0.0, 0u64), |(cpu, mem), record| {
-            let cpu_cores = keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)
-                .expect("resources were already validated at apply time");
-            let mem_bytes = keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)
-                .expect("resources were already validated at apply time");
-            (cpu + cpu_cores, mem + mem_bytes)
+            let parsed = keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)
+                .and_then(|cpu_cores| Ok((cpu_cores, keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)?)));
+            match parsed {
+                Ok((cpu_cores, mem_bytes)) => (cpu + cpu_cores, mem + mem_bytes),
+                Err(e) => {
+                    eprintln!(
+                        "keel-agentd: jail '{}' has unparsable resources, excluding it from committed_resources: {e}",
+                        record.spec.metadata.name
+                    );
+                    (cpu, mem)
+                }
+            }
         })
     }
 }
@@ -677,6 +739,26 @@ mod tests {
     }
 
     #[test]
+    fn committed_resources_skips_a_record_with_an_unparsable_cpu_value_instead_of_panicking() {
+        // `Reconciler::new` loads records from disk with no re-validation,
+        // so a state file written by an older/different code version (or a
+        // hand-edited/corrupted one) that the current parser rejects can
+        // reach `committed_resources` -- which is called on every heartbeat.
+        // It must skip such a record, not panic the whole worker thread.
+        let dir = test_state_dir("committed_resources_skips_a_record_with_an_unparsable_cpu_value");
+        let mut reconciler = new_reconciler(dir);
+        reconciler.apply(sample_spec_with_resources("web-1", "2", "512M")).unwrap();
+        let mut corrupt = reconciler.records["web-1"].clone();
+        corrupt.spec.metadata.name = "web-2".to_string();
+        corrupt.spec.spec.resources.cpu = "not-a-number".to_string();
+        reconciler.records.insert("web-2".to_string(), corrupt);
+
+        let (cpu, memory) = reconciler.committed_resources();
+        assert_eq!(cpu, 2.0, "the malformed record must be skipped, not counted or panicked on");
+        assert_eq!(memory, 512 * 1024 * 1024);
+    }
+
+    #[test]
     fn committed_resources_drops_a_deleted_jails_contribution() {
         let dir = test_state_dir("committed_resources_drops_a_deleted_jails_contribution");
         let mut reconciler = new_reconciler(dir);
@@ -773,6 +855,35 @@ mod tests {
     }
 
     #[test]
+    fn apply_rejects_an_image_outside_the_base_namespace() {
+        let dir = test_state_dir("apply_rejects_an_image_outside_the_base_namespace");
+        let mut reconciler = new_reconciler(dir);
+        let mut spec = sample_spec("web-1");
+        spec.spec.image = "jails/some-other-jail".to_string();
+        let result = reconciler.apply(spec);
+        assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn apply_rejects_a_bridge_outside_the_keel_naming_convention() {
+        let dir = test_state_dir("apply_rejects_a_bridge_outside_the_keel_naming_convention");
+        let mut reconciler = new_reconciler(dir);
+        let mut spec = sample_spec("web-1");
+        spec.spec.network.bridge = "lo0".to_string();
+        let result = reconciler.apply(spec);
+        assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn apply_rejects_a_volume_mount_path_with_a_traversal_segment() {
+        let dir = test_state_dir("apply_rejects_a_volume_mount_path_with_a_traversal_segment");
+        let mut reconciler = new_reconciler(dir);
+        let spec = sample_spec_with_volume("web-1", "web-data", "../../../etc", "1G");
+        let result = reconciler.apply(spec);
+        assert!(matches!(result, Err(ReconcileError::InvalidSpec(_))));
+    }
+
+    #[test]
     fn delete_on_unknown_name_returns_not_found() {
         let dir = test_state_dir("delete_on_unknown_name_returns_not_found");
         let mut reconciler = new_reconciler(dir);
@@ -788,6 +899,97 @@ mod tests {
         reconciler.delete("web-1").unwrap();
 
         assert!(!reconciler.records.contains_key("web-1"));
+        assert_eq!(store::load_all(&dir).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn delete_persists_a_deleting_marker_before_destructive_actions_and_can_be_retried_after_a_transient_failure() {
+        let dir = test_state_dir("delete_persists_a_deleting_marker_before_destructive_actions");
+        let mut reconciler = new_reconciler(dir.clone());
+        reconciler.zfs.seed_dataset("zroot/keel/base/14.2-web");
+        reconciler.apply(sample_spec("web-1")).unwrap();
+        reconciler.provision("web-1", &reconciler.records["web-1"].clone()).unwrap();
+
+        // Force the rootfs dataset destroy to fail partway through delete()
+        // (a real "device busy" is exactly the scenario destroy_dataset's
+        // own retry loop exists for), simulating any transient failure
+        // between the jail actually being destroyed and the record being
+        // fully removed.
+        let jail_dataset = record::jail_dataset_path("zroot", "web-1");
+        reconciler.zfs.mark_busy(&jail_dataset);
+
+        let result = reconciler.delete("web-1");
+        assert!(matches!(result, Err(ReconcileError::Zfs(keel_zfs::ZfsError::Busy(_)))));
+
+        // The record must survive this failure (on disk and in memory),
+        // marked deleting -- not silently vanish (which would let a later
+        // reconcile reprovision it) and not stay looking like a normal,
+        // undeleted record either.
+        assert!(reconciler.records["web-1"].deleting, "record must be marked deleting after a failed delete");
+        let loaded = store::load_all(&dir).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].deleting);
+        // The jail itself was already destroyed before the dataset step
+        // failed, proving destructive actions genuinely ran.
+        assert!(!reconciler.jails.jail_exists(&record::jail_name("web-1")).unwrap());
+
+        // Retrying once the transient failure clears must finish the job.
+        reconciler.zfs.unmark_busy(&jail_dataset);
+        reconciler.delete("web-1").unwrap();
+        assert!(!reconciler.records.contains_key("web-1"));
+        assert_eq!(store::load_all(&dir).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn reconcile_resumes_a_pending_delete_after_a_simulated_restart_instead_of_reprovisioning() {
+        // Proves the fix for "a crash between destroying a jail and
+        // removing its record resurrects it": simulate that exact crash by
+        // hand-persisting a `deleting: true` record for a jail that's still
+        // actually alive in the fakes, then build a *fresh* `Reconciler::new`
+        // over the same state_dir and same underlying fakes (mirroring
+        // `resume_replication_loops_starts_a_loop_for_a_record_persisted_before_a_restart`'s
+        // restart simulation) and confirm `reconcile()` finishes destroying
+        // it rather than treating "jail not tracked as running yet" as
+        // "provision me."
+        let dir = test_state_dir("reconcile_resumes_a_pending_delete_after_a_simulated_restart");
+        let mut reconciler = new_reconciler(dir.clone());
+        reconciler.zfs.seed_dataset("zroot/keel/base/14.2-web");
+        reconciler.apply(sample_spec("web-1")).unwrap();
+        reconciler.provision("web-1", &reconciler.records["web-1"].clone()).unwrap();
+        assert!(reconciler.jails.jail_exists(&record::jail_name("web-1")).unwrap());
+
+        // "The crash": the delete marker was persisted, but nothing else
+        // ran yet -- the jail is still alive in the fakes' shared state.
+        let mut mid_delete = reconciler.records["web-1"].clone();
+        mid_delete.deleting = true;
+        store::save(&dir, &mid_delete).unwrap();
+
+        // "The restart": a fresh Reconciler over the same state_dir and the
+        // same underlying fakes (jails/zfs/net/mounts all persist real
+        // state across this "restart," a real daemon restart too).
+        let mut restarted = Reconciler::new(
+            reconciler.jails.clone(),
+            reconciler.zfs.clone(),
+            reconciler.net.clone(),
+            reconciler.mounts.clone(),
+            "zroot".to_string(),
+            dir.clone(),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        assert!(restarted.records["web-1"].deleting, "the loaded record must still be marked deleting");
+
+        let failures = restarted.reconcile(Instant::now());
+        assert!(failures.is_empty(), "expected the resumed delete to succeed cleanly: {failures:?}");
+
+        assert!(
+            !restarted.jails.jail_exists(&record::jail_name("web-1")).unwrap(),
+            "the jail must have been destroyed, not reprovisioned"
+        );
+        assert!(!restarted.records.contains_key("web-1"));
         assert_eq!(store::load_all(&dir).unwrap(), vec![]);
     }
 
@@ -834,6 +1036,31 @@ mod tests {
         assert!(reconciler.zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
         let target = record::jail_rootfs_path("zroot", "web-1").join("data");
         assert!(reconciler.mounts.is_mounted(&target).unwrap());
+    }
+
+    #[test]
+    fn restart_ensures_a_declared_volume_is_mounted_even_if_the_jail_was_created_without_it() {
+        // Simulates a crash between `jails.create` succeeding and
+        // `provision`'s volume-mount loop ever running: on restart,
+        // `jail_exists` is true (the jail metadata survived) so
+        // `reconcile_one` dispatches to `restart`, not `provision` -- which
+        // must still ensure the declared volume before starting the jail's
+        // command against what would otherwise be an empty directory.
+        let dir = test_state_dir("restart_ensures_a_declared_volume_is_mounted_even_if_the_jail_was_created_without_it");
+        let mut reconciler = new_reconciler(dir);
+        reconciler.zfs.seed_dataset("zroot/keel/base/14.2-web");
+        reconciler.apply(sample_spec_with_volume("web-1", "web-data", "/data", "1G")).unwrap();
+        let record = reconciler.records["web-1"].clone();
+
+        let rootfs = record::jail_rootfs_path("zroot", "web-1");
+        reconciler.jails.create(&record::jail_name("web-1"), &rootfs, true).unwrap();
+        let target = rootfs.join("data");
+        assert!(!reconciler.mounts.is_mounted(&target).unwrap(), "the volume must not be mounted yet in this scenario");
+
+        reconciler.restart("web-1", &record).unwrap();
+
+        assert!(reconciler.zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
+        assert!(reconciler.mounts.is_mounted(&target).unwrap(), "restart must still ensure the declared volume is mounted");
     }
 
     #[test]
@@ -1385,6 +1612,100 @@ mod tests {
         reconciler.delete_ingress("blog").unwrap();
         reconciler.reconcile(Instant::now());
         assert!(reconciler.jails.jail_exists("keel-ingress").unwrap());
+    }
+
+    /// Wraps `FakeZfsManager`, recording (for the ingress jail's dataset
+    /// specifically) whether a given real filesystem path already exists at
+    /// the moment `clone_from_base` is called -- the only way to prove
+    /// `reconcile()`'s ordering is correct, since the fake itself has no
+    /// concept of a ZFS mountpoint colliding with a plain directory that was
+    /// already written to (unlike a real `zfs clone`, which does).
+    struct IngressCloneOrderSpyZfs {
+        inner: FakeZfsManager,
+        ingress_dataset: String,
+        watched_path: PathBuf,
+        path_existed_at_clone_time: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    }
+
+    impl ZfsManager for IngressCloneOrderSpyZfs {
+        fn dataset_exists(&self, dataset: &str) -> Result<bool, keel_zfs::ZfsError> {
+            self.inner.dataset_exists(dataset)
+        }
+        fn clone_from_base(&self, base_dataset: &str, target_dataset: &str) -> Result<(), keel_zfs::ZfsError> {
+            if target_dataset == self.ingress_dataset {
+                *self.path_existed_at_clone_time.lock().unwrap() = Some(self.watched_path.exists());
+            }
+            self.inner.clone_from_base(base_dataset, target_dataset)
+        }
+        fn create_volume(&self, dataset: &str, quota: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.create_volume(dataset, quota)
+        }
+        fn destroy_dataset(&self, dataset: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.destroy_dataset(dataset)
+        }
+        fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.snapshot(dataset, snapshot)
+        }
+        fn destroy_snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.destroy_snapshot(dataset, snapshot)
+        }
+        fn send_snapshot(&self, dataset: &str, snapshot: &str, base: Option<&str>, out: &mut dyn std::io::Write) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.send_snapshot(dataset, snapshot, base, out)
+        }
+        fn receive_snapshot(&self, dataset: &str, input: &mut dyn std::io::Read) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.receive_snapshot(dataset, input)
+        }
+        fn list_child_datasets(&self, parent: &str) -> Result<Vec<String>, keel_zfs::ZfsError> {
+            self.inner.list_child_datasets(parent)
+        }
+    }
+
+    #[test]
+    fn reconcile_provisions_the_ingress_jail_before_writing_its_certificate_into_it() {
+        // Reproduces the ordering bug directly: `write_cert_to_ingress_jail`
+        // used to run (via reconcile_certs) before the ingress jail's
+        // dataset was ever cloned, so on a fresh node the first Ingress
+        // apply wrote real cert files into a plain directory that a real
+        // `zfs clone` then had to contend with as its own mountpoint.
+        let dir = test_state_dir("reconcile_provisions_the_ingress_jail_before_writing_its_certificate_into_it");
+        let pool = dir.strip_prefix("/").unwrap_or(&dir).to_string_lossy().into_owned();
+        let ingress_dataset = record::jail_dataset_path(&pool, "ingress");
+        let cert_path =
+            record::jail_rootfs_path(&pool, "ingress").join("usr/local/etc/nginx/certs").join("example.com.crt");
+
+        let inner = FakeZfsManager::new();
+        inner.seed_dataset(&record::base_dataset_path(&pool, "base/keel-ingress"));
+        let path_existed_at_clone_time = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let zfs = IngressCloneOrderSpyZfs {
+            inner,
+            ingress_dataset,
+            watched_path: cert_path.clone(),
+            path_existed_at_clone_time: path_existed_at_clone_time.clone(),
+        };
+
+        let mut reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs,
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            pool,
+            dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+
+        reconciler.apply_ingress(sample_ingress_spec("blog", "example.com")).unwrap();
+        reconciler.reconcile(Instant::now());
+
+        assert_eq!(
+            *path_existed_at_clone_time.lock().unwrap(),
+            Some(false),
+            "the cert file must not exist yet at the moment the ingress jail's dataset is cloned"
+        );
+        assert!(cert_path.is_file(), "the cert must still get written by the end of reconcile");
     }
 
     // `write_cert_to_ingress_jail` performs a genuine `std::fs::write` under
