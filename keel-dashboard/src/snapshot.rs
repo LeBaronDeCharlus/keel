@@ -1,7 +1,7 @@
 use crate::control_plane_client::ControlPlaneClient;
 use keel_agentd::wire::VolumeStatus;
 use keel_agentd::JailStatus;
-use keel_controlplane::wire::{NodeStatus, ServiceProxyEntry, ServiceSummary};
+use keel_controlplane::wire::{NodeStatus, ServiceReplica, ServiceSummary};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
@@ -23,7 +23,11 @@ pub struct NodeSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ServiceSnapshot {
     pub summary: ServiceSummary,
-    pub detail: Option<ServiceProxyEntry>,
+    /// Replica placement only - `ServiceSummary` (in `summary`, above)
+    /// already carries `vip`/`port`, so `fetch_service`'s response (just
+    /// `Vec<ServiceReplica>`, confirmed against the real
+    /// `GET /services/{name}` route) is all that's needed here.
+    pub detail: Option<Vec<ServiceReplica>>,
     pub data_stale: bool,
 }
 
@@ -80,7 +84,7 @@ mod tests {
     use super::*;
     use crate::control_plane_client::FakeControlPlaneClient;
     use keel_agentd::{BackoffStatus, JailRecord};
-    use keel_controlplane::wire::{NodeState, NodeStatus, ServiceProxyEntry, ServiceSummary};
+    use keel_controlplane::wire::{NodeState, NodeStatus, ServiceReplica, ServiceSummary};
     use keel_spec::{JailSpec, Metadata, NetworkSpec, RestartPolicy, ResourcesSpec, Spec};
 
     fn sample_node(id: &str) -> NodeStatus {
@@ -134,7 +138,7 @@ mod tests {
         let client = FakeControlPlaneClient::new();
         client.set_nodes(vec![sample_node("node-1")]);
         client.set_services(vec![ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 }]);
-        client.set_service("web", ServiceProxyEntry { name: "web".to_string(), vip: "10.0.250.7".to_string(), port: 8080, replicas: vec![] });
+        client.set_service("web", vec![]);
 
         let snapshot = poll_once(&client, &Snapshot::default(), 1_000);
         assert!(!snapshot.stale);
@@ -177,7 +181,7 @@ mod tests {
     fn a_failed_service_detail_fetch_marks_only_that_service_stale() {
         let client = FakeControlPlaneClient::new();
         client.set_services(vec![ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 }]);
-        client.set_service("web", ServiceProxyEntry { name: "web".to_string(), vip: "10.0.250.7".to_string(), port: 8080, replicas: vec![] });
+        client.set_service("web", vec![]);
         let first = poll_once(&client, &Snapshot::default(), 1_000);
         assert!(!first.services[0].data_stale);
 
@@ -246,23 +250,30 @@ mod tests {
             ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 },
             ServiceSummary { name: "api".to_string(), desired_replicas: 1, vip: "10.0.250.8".to_string(), port: 9090 },
         ]);
-        client.set_service("web", ServiceProxyEntry { name: "web".to_string(), vip: "10.0.250.7".to_string(), port: 8080, replicas: vec![] });
-        client.set_service("api", ServiceProxyEntry { name: "api".to_string(), vip: "10.0.250.8".to_string(), port: 9090, replicas: vec![] });
+        client.set_service("web", vec![]);
+        client.set_service(
+            "api",
+            vec![ServiceReplica { name: "api-0".to_string(), node: "node-1".to_string(), address: "10.0.4.5".to_string() }],
+        );
         let first = poll_once(&client, &Snapshot::default(), 1_000);
         assert!(!first.services[0].data_stale);
         assert!(!first.services[1].data_stale);
 
         // The control plane now reports services in the opposite order,
         // "web"'s detail fetch starts failing, and "api" gets a fresh detail
-        // (a different port, standing in for updated proxy state). If
-        // `poll_once` ever regressed from matching `previous.services` by
-        // `summary.name` to matching by position, this reordering would make
-        // "web" pick up "api"'s stale detail instead of its own.
+        // (a different replica address, standing in for updated proxy
+        // state). If `poll_once` ever regressed from matching
+        // `previous.services` by `summary.name` to matching by position,
+        // this reordering would make "web" pick up "api"'s stale detail
+        // instead of its own.
         client.set_services(vec![
             ServiceSummary { name: "api".to_string(), desired_replicas: 1, vip: "10.0.250.8".to_string(), port: 9090 },
             ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 },
         ]);
-        client.set_service("api", ServiceProxyEntry { name: "api".to_string(), vip: "10.0.250.8".to_string(), port: 9091, replicas: vec![] });
+        client.set_service(
+            "api",
+            vec![ServiceReplica { name: "api-0".to_string(), node: "node-1".to_string(), address: "10.0.4.9".to_string() }],
+        );
         client.fail_service("web");
         let second = poll_once(&client, &first, 2_000);
         assert!(!second.stale, "a per-service failure must not mark the whole snapshot stale");
@@ -275,7 +286,7 @@ mod tests {
         assert!(!api.data_stale, "api's successful fetch must not be marked stale");
         assert_eq!(
             api.detail,
-            Some(ServiceProxyEntry { name: "api".to_string(), vip: "10.0.250.8".to_string(), port: 9091, replicas: vec![] }),
+            Some(vec![ServiceReplica { name: "api-0".to_string(), node: "node-1".to_string(), address: "10.0.4.9".to_string() }]),
             "api must show the freshly fetched detail, not stale data"
         );
     }

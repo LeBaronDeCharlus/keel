@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use keel_controlplane::wire::{NodeState, NodeStatus, ServiceProxyEntry, ServiceSummary};
+use keel_controlplane::wire::{NodeState, NodeStatus, ServiceReplica, ServiceSummary};
 use keel_dashboard::control_plane_client::FakeControlPlaneClient;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -93,7 +93,7 @@ fn a_poll_cycle_is_reflected_in_both_the_json_api_and_the_rendered_html() {
     client.set_jails("node-1", vec![]);
     client.set_volumes("node-1", vec![]);
     client.set_services(vec![ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 }]);
-    client.set_service("web", ServiceProxyEntry { name: "web".to_string(), vip: "10.0.250.7".to_string(), port: 8080, replicas: vec![] });
+    client.set_service("web", Vec::<ServiceReplica>::new());
 
     let snapshot = keel_dashboard::poller::spawn(Box::new(client), Duration::from_millis(20));
 

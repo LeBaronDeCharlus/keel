@@ -111,15 +111,15 @@ fn render_services(services: &[ServiceSnapshot]) -> String {
         let replica_placement = service
             .detail
             .as_ref()
-            .map(|d| {
-                d.replicas
+            .map(|replicas| {
+                replicas
                     .iter()
                     .map(|r| format!("{} ({}@{})", escape_html(&r.name), escape_html(&r.node), escape_html(&r.address)))
                     .collect::<Vec<_>>()
                     .join(", ")
             })
             .unwrap_or_default();
-        let actual_replicas = service.detail.as_ref().map(|d| d.replicas.len()).unwrap_or(0);
+        let actual_replicas = service.detail.as_ref().map(|replicas| replicas.len()).unwrap_or(0);
         rows.push_str(&format!(
             "<tr><td>{name}</td><td>{actual}/{desired}</td><td>{vip}:{port}</td><td>{placement}</td>{stale}</tr>",
             name = escape_html(&s.name),
@@ -168,7 +168,7 @@ mod tests {
     use crate::snapshot::{NodeSnapshot, ServiceSnapshot};
     use keel_agentd::wire::VolumeStatus;
     use keel_agentd::{BackoffStatus, JailStatus};
-    use keel_controlplane::wire::{IngressHealth, NodeState, NodeStatus, ServiceProxyEntry, ServiceReplica, ServiceSummary};
+    use keel_controlplane::wire::{IngressHealth, NodeState, NodeStatus, ServiceReplica, ServiceSummary};
 
     fn sample_node_status() -> NodeStatus {
         NodeStatus {
@@ -272,12 +272,11 @@ mod tests {
     fn renders_a_service_with_desired_and_actual_replica_counts() {
         let service = ServiceSnapshot {
             summary: ServiceSummary { name: "web".to_string(), desired_replicas: 3, vip: "10.0.250.7".to_string(), port: 8080 },
-            detail: Some(ServiceProxyEntry {
-                name: "web".to_string(),
-                vip: "10.0.250.7".to_string(),
-                port: 8080,
-                replicas: vec![ServiceReplica { name: "web-0".to_string(), node: "node-1".to_string(), address: "10.0.4.5".to_string() }],
-            }),
+            detail: Some(vec![ServiceReplica {
+                name: "web-0".to_string(),
+                node: "node-1".to_string(),
+                address: "10.0.4.5".to_string(),
+            }]),
             data_stale: false,
         };
         let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![service], stale: false, stale_as_of_unix: None };

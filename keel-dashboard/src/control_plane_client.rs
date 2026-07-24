@@ -1,6 +1,6 @@
 use keel_agentd::wire::VolumeStatus;
 use keel_agentd::JailStatus;
-use keel_controlplane::wire::{NodeStatus, ServiceProxyEntry, ServiceSummary};
+use keel_controlplane::wire::{NodeStatus, ServiceReplica, ServiceSummary};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -11,7 +11,13 @@ pub trait ControlPlaneClient: Send + Sync {
     fn fetch_jails(&self, node_id: &str) -> Result<Vec<JailStatus>, String>;
     fn fetch_volumes(&self, node_id: &str) -> Result<Vec<VolumeStatus>, String>;
     fn fetch_services(&self) -> Result<Vec<ServiceSummary>, String>;
-    fn fetch_service(&self, name: &str) -> Result<ServiceProxyEntry, String>;
+    /// `GET /services/{name}` returns just the replica placement list (no
+    /// name/vip/port wrapper - those already come from `fetch_services`'s
+    /// `ServiceSummary`), confirmed against the real
+    /// `keel-controlplane::http::handle_get_service` handler, which yaml
+    /// -encodes its `DiscoverService` reply's `replicas: Vec<ServiceReplica>`
+    /// directly.
+    fn fetch_service(&self, name: &str) -> Result<Vec<ServiceReplica>, String>;
 }
 
 /// The real client: an mTLS TCP connection per request, exactly the same
@@ -98,7 +104,7 @@ impl ControlPlaneClient for TlsControlPlaneClient {
         self.get_yaml("/services")
     }
 
-    fn fetch_service(&self, name: &str) -> Result<ServiceProxyEntry, String> {
+    fn fetch_service(&self, name: &str) -> Result<Vec<ServiceReplica>, String> {
         self.get_yaml(&format!("/services/{name}"))
     }
 }
@@ -112,7 +118,7 @@ pub struct FakeControlPlaneClient {
     jails: Arc<Mutex<HashMap<String, Vec<JailStatus>>>>,
     volumes: Arc<Mutex<HashMap<String, Vec<VolumeStatus>>>>,
     services: Arc<Mutex<Vec<ServiceSummary>>>,
-    service_details: Arc<Mutex<HashMap<String, ServiceProxyEntry>>>,
+    service_details: Arc<Mutex<HashMap<String, Vec<ServiceReplica>>>>,
     nodes_failing: Arc<Mutex<bool>>,
     failing_jail_nodes: Arc<Mutex<std::collections::HashSet<String>>>,
     failing_volume_nodes: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -157,8 +163,8 @@ impl FakeControlPlaneClient {
         *self.services_failing.lock().unwrap() = true;
     }
 
-    pub fn set_service(&self, name: &str, entry: ServiceProxyEntry) {
-        self.service_details.lock().unwrap().insert(name.to_string(), entry);
+    pub fn set_service(&self, name: &str, replicas: Vec<ServiceReplica>) {
+        self.service_details.lock().unwrap().insert(name.to_string(), replicas);
     }
 
     pub fn fail_service(&self, name: &str) {
@@ -195,7 +201,7 @@ impl ControlPlaneClient for FakeControlPlaneClient {
         Ok(self.services.lock().unwrap().clone())
     }
 
-    fn fetch_service(&self, name: &str) -> Result<ServiceProxyEntry, String> {
+    fn fetch_service(&self, name: &str) -> Result<Vec<ServiceReplica>, String> {
         if self.failing_services.lock().unwrap().contains(name) {
             return Err(format!("simulated failure fetching service '{name}'"));
         }
@@ -253,14 +259,13 @@ mod tests {
     #[test]
     fn fake_returns_seeded_service_detail() {
         let fake = FakeControlPlaneClient::new();
-        let entry = keel_controlplane::wire::ServiceProxyEntry {
-            name: "web".to_string(),
-            vip: "10.0.250.7".to_string(),
-            port: 8080,
-            replicas: vec![],
-        };
-        fake.set_service("web", entry.clone());
-        assert_eq!(fake.fetch_service("web").unwrap(), entry);
+        let replicas = vec![keel_controlplane::wire::ServiceReplica {
+            name: "web-0".to_string(),
+            node: "node-1".to_string(),
+            address: "10.0.4.5".to_string(),
+        }];
+        fake.set_service("web", replicas.clone());
+        assert_eq!(fake.fetch_service("web").unwrap(), replicas);
     }
 
     #[test]
