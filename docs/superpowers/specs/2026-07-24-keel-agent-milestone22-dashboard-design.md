@@ -43,7 +43,10 @@ A new workspace member, `keel-dashboard` (binary crate), added to the
    in front of every route (`--basic-auth-user`, checked against a
    password read from `--basic-auth-password-file`, never a CLI arg).
    Basic Auth over a network is only safe because this listener
-   terminates its own TLS.
+   terminates its own TLS. This needs its own `rustls::ServerConfig`
+   builder: `keel_controlplane::tls::load_server_config` can't be reused
+   as-is, since it hardcodes a `WebPkiClientVerifier` for mTLS and
+   browsers won't present a client certificate.
 
 A background poller thread refreshes an in-memory cluster snapshot every
 `--poll-interval-secs` (default 5) and stores it behind
@@ -126,6 +129,19 @@ Mirrors the existing per-node jails-list route:
   the node's `GET /volumes`, alongside the existing
   `GET /nodes/{id}/volumes/{name}` and `DELETE /nodes/{id}/volumes/{name}`.
 
+Unlike jails, the reconciler keeps no in-memory record of which volumes
+exist (`Reconciler::get_volume`/`delete_volume` deliberately never
+consult `self.records`, since a volume can outlive every jail record
+that ever referenced it): ZFS enumeration is the only source of truth
+here, not just the simplest option. `keel_zfs::ZfsManager` currently has
+no dataset-listing method at all (only `dataset_exists`,
+`create_volume`, `destroy_dataset`, and the snapshot/send/receive
+methods), so this milestone also adds one, e.g.
+`list_child_datasets(&self, parent: &str) -> Result<Vec<String>, ZfsError>`,
+implemented for both `CliZfsManager` (`zfs list -H -o name -r <parent>`,
+filtered down to immediate children) and `FakeZfsManager` (filter its
+in-memory dataset set by prefix).
+
 ## Dashboard content
 
 A single page, auto-refreshing every 5 seconds via a small vanilla-JS
@@ -140,7 +156,11 @@ Sections:
 
 - **Nodes** &mdash; id, address, Alive/Dead, capacity vs. committed
   CPU/memory, last-seen age.
-- **Jails** &mdash; grouped by node: name, running/crash-looping.
+- **Jails** &mdash; grouped by node: name, running/crash-looping. There's
+  no dedicated boolean for this: `JailStatus` only has `running` and a
+  `backoff: BackoffStatus { retry_in_secs, current_delay_secs }`, so
+  crash-looping is derived as `!running &&
+  backoff.current_delay_secs.is_some()`.
 - **Services** &mdash; name, desired vs. actual replica count, VIP:port,
   replica placement (node + address).
 - **Volumes** &mdash; grouped by node: name.
@@ -171,7 +191,12 @@ variables, run via `/usr/sbin/daemon`.
 
 - Unit tests: snapshot merging (including partial-failure/staleness
   marking), HTML rendering of each section, Basic Auth middleware,
-  ingress cert-expiry warning threshold.
+  ingress cert-expiry warning threshold, crash-looping derivation from
+  `JailStatus`/`BackoffStatus`.
+- `keel_zfs::ZfsManager::list_child_datasets` gets its own unit tests in
+  `keel-zfs` (both `CliZfsManager` and `FakeZfsManager`), plus a
+  `keel-agentd` test that `Command::ListVolumes` returns exactly the
+  datasets created under `<pool>/keel/volumes/`.
 - A `Fake` control-plane test double (in-process, same trait-based
   Fake/Real split this project uses everywhere else) lets
   `keel-dashboard`'s poller and HTTP layer be tested fully without a real
