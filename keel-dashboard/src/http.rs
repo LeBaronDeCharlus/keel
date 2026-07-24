@@ -21,16 +21,24 @@ fn apply_read_timeout(stream: &TcpStream) {
 
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
-pub fn run(listener: TcpListener, tls_config: Arc<rustls::ServerConfig>, snapshot: Arc<RwLock<Snapshot>>) {
+pub fn run(
+    listener: TcpListener,
+    tls_config: Arc<rustls::ServerConfig>,
+    snapshot: Arc<RwLock<Snapshot>>,
+    basic_auth_user: String,
+    basic_auth_password: String,
+) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         apply_read_timeout(&stream);
         let tls_config = Arc::clone(&tls_config);
         let snapshot = Arc::clone(&snapshot);
+        let basic_auth_user = basic_auth_user.clone();
+        let basic_auth_password = basic_auth_password.clone();
         thread::spawn(move || {
             let Ok(conn) = ServerConnection::new(tls_config) else { return };
             let mut tls_stream = TlsStream::new(conn, stream);
-            let _ = handle_connection(&mut tls_stream, &snapshot);
+            let _ = handle_connection(&mut tls_stream, &snapshot, &basic_auth_user, &basic_auth_password);
         });
     }
 }
@@ -38,13 +46,22 @@ pub fn run(listener: TcpListener, tls_config: Arc<rustls::ServerConfig>, snapsho
 struct ParsedRequest {
     method: String,
     path: String,
+    authorization: Option<String>,
 }
 
-fn handle_connection(stream: &mut TlsStream, snapshot: &Arc<RwLock<Snapshot>>) -> io::Result<()> {
+fn handle_connection(
+    stream: &mut TlsStream,
+    snapshot: &Arc<RwLock<Snapshot>>,
+    basic_auth_user: &str,
+    basic_auth_password: &str,
+) -> io::Result<()> {
     let request = match read_request(stream)? {
         Some(r) => r,
         None => return Ok(()),
     };
+    if !crate::basic_auth::check(request.authorization.as_deref(), basic_auth_user, basic_auth_password) {
+        return write_response(stream, 401, "text/plain", b"unauthorized");
+    }
     let (status, content_type, body) = route(&request, snapshot);
     write_response(stream, status, content_type, &body)
 }
@@ -59,7 +76,12 @@ fn read_request(stream: &mut TlsStream) -> io::Result<Option<ParsedRequest>> {
             Ok(httparse::Status::Complete(_)) => {
                 let method = req.method.unwrap_or("").to_string();
                 let path = req.path.unwrap_or("").to_string();
-                return Ok(Some(ParsedRequest { method, path }));
+                let authorization = req
+                    .headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("authorization"))
+                    .map(|h| String::from_utf8_lossy(h.value).to_string());
+                return Ok(Some(ParsedRequest { method, path, authorization }));
             }
             Ok(httparse::Status::Partial) => {
                 if buf.len() >= MAX_MESSAGE_BYTES {
@@ -90,6 +112,7 @@ fn write_response(stream: &mut TlsStream, status: u16, content_type: &str, body:
 fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        401 => "Unauthorized",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "Unknown",
@@ -130,6 +153,7 @@ fn json_response<T: serde::Serialize>(value: &T) -> (u16, &'static str, Vec<u8>)
 mod tests {
     use super::*;
     use crate::snapshot::Snapshot;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -156,11 +180,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let snapshot = Arc::new(RwLock::new(snapshot));
-        std::thread::spawn(move || run(listener, tls_config, snapshot));
+        std::thread::spawn(move || run(listener, tls_config, snapshot, "admin".to_string(), "hunter2".to_string()));
         addr
     }
 
-    fn request(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
+    fn request(addr: std::net::SocketAddr, path: &str, auth_header: Option<&str>) -> (u16, String) {
         crate::tls::ensure_crypto_provider();
         let roots = rustls::RootCertStore::empty();
         let verifier = std::sync::Arc::new(NoVerify);
@@ -173,7 +197,8 @@ mod tests {
         let tcp = std::net::TcpStream::connect(addr).unwrap();
         let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
         let mut stream = rustls::StreamOwned::new(conn, tcp);
-        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        let auth = auth_header.map(|h| format!("Authorization: {h}\r\n")).unwrap_or_default();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\n\r\n");
         stream.write_all(req.as_bytes()).unwrap();
         stream.sock.shutdown(std::net::Shutdown::Write).ok();
         let mut response = Vec::new();
@@ -227,9 +252,25 @@ mod tests {
     }
 
     #[test]
-    fn a_request_gets_the_dashboard_html() {
+    fn a_request_with_no_auth_header_is_rejected() {
         let addr = start_test_server(Snapshot::default());
-        let (status, body) = request(addr, "/");
+        let (status, _) = request(addr, "/", None);
+        assert_eq!(status, 401);
+    }
+
+    #[test]
+    fn a_request_with_wrong_credentials_is_rejected() {
+        let addr = start_test_server(Snapshot::default());
+        let header = format!("Basic {}", STANDARD.encode("admin:wrongpassword"));
+        let (status, _) = request(addr, "/", Some(&header));
+        assert_eq!(status, 401);
+    }
+
+    #[test]
+    fn a_request_with_correct_credentials_gets_the_dashboard_html() {
+        let addr = start_test_server(Snapshot::default());
+        let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));
+        let (status, body) = request(addr, "/", Some(&header));
         assert_eq!(status, 200);
         assert!(body.contains("keel dashboard"), "got: {body}");
     }
@@ -237,7 +278,8 @@ mod tests {
     #[test]
     fn api_snapshot_returns_json() {
         let addr = start_test_server(Snapshot::default());
-        let (status, body) = request(addr, "/api/snapshot");
+        let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));
+        let (status, body) = request(addr, "/api/snapshot", Some(&header));
         assert_eq!(status, 200);
         assert!(body.contains("\"nodes\""), "got: {body}");
     }
@@ -245,7 +287,8 @@ mod tests {
     #[test]
     fn an_unknown_path_is_404() {
         let addr = start_test_server(Snapshot::default());
-        let (status, _) = request(addr, "/nope");
+        let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));
+        let (status, _) = request(addr, "/nope", Some(&header));
         assert_eq!(status, 404);
     }
 
@@ -281,14 +324,15 @@ mod tests {
             Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
 
         let addr = start_test_server(snapshot);
-        let (status, body) = request(addr, "/api/snapshot");
+        let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));
+        let (status, body) = request(addr, "/api/snapshot", Some(&header));
         assert_eq!(status, 200, "got body: {body}");
         assert!(body.contains("\"capacity_cpu\":null"), "got: {body}");
 
         // The lock must not be poisoned: a follow-up request against the
         // same running server (and thus the same shared RwLock) must still
         // succeed.
-        let (status2, _) = request(addr, "/");
+        let (status2, _) = request(addr, "/", Some(&header));
         assert_eq!(status2, 200);
     }
 
