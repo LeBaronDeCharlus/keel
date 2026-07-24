@@ -107,14 +107,26 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
             ordinal
         };
 
-        let record = JailRecord { spec: spec.clone(), epair_ordinal };
+        let record = JailRecord { spec: spec.clone(), epair_ordinal, deleting: false };
         store::save(&self.state_dir, &record)?;
         self.records.insert(spec.metadata.name.clone(), record);
         Ok(())
     }
 
     pub fn delete(&mut self, name: &str) -> Result<(), ReconcileError> {
-        let record = self.records.get(name).ok_or_else(|| ReconcileError::NotFound(name.to_string()))?.clone();
+        let mut record = self.records.get(name).ok_or_else(|| ReconcileError::NotFound(name.to_string()))?.clone();
+        // Persisted before any destructive action below: a crash between
+        // here and the final `store::remove` leaves a record on disk that
+        // still says "delete me," not "provision me" -- `reconcile_one`
+        // resumes (rather than reprovisions) any record it finds marked
+        // this way. Skipped if already set, so a retried delete (e.g. after
+        // a transient "device busy" failure) doesn't re-persist a no-op
+        // write on every attempt.
+        if !record.deleting {
+            record.deleting = true;
+            store::save(&self.state_dir, &record)?;
+            self.records.insert(name.to_string(), record.clone());
+        }
         let jail_name = record::jail_name(name);
         let epair_base = record::epair_base_name(record.epair_ordinal);
         let jail_dataset = record::jail_dataset_path(&self.pool, name);
@@ -529,6 +541,16 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
             return Ok(());
         }
 
+        if record.deleting {
+            // Resuming a delete left incomplete by a crash (or retrying one
+            // that failed, e.g. a transient "device busy"): reuses this
+            // name's existing backoff state rather than a separate cadence.
+            // Recorded *before* calling `delete`, since a successful delete
+            // removes this very backoff entry.
+            self.backoff.get_mut(name).unwrap().record_attempt(now);
+            return self.delete(name);
+        }
+
         let exists = self.jails.jail_exists(&jail_name)?;
 
         if !exists {
@@ -573,13 +595,27 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         names.iter().filter_map(|name| self.get(name, now)).collect()
     }
 
+    /// Sums resources across every tracked record. Deliberately tolerant of
+    /// a record whose `resources` no longer parse: `Reconciler::new` loads
+    /// records from disk with no re-validation, so a state file written by
+    /// an older/different code version (or a hand-edited/corrupted one)
+    /// could otherwise reach this on every heartbeat -- panicking here would
+    /// kill the worker thread permanently (the daemon looks alive but never
+    /// reconciles again) rather than just that one jail's contribution.
     pub fn committed_resources(&self) -> (f64, u64) {
         self.records.values().fold((0.0, 0u64), |(cpu, mem), record| {
-            let cpu_cores = keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)
-                .expect("resources were already validated at apply time");
-            let mem_bytes = keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)
-                .expect("resources were already validated at apply time");
-            (cpu + cpu_cores, mem + mem_bytes)
+            let parsed = keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)
+                .and_then(|cpu_cores| Ok((cpu_cores, keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)?)));
+            match parsed {
+                Ok((cpu_cores, mem_bytes)) => (cpu + cpu_cores, mem + mem_bytes),
+                Err(e) => {
+                    eprintln!(
+                        "keel-agentd: jail '{}' has unparsable resources, excluding it from committed_resources: {e}",
+                        record.spec.metadata.name
+                    );
+                    (cpu, mem)
+                }
+            }
         })
     }
 }
@@ -677,6 +713,26 @@ mod tests {
         let (cpu, memory) = reconciler.committed_resources();
         assert_eq!(cpu, 3.5);
         assert_eq!(memory, 512 * 1024 * 1024 + 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn committed_resources_skips_a_record_with_an_unparsable_cpu_value_instead_of_panicking() {
+        // `Reconciler::new` loads records from disk with no re-validation,
+        // so a state file written by an older/different code version (or a
+        // hand-edited/corrupted one) that the current parser rejects can
+        // reach `committed_resources` -- which is called on every heartbeat.
+        // It must skip such a record, not panic the whole worker thread.
+        let dir = test_state_dir("committed_resources_skips_a_record_with_an_unparsable_cpu_value");
+        let mut reconciler = new_reconciler(dir);
+        reconciler.apply(sample_spec_with_resources("web-1", "2", "512M")).unwrap();
+        let mut corrupt = reconciler.records["web-1"].clone();
+        corrupt.spec.metadata.name = "web-2".to_string();
+        corrupt.spec.spec.resources.cpu = "not-a-number".to_string();
+        reconciler.records.insert("web-2".to_string(), corrupt);
+
+        let (cpu, memory) = reconciler.committed_resources();
+        assert_eq!(cpu, 2.0, "the malformed record must be skipped, not counted or panicked on");
+        assert_eq!(memory, 512 * 1024 * 1024);
     }
 
     #[test]
@@ -820,6 +876,97 @@ mod tests {
         reconciler.delete("web-1").unwrap();
 
         assert!(!reconciler.records.contains_key("web-1"));
+        assert_eq!(store::load_all(&dir).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn delete_persists_a_deleting_marker_before_destructive_actions_and_can_be_retried_after_a_transient_failure() {
+        let dir = test_state_dir("delete_persists_a_deleting_marker_before_destructive_actions");
+        let mut reconciler = new_reconciler(dir.clone());
+        reconciler.zfs.seed_dataset("zroot/keel/base/14.2-web");
+        reconciler.apply(sample_spec("web-1")).unwrap();
+        reconciler.provision("web-1", &reconciler.records["web-1"].clone()).unwrap();
+
+        // Force the rootfs dataset destroy to fail partway through delete()
+        // (a real "device busy" is exactly the scenario destroy_dataset's
+        // own retry loop exists for), simulating any transient failure
+        // between the jail actually being destroyed and the record being
+        // fully removed.
+        let jail_dataset = record::jail_dataset_path("zroot", "web-1");
+        reconciler.zfs.mark_busy(&jail_dataset);
+
+        let result = reconciler.delete("web-1");
+        assert!(matches!(result, Err(ReconcileError::Zfs(keel_zfs::ZfsError::Busy(_)))));
+
+        // The record must survive this failure (on disk and in memory),
+        // marked deleting -- not silently vanish (which would let a later
+        // reconcile reprovision it) and not stay looking like a normal,
+        // undeleted record either.
+        assert!(reconciler.records["web-1"].deleting, "record must be marked deleting after a failed delete");
+        let loaded = store::load_all(&dir).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].deleting);
+        // The jail itself was already destroyed before the dataset step
+        // failed, proving destructive actions genuinely ran.
+        assert!(!reconciler.jails.jail_exists(&record::jail_name("web-1")).unwrap());
+
+        // Retrying once the transient failure clears must finish the job.
+        reconciler.zfs.unmark_busy(&jail_dataset);
+        reconciler.delete("web-1").unwrap();
+        assert!(!reconciler.records.contains_key("web-1"));
+        assert_eq!(store::load_all(&dir).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn reconcile_resumes_a_pending_delete_after_a_simulated_restart_instead_of_reprovisioning() {
+        // Proves the fix for "a crash between destroying a jail and
+        // removing its record resurrects it": simulate that exact crash by
+        // hand-persisting a `deleting: true` record for a jail that's still
+        // actually alive in the fakes, then build a *fresh* `Reconciler::new`
+        // over the same state_dir and same underlying fakes (mirroring
+        // `resume_replication_loops_starts_a_loop_for_a_record_persisted_before_a_restart`'s
+        // restart simulation) and confirm `reconcile()` finishes destroying
+        // it rather than treating "jail not tracked as running yet" as
+        // "provision me."
+        let dir = test_state_dir("reconcile_resumes_a_pending_delete_after_a_simulated_restart");
+        let mut reconciler = new_reconciler(dir.clone());
+        reconciler.zfs.seed_dataset("zroot/keel/base/14.2-web");
+        reconciler.apply(sample_spec("web-1")).unwrap();
+        reconciler.provision("web-1", &reconciler.records["web-1"].clone()).unwrap();
+        assert!(reconciler.jails.jail_exists(&record::jail_name("web-1")).unwrap());
+
+        // "The crash": the delete marker was persisted, but nothing else
+        // ran yet -- the jail is still alive in the fakes' shared state.
+        let mut mid_delete = reconciler.records["web-1"].clone();
+        mid_delete.deleting = true;
+        store::save(&dir, &mid_delete).unwrap();
+
+        // "The restart": a fresh Reconciler over the same state_dir and the
+        // same underlying fakes (jails/zfs/net/mounts all persist real
+        // state across this "restart," a real daemon restart too).
+        let mut restarted = Reconciler::new(
+            reconciler.jails.clone(),
+            reconciler.zfs.clone(),
+            reconciler.net.clone(),
+            reconciler.mounts.clone(),
+            "zroot".to_string(),
+            dir.clone(),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        assert!(restarted.records["web-1"].deleting, "the loaded record must still be marked deleting");
+
+        let failures = restarted.reconcile(Instant::now());
+        assert!(failures.is_empty(), "expected the resumed delete to succeed cleanly: {failures:?}");
+
+        assert!(
+            !restarted.jails.jail_exists(&record::jail_name("web-1")).unwrap(),
+            "the jail must have been destroyed, not reprovisioned"
+        );
+        assert!(!restarted.records.contains_key("web-1"));
         assert_eq!(store::load_all(&dir).unwrap(), vec![]);
     }
 

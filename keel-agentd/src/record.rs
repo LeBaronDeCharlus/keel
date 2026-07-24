@@ -6,6 +6,14 @@ use std::path::PathBuf;
 pub struct JailRecord {
     pub spec: JailSpec,
     pub epair_ordinal: u32,
+    /// Persisted before `Reconciler::delete` runs any destructive action, so
+    /// a crash partway through a delete leaves a record on disk that still
+    /// says "delete me" rather than "provision me" -- `reconcile` resumes
+    /// (rather than reprovisions) any record it loads with this set.
+    /// `#[serde(default)]` keeps state files written before this field
+    /// existed loading as `false`.
+    #[serde(default)]
+    pub deleting: bool,
 }
 
 pub fn jail_name(spec_name: &str) -> String {
@@ -104,7 +112,7 @@ mod tests {
 
     #[test]
     fn jail_record_round_trips_through_yaml() {
-        let record = JailRecord { spec: sample_spec("web-1"), epair_ordinal: 3 };
+        let record = JailRecord { spec: sample_spec("web-1"), epair_ordinal: 3, deleting: false };
         let yaml = serde_yaml::to_string(&record).unwrap();
         let parsed: JailRecord = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, record);

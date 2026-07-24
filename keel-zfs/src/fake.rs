@@ -29,6 +29,13 @@ impl FakeZfsManager {
     pub fn mark_busy(&self, dataset: &str) {
         self.busy.lock().unwrap().insert(dataset.to_string());
     }
+
+    /// Test helper: the real-world counterpart to `mark_busy` -- simulates
+    /// whatever was holding the dataset busy (e.g. a jail's nullfs mount)
+    /// releasing it, so a retried `destroy_dataset` can succeed.
+    pub fn unmark_busy(&self, dataset: &str) {
+        self.busy.lock().unwrap().remove(dataset);
+    }
 }
 
 impl ZfsManager for FakeZfsManager {
@@ -210,6 +217,18 @@ mod tests {
         zfs.mark_busy("zroot/keel/volumes/web-data");
         assert!(matches!(zfs.destroy_dataset("zroot/keel/volumes/web-data"), Err(ZfsError::Busy(_))));
         assert_eq!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap(), true);
+    }
+
+    #[test]
+    fn unmark_busy_lets_a_previously_busy_dataset_be_destroyed() {
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/volumes/web-data");
+        zfs.mark_busy("zroot/keel/volumes/web-data");
+        assert!(matches!(zfs.destroy_dataset("zroot/keel/volumes/web-data"), Err(ZfsError::Busy(_))));
+
+        zfs.unmark_busy("zroot/keel/volumes/web-data");
+        zfs.destroy_dataset("zroot/keel/volumes/web-data").unwrap();
+        assert_eq!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap(), false);
     }
 
     #[test]

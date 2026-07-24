@@ -75,7 +75,7 @@ mod tests {
     }
 
     fn sample_record(name: &str) -> JailRecord {
-        JailRecord { spec: sample_spec(name), epair_ordinal: 5 }
+        JailRecord { spec: sample_spec(name), epair_ordinal: 5, deleting: false }
     }
 
     fn test_state_dir(name: &str) -> PathBuf {

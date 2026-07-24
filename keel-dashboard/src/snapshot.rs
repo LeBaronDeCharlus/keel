@@ -127,6 +127,7 @@ mod tests {
                     },
                 },
                 epair_ordinal: 1,
+                deleting: false,
             },
             running: true,
             backoff: BackoffStatus::default(),

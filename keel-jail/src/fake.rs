@@ -2,7 +2,7 @@ use crate::JailError;
 use crate::JailRuntime;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct FakeJail {
     #[allow(dead_code)]
@@ -15,9 +15,13 @@ struct FakeJail {
     fail_start: bool,
 }
 
-#[derive(Default)]
+/// `Arc`-backed (not a bare `Mutex`) so a clone shares the same underlying
+/// jails rather than starting a fresh, empty runtime -- needed by tests that
+/// simulate a daemon restart, where the same real jails must still be there
+/// afterward.
+#[derive(Default, Clone)]
 pub struct FakeJailRuntime {
-    jails: Mutex<HashMap<String, FakeJail>>,
+    jails: Arc<Mutex<HashMap<String, FakeJail>>>,
 }
 
 impl FakeJailRuntime {
