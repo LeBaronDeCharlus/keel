@@ -20,6 +20,7 @@ pub enum Command {
     RemoveServiceAlias(String, String, Sender<Result<(), keel_net::NetError>>),
     GetVolume(String, Sender<Result<(), ReconcileError>>),
     DeleteVolume(String, Sender<Result<(), ReconcileError>>),
+    ListVolumes(Sender<Result<Vec<crate::wire::VolumeStatus>, ReconcileError>>),
     SetReplicateTo(String, Option<String>, Sender<Result<(), ReconcileError>>),
     /// Re-spawns a replication loop for every stateful+replicated jail whose
     /// record was loaded from on-disk state without ever going through
@@ -114,6 +115,9 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
         }
         Command::DeleteVolume(name, reply) => {
             let _ = reply.send(reconciler.delete_volume(&name));
+        }
+        Command::ListVolumes(reply) => {
+            let _ = reply.send(reconciler.list_volumes());
         }
         Command::SetReplicateTo(name, replicate_to, reply) => {
             let _ = reply.send(reconciler.set_replicate_to(&name, replicate_to));
@@ -354,6 +358,42 @@ mod tests {
         let (del_tx, del_rx) = mpsc::channel();
         commands.send(Command::DeleteVolume("web-data".to_string(), del_tx)).unwrap();
         assert!(matches!(del_rx.recv().unwrap(), Err(ReconcileError::Zfs(keel_zfs::ZfsError::NotFound(_)))));
+    }
+
+    #[test]
+    fn list_volumes_command_returns_every_provisioned_volume() {
+        let commands = spawn_test_worker("list_volumes_command_returns_every_provisioned_volume");
+
+        let (apply_tx, apply_rx) = mpsc::channel();
+        commands
+            .send(Command::Apply(
+                keel_spec::JailSpec {
+                    api_version: "keel/v1".to_string(),
+                    kind: "Jail".to_string(),
+                    metadata: keel_spec::Metadata { name: "web-1".to_string() },
+                    spec: keel_spec::Spec {
+                        image: "base/14.2-web".to_string(),
+                        command: vec!["/usr/local/bin/myapp".to_string()],
+                        network: keel_spec::NetworkSpec { vnet: true, bridge: "keel0".to_string(), address: "10.0.0.5/24".to_string() },
+                        resources: keel_spec::ResourcesSpec { cpu: "1".to_string(), memory: "256M".to_string() },
+                        restart_policy: keel_spec::RestartPolicy::Always,
+                        volumes: vec![keel_spec::VolumeMount {
+                            name: "web-data".to_string(),
+                            mount_path: "/data".to_string(),
+                            size: "1G".to_string(),
+                        }],
+                        replicate_to: None,
+                    },
+                },
+                apply_tx,
+            ))
+            .unwrap();
+        apply_rx.recv().unwrap().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        commands.send(Command::ListVolumes(tx)).unwrap();
+        let volumes = rx.recv().unwrap().unwrap();
+        assert_eq!(volumes, vec![crate::wire::VolumeStatus { name: "web-data".to_string() }]);
     }
 
     fn sample_ingress_spec(name: &str) -> IngressSpec {
