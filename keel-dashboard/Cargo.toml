@@ -15,6 +15,7 @@ rustls-pemfile = "2"
 base64 = "0.22"
 
 [dev-dependencies]
+keel-spec = { path = "../keel-spec" }
 keel-jail = { path = "../keel-jail" }
 keel-zfs = { path = "../keel-zfs" }
 keel-net = { path = "../keel-net" }
