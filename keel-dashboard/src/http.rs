@@ -101,6 +101,7 @@ fn reason_phrase(status: u16) -> &'static str {
         200 => "OK",
         401 => "Unauthorized",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "Unknown",
     }
 }
@@ -115,10 +116,23 @@ fn route(request: &ParsedRequest, snapshot: &Arc<RwLock<Snapshot>>) -> (u16, &'s
         }
         ("GET", "/api/snapshot") => {
             let snapshot = snapshot.read().unwrap();
-            let body = serde_json::to_vec(&*snapshot).expect("Snapshot serialization should not fail");
-            (200, "application/json", body)
+            json_response(&*snapshot)
         }
         _ => (404, "text/plain", b"not found".to_vec()),
+    }
+}
+
+/// Serializes `value` to a JSON response, without panicking (and thus
+/// without poisoning the caller's `RwLock` read guard) if serialization
+/// ever fails. `serde_json` returns `Err` for some inputs (e.g. a map with
+/// a non-finite float key) even though `Snapshot` itself can't currently
+/// produce one - handling the `Result` here is cheap insurance against
+/// that changing, or against a future field type that can fail, rather
+/// than relying on serialization staying infallible forever.
+fn json_response<T: serde::Serialize>(value: &T) -> (u16, &'static str, Vec<u8>) {
+    match serde_json::to_vec(value) {
+        Ok(body) => (200, "application/json", body),
+        Err(_) => (500, "text/plain", b"failed to serialize snapshot".to_vec()),
     }
 }
 
@@ -253,5 +267,65 @@ mod tests {
         let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));
         let (status, _) = request(addr, "/nope", Some(&header));
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn a_snapshot_with_a_non_finite_float_does_not_panic_or_poison_the_lock() {
+        // `serde_json` (as vendored here, 1.0.151) serializes non-finite
+        // f64 struct fields as JSON `null` rather than returning `Err` -
+        // verified against `serde_json::ser::Serializer::serialize_f64`,
+        // which only errors on non-finite floats used as *map keys*, not
+        // as ordinary field values. So this specific input doesn't
+        // actually exercise the 500 path below; it's still worth a test
+        // to confirm NaN data flowing in from the network is served
+        // without panicking and without poisoning the shared `RwLock`
+        // (see `json_response_returns_a_clean_500_on_a_genuine_serialization_error`
+        // for the actual error-path coverage).
+        use crate::snapshot::NodeSnapshot;
+        use keel_controlplane::wire::{NodeState, NodeStatus};
+
+        let node_status = NodeStatus {
+            id: "node-1".to_string(),
+            addr: "192.168.64.4:7621".to_string(),
+            pod_cidr: "10.0.4.0/24".to_string(),
+            status: NodeState::Alive,
+            last_seen_secs: 1,
+            capacity_cpu: f64::NAN,
+            capacity_memory: 8 * 1024 * 1024 * 1024,
+            committed_cpu: 1.0,
+            committed_memory: 1024 * 1024 * 1024,
+            ingresses: vec![],
+        };
+        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
+        let snapshot =
+            Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+
+        let addr = start_test_server(snapshot);
+        let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));
+        let (status, body) = request(addr, "/api/snapshot", Some(&header));
+        assert_eq!(status, 200, "got body: {body}");
+        assert!(body.contains("\"capacity_cpu\":null"), "got: {body}");
+
+        // The lock must not be poisoned: a follow-up request against the
+        // same running server (and thus the same shared RwLock) must still
+        // succeed.
+        let (status2, _) = request(addr, "/", Some(&header));
+        assert_eq!(status2, 200);
+    }
+
+    #[derive(Debug)]
+    struct AlwaysFailsToSerialize;
+    impl serde::Serialize for AlwaysFailsToSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("simulated serialization failure"))
+        }
+    }
+
+    #[test]
+    fn json_response_returns_a_clean_500_on_a_genuine_serialization_error() {
+        let (status, content_type, body) = json_response(&AlwaysFailsToSerialize);
+        assert_eq!(status, 500);
+        assert_eq!(content_type, "text/plain");
+        assert_eq!(body, b"failed to serialize snapshot");
     }
 }
