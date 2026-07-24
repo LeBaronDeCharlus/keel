@@ -98,6 +98,15 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
         }
         Command::Delete(name, reply) => {
             let result = reconciler.delete(&name);
+            if result.is_ok() {
+                // Only once the delete has genuinely completed (not merely
+                // been attempted -- `delete` returns `Err` and leaves the
+                // record marked `deleting` on a transient failure, to be
+                // resumed by a later reconcile) -- otherwise a name could be
+                // freed up for re-insertion while its old replication loop
+                // is still shutting down.
+                replicating.remove(&name);
+            }
             let _ = reconciler.reconcile(Instant::now());
             let _ = reply.send(result);
         }
@@ -516,6 +525,54 @@ mod tests {
                 replicate_to: Some(replicate_to.to_string()),
             },
         }
+    }
+
+    #[test]
+    fn deleting_a_stateful_replicated_jail_clears_it_from_the_replicating_guard() {
+        // Reproduces "replication is permanently lost after delete+recreate
+        // of the same jail name in one daemon run": `replicating` gates
+        // `replication_loop::spawn` against double-spawning, but if `Delete`
+        // never clears a name out of it, re-applying the same
+        // stateful+replicated name later in the same process silently
+        // spawns no new loop at all. Drives `handle_command` directly
+        // (rather than through the 30s-interval-hardcoded `spawn()` path)
+        // so this stays a fast, direct test of the guard itself.
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/base/14.2-web");
+        let mut reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            test_state_dir("deleting_a_stateful_replicated_jail_clears_it_from_the_replicating_guard"),
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (commands, _rx) = mpsc::channel();
+        let mut replicating: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let tls = Some(test_reloading_tls());
+
+        let (apply_tx, apply_rx) = mpsc::channel();
+        handle_command(&mut reconciler, Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), apply_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        apply_rx.recv().unwrap().unwrap();
+        assert!(replicating.contains("db-0"), "expected the initial apply to start tracking its replication loop");
+
+        let (delete_tx, delete_rx) = mpsc::channel();
+        handle_command(&mut reconciler, Command::Delete("db-0".to_string(), delete_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        delete_rx.recv().unwrap().unwrap();
+        assert!(!replicating.contains("db-0"), "delete must clear the name out of the replicating guard");
+
+        // Re-applying the same name later must be able to start a fresh
+        // loop -- i.e. `replicating.insert` must return `true` again, not
+        // silently no-op forever because the name was never removed.
+        let (reapply_tx, reapply_rx) = mpsc::channel();
+        handle_command(&mut reconciler, Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), reapply_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        reapply_rx.recv().unwrap().unwrap();
+        assert!(replicating.contains("db-0"), "expected the re-apply to start tracking a new replication loop");
     }
 
     #[test]
