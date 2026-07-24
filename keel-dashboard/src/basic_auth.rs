@@ -18,7 +18,6 @@ pub fn check(header: Option<&str>, expected_user: &str, expected_password: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     fn header_for(user: &str, password: &str) -> String {
         format!("Basic {}", STANDARD.encode(format!("{user}:{password}")))
