@@ -133,7 +133,7 @@ fn heartbeat_once(
         .map(|s| keel_controlplane::wire::JailHealth { name: s.record.spec.metadata.name, running: s.running })
         .collect();
 
-    let heartbeat = keel_controlplane::wire::Heartbeat { committed_cpu, committed_memory, jails };
+    let heartbeat = keel_controlplane::wire::Heartbeat { committed_cpu, committed_memory, jails, ingresses: vec![] };
     let body = serde_yaml::to_string(&heartbeat).map_err(|e| format!("failed to serialize heartbeat: {e}"))?;
     let response_body = send_request(control_plane_addr, "POST", &format!("/nodes/{node_id}/heartbeat"), &body, client_config)?;
     serde_yaml::from_slice(&response_body).map_err(|e| format!("malformed heartbeat response: {e}"))
@@ -265,6 +265,7 @@ mod tests {
             capacity_memory: 8 * 1024 * 1024 * 1024,
             committed_cpu: 0.0,
             committed_memory: 0,
+            ingresses: vec![],
         }
     }
 

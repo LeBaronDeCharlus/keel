@@ -143,6 +143,7 @@ impl Registry {
                     capacity_memory: record.capacity_memory,
                     committed_cpu: record.committed_cpu,
                     committed_memory: record.committed_memory,
+                    ingresses: vec![],
                 }
             })
             .collect();
