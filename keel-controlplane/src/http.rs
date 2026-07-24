@@ -574,7 +574,7 @@ fn handle_heartbeat(id: &str, body: &[u8], commands: &Sender<Command>, client_co
     };
     let (reply_tx, reply_rx) = mpsc::channel();
     if commands
-        .send(Command::Heartbeat(id.to_string(), heartbeat.committed_cpu, heartbeat.committed_memory, heartbeat.jails, reply_tx))
+        .send(Command::Heartbeat(id.to_string(), heartbeat.committed_cpu, heartbeat.committed_memory, heartbeat.jails, heartbeat.ingresses, reply_tx))
         .is_err()
     {
         return error_response(500, "control plane worker is not running".to_string());
@@ -893,6 +893,26 @@ mod tests {
             "committed_cpu: 1\ncommitted_memory: 1073741824\n",
         );
         assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn post_heartbeat_with_ingresses_is_reflected_in_get_nodes() {
+        let addr = start_test_server();
+        send_request(
+            &addr,
+            "POST",
+            "/nodes/register",
+            "id: node-1\naddr: 192.168.64.4:7621\ncapacity_cpu: 4\ncapacity_memory: 8589934592\n",
+        );
+        let (status, _) = send_request(
+            &addr,
+            "POST",
+            "/nodes/node-1/heartbeat",
+            "committed_cpu: 1\ncommitted_memory: 2\ningresses:\n  - name: blog\n    host: example.com\n    backend_service: hugo-site\n    backend_port: 8080\n    cert_expires_at_unix: 1800000000\n",
+        );
+        assert_eq!(status, 200);
+        let (_, body) = send_request(&addr, "GET", "/nodes", "");
+        assert!(body.contains("backend_service: hugo-site"), "got: {body}");
     }
 
     #[test]
