@@ -3,4 +3,5 @@
 //! its own Basic-Auth-protected, TLS-terminating HTTP server for browsers.
 
 pub mod control_plane_client;
+pub mod snapshot;
 pub mod tls;
