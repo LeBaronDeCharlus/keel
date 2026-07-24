@@ -169,7 +169,7 @@ fn handle_command(
             let _ = reply.send(result);
         }
         Command::Heartbeat(id, committed_cpu, committed_memory, jails, reply) => {
-            let result = registry.heartbeat(&id, committed_cpu, committed_memory, jails, Instant::now());
+            let result = registry.heartbeat(&id, committed_cpu, committed_memory, jails, vec![], Instant::now());
             let _ = reply.send(result);
         }
         Command::List(reply) => {
