@@ -162,6 +162,12 @@ fn persist_placements(placements: &Placements, state_dir: &Path) {
     }
 }
 
+fn persist_used_addresses(used_addresses: &UsedAddresses, state_dir: &Path) {
+    if let Err(e) = crate::store::save(&state_dir.join("used_addresses.yaml"), used_addresses) {
+        eprintln!("keel-controlplane: failed to persist used_addresses.yaml: {e}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     registry: &mut Registry,
@@ -417,10 +423,12 @@ fn handle_command(
         }
         Command::RecordReplicaAddress(jail_name, node_id, address, reply) => {
             used_addresses.record(jail_name, node_id, address);
+            persist_used_addresses(used_addresses, state_dir);
             let _ = reply.send(());
         }
         Command::ReleaseReplicaAddress(jail_name, reply) => {
             used_addresses.release(&jail_name);
+            persist_used_addresses(used_addresses, state_dir);
             let _ = reply.send(());
         }
         Command::RecordStandby(replica_name, node_id, reply) => {
