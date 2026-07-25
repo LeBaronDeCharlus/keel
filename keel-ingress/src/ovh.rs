@@ -82,16 +82,61 @@ impl DnsProvider for OvhDnsProvider {
     fn wait_for_propagation(&self, name: &str, value: &str) -> Result<(), DnsError> {
         const MAX_ATTEMPTS: u32 = 30;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+        // Querying the node's own configured resolver risks a caching (or
+        // negative-caching) intermediary reporting this brand-new record
+        // absent long after it's actually live on the zone, which then
+        // trips the timeout below and triggers the orphaned-TXT-record bug
+        // this same DNS-01 flow already has to guard against elsewhere.
+        // Querying the zone's own authoritative nameservers directly (via
+        // `host`'s trailing `[server]` argument) sidesteps that layer
+        // entirely.
+        let authoritative = self.authoritative_nameservers()?;
         for _ in 0..MAX_ATTEMPTS {
-            let output = std::process::Command::new("host").args(["-t", "TXT", name]).output().map_err(|e| DnsError::Request(e.to_string()))?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains(value) {
-                return Ok(());
+            for ns in &authoritative {
+                let output = std::process::Command::new("host")
+                    .args(["-t", "TXT", name, ns])
+                    .output()
+                    .map_err(|e| DnsError::Request(e.to_string()))?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains(value) {
+                    return Ok(());
+                }
             }
             std::thread::sleep(RETRY_DELAY);
         }
         Err(DnsError::PropagationTimeout(name.to_string()))
     }
+}
+
+impl OvhDnsProvider {
+    /// Resolves the zone's own authoritative nameservers via `host -t NS`,
+    /// once per `wait_for_propagation` call (NS records themselves change
+    /// far less often than the TXT challenge record being propagated, so
+    /// there's no need to re-resolve them on every retry).
+    fn authoritative_nameservers(&self) -> Result<Vec<String>, DnsError> {
+        let output = std::process::Command::new("host")
+            .args(["-t", "NS", &self.zone])
+            .output()
+            .map_err(|e| DnsError::Request(e.to_string()))?;
+        let nameservers = parse_ns_records(&String::from_utf8_lossy(&output.stdout));
+        if nameservers.is_empty() {
+            return Err(DnsError::Request(format!("could not resolve any authoritative nameserver for zone '{}'", self.zone)));
+        }
+        Ok(nameservers)
+    }
+}
+
+/// Parses `host -t NS`'s stdout (lines like `example.com name server has NS
+/// record ns13.ovh.net.`) into bare nameserver hostnames with the trailing
+/// root dot stripped, so they're usable directly as `host`'s own `[server]`
+/// argument.
+fn parse_ns_records(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.split_once("NS record ").map(|(_, ns)| ns))
+        .map(|ns| ns.trim().trim_end_matches('.').to_string())
+        .filter(|ns| !ns.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -120,5 +165,22 @@ mod tests {
         let a = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_000);
         let b = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_001);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn parse_ns_records_extracts_hostnames_and_strips_the_trailing_root_dot() {
+        let output = "example.com name server has NS record ns13.ovh.net.\nexample.com name server has NS record dns13.ovh.net.\n";
+        assert_eq!(parse_ns_records(output), vec!["ns13.ovh.net".to_string(), "dns13.ovh.net".to_string()]);
+    }
+
+    #[test]
+    fn parse_ns_records_ignores_unrelated_lines() {
+        let output = "Using domain server:\nAddress: 127.0.0.1#53\n\nexample.com name server has NS record ns13.ovh.net.\n";
+        assert_eq!(parse_ns_records(output), vec!["ns13.ovh.net".to_string()]);
+    }
+
+    #[test]
+    fn parse_ns_records_on_empty_output_is_empty() {
+        assert_eq!(parse_ns_records(""), Vec::<String>::new());
     }
 }

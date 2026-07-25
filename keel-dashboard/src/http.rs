@@ -23,7 +23,7 @@ type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
 pub fn run(
     listener: TcpListener,
-    tls_config: Arc<rustls::ServerConfig>,
+    reloading_tls: Arc<crate::tls::ReloadingBrowserTls>,
     snapshot: Arc<RwLock<Snapshot>>,
     basic_auth_user: String,
     basic_auth_password: String,
@@ -31,7 +31,7 @@ pub fn run(
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         apply_read_timeout(&stream);
-        let tls_config = Arc::clone(&tls_config);
+        let tls_config = reloading_tls.server_config();
         let snapshot = Arc::clone(&snapshot);
         let basic_auth_user = basic_auth_user.clone();
         let basic_auth_password = basic_auth_password.clone();
@@ -174,13 +174,13 @@ mod tests {
     }
 
     fn start_test_server(snapshot: Snapshot) -> std::net::SocketAddr {
-        let tls_config = Arc::new(
-            crate::tls::load_browser_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key")).unwrap(),
-        );
+        let reloading_tls =
+            crate::tls::ReloadingBrowserTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), Duration::from_secs(3600))
+                .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let snapshot = Arc::new(RwLock::new(snapshot));
-        std::thread::spawn(move || run(listener, tls_config, snapshot, "admin".to_string(), "hunter2".to_string()));
+        std::thread::spawn(move || run(listener, reloading_tls, snapshot, "admin".to_string(), "hunter2".to_string()));
         addr
     }
 
@@ -249,6 +249,50 @@ mod tests {
         fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
             rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
         }
+    }
+
+    fn served_cert_der(addr: std::net::SocketAddr) -> Vec<u8> {
+        crate::tls::ensure_crypto_provider();
+        let verifier = std::sync::Arc::new(NoVerify);
+        let client_config =
+            rustls::ClientConfig::builder().dangerous().with_custom_certificate_verifier(verifier).with_no_client_auth();
+        let server_name = rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
+        let tcp = std::net::TcpStream::connect(addr).unwrap();
+        let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
+        let mut stream = rustls::StreamOwned::new(conn, tcp);
+        // A byte of application data forces the handshake to complete
+        // before this returns (rustls otherwise defers it until the first
+        // read/write), which is when the peer certificate becomes visible.
+        let _ = stream.write_all(b"\n");
+        stream.conn.peer_certificates().unwrap()[0].to_vec()
+    }
+
+    #[test]
+    fn reloading_tls_picks_up_a_replaced_certificate_without_restart() {
+        let cert_dir = std::env::temp_dir().join(format!("keel-dashboard-reload-test-{}", std::process::id()));
+        std::fs::create_dir_all(&cert_dir).unwrap();
+        let cert_path = cert_dir.join("dashboard.crt");
+        let key_path = cert_dir.join("dashboard.key");
+        std::fs::copy(fixture("fixture-node.crt"), &cert_path).unwrap();
+        std::fs::copy(fixture("fixture-node.key"), &key_path).unwrap();
+
+        let reloading_tls = crate::tls::ReloadingBrowserTls::spawn(cert_path.clone(), key_path.clone(), Duration::from_millis(50)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let snapshot = Arc::new(RwLock::new(Snapshot::default()));
+        std::thread::spawn(move || run(listener, reloading_tls, snapshot, "admin".to_string(), "hunter2".to_string()));
+
+        let original_cert = served_cert_der(addr);
+
+        // wrong-ca-node.crt is simply a different, real certificate (signed
+        // by a different CA than fixture-node.crt) -- distinct bytes are all
+        // this test needs, no CA trust is involved on this listener at all.
+        std::fs::copy(fixture("wrong-ca-node.crt"), &cert_path).unwrap();
+        std::fs::copy(fixture("wrong-ca-node.key"), &key_path).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let reloaded_cert = served_cert_der(addr);
+        assert_ne!(original_cert, reloaded_cert, "expected the listener to serve the replaced certificate after reloading, not the original");
     }
 
     #[test]

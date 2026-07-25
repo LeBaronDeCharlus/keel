@@ -102,14 +102,16 @@ fn main() {
         Box::new(keel_dashboard::control_plane_client::TlsControlPlaneClient::new(control_plane_addr, client_config));
     let snapshot = keel_dashboard::poller::spawn(client, Duration::from_secs(config.poll_interval_secs));
 
-    let server_config = Arc::new(
-        keel_dashboard::tls::load_browser_server_config(&dashboard_tls_cert_file, &dashboard_tls_key_file)
-            .unwrap_or_else(|e| panic!("failed to load dashboard TLS server config: {e}")),
-    );
+    let reloading_tls = keel_dashboard::tls::ReloadingBrowserTls::spawn(
+        dashboard_tls_cert_file,
+        dashboard_tls_key_file,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("failed to load dashboard TLS server config: {e}"));
 
     eprintln!("keel-dashboard: starting (listen_addr={})", config.listen_addr);
     let listener = std::net::TcpListener::bind(&config.listen_addr).expect("failed to bind TCP listener");
-    keel_dashboard::http::run(listener, server_config, snapshot, basic_auth_user, basic_auth_password);
+    keel_dashboard::http::run(listener, reloading_tls, snapshot, basic_auth_user, basic_auth_password);
 }
 
 #[cfg(test)]

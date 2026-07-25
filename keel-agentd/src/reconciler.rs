@@ -480,11 +480,15 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                         continue;
                     }
                     let mut updated = record;
-                    // Placeholder 90-day validity: `FakeAcmeClient` doesn't
-                    // return a real expiry. Task 16's real `AcmeClient` must
-                    // parse the actual `notAfter` out of the issued
-                    // certificate instead of hardcoding this.
-                    updated.cert_expires_at_unix = Some(now_unix + 90 * 24 * 60 * 60);
+                    // The real notAfter from the issued certificate itself,
+                    // not a hardcoded guess -- falls back to a conservative
+                    // 1-day expiry (forcing a retry well before any real
+                    // problem) only if the issued PEM somehow can't be
+                    // parsed, which should never happen against a real CA.
+                    updated.cert_expires_at_unix = Some(cert.expires_at_unix().unwrap_or_else(|e| {
+                        eprintln!("keel-agentd: failed to parse notAfter from the certificate issued for ingress '{name}': {e}, falling back to a conservative 1-day expiry");
+                        now_unix + 24 * 60 * 60
+                    }));
                     if let Err(e) = ingress_store::save(&self.state_dir, &updated) {
                         eprintln!("keel-agentd: failed to persist certificate expiry for ingress '{name}': {e}");
                         self.ingress_backoff.get_mut(&name).unwrap().record_attempt(Instant::now());
@@ -1756,7 +1760,7 @@ mod tests {
 
         assert!(reconciler.get_ingress("blog").unwrap().cert_expires_at_unix.is_some());
         let certs_dir = certs_dir_for(&reconciler);
-        assert!(fs::read_to_string(certs_dir.join("example.com.crt")).unwrap().contains("example.com"));
+        assert!(fs::read_to_string(certs_dir.join("example.com.crt")).unwrap().contains("BEGIN CERTIFICATE"));
         assert!(fs::read_to_string(certs_dir.join("example.com.key")).unwrap().contains("PRIVATE KEY"));
     }
 
@@ -1815,7 +1819,10 @@ mod tests {
         // Only 60 seconds later, well inside the 30-day threshold - but the
         // missing cert file must still force reissuance.
         reconciler.reconcile_certs(now + 60);
-        assert!(fs::read_to_string(certs_dir.join("example.com.crt")).unwrap().contains("example.com"), "cert file should have been reissued");
+        assert!(
+            fs::read_to_string(certs_dir.join("example.com.crt")).unwrap().contains("BEGIN CERTIFICATE"),
+            "cert file should have been reissued"
+        );
     }
 
     #[test]

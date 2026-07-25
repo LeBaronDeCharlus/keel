@@ -107,13 +107,13 @@ fn a_poll_cycle_is_reflected_in_both_the_json_api_and_the_rendered_html() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let tls_config = Arc::new(
-        keel_dashboard::tls::load_browser_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key")).unwrap(),
-    );
+    let reloading_tls =
+        keel_dashboard::tls::ReloadingBrowserTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), Duration::from_secs(3600))
+            .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
-        keel_dashboard::http::run(listener, tls_config, snapshot, "admin".to_string(), "hunter2".to_string())
+        keel_dashboard::http::run(listener, reloading_tls, snapshot, "admin".to_string(), "hunter2".to_string())
     });
 
     let (unauth_status, _) = request(addr, "/", "admin", "wrongpassword");

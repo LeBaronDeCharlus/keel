@@ -3,8 +3,10 @@ use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKey
 use rustls::RootCertStore;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
-use std::sync::{Arc, Once};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Once, RwLock};
+use std::thread;
+use std::time::Duration;
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
@@ -53,6 +55,44 @@ pub fn load_browser_server_config(cert_path: &Path, key_path: &Path) -> Result<r
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("failed to build TLS server config: {e}"))
+}
+
+/// Reloads the browser-facing listener's own cert/key from disk on a
+/// timer, so a renewed certificate takes effect without an operator having
+/// to restart the process -- previously loaded once at startup and never
+/// looked at again, meaning a renewed cert (including one that had already
+/// expired) kept being served until a manual restart. Mirrors
+/// `keel_controlplane::tls::ReloadingTls`'s shape, simplified to just the
+/// cert/key this listener actually needs (no client-cert verification, so
+/// no CA/CRL to reload alongside it).
+pub struct ReloadingBrowserTls {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    server: RwLock<Arc<rustls::ServerConfig>>,
+}
+
+impl ReloadingBrowserTls {
+    pub fn spawn(cert_path: PathBuf, key_path: PathBuf, reload_interval: Duration) -> Result<Arc<Self>, String> {
+        let server = load_browser_server_config(&cert_path, &key_path)?;
+        let this = Arc::new(Self { cert_path, key_path, server: RwLock::new(Arc::new(server)) });
+        let reload_target = Arc::clone(&this);
+        thread::spawn(move || loop {
+            thread::sleep(reload_interval);
+            reload_target.reload_once();
+        });
+        Ok(this)
+    }
+
+    fn reload_once(&self) {
+        match load_browser_server_config(&self.cert_path, &self.key_path) {
+            Ok(cfg) => *self.server.write().unwrap() = Arc::new(cfg),
+            Err(e) => eprintln!("keel-dashboard: TLS reload failed: {e}"),
+        }
+    }
+
+    pub fn server_config(&self) -> Arc<rustls::ServerConfig> {
+        Arc::clone(&self.server.read().unwrap())
+    }
 }
 
 pub fn server_name_from_addr(addr: &str) -> Result<ServerName<'static>, String> {
