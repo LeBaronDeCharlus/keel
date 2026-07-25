@@ -1,7 +1,7 @@
 use crate::ZfsError;
 use crate::ZfsManager;
-use std::io::{Read, Write};
-use std::process::{Command, Output, Stdio};
+use std::io::{self, Read, Write};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 
 #[derive(Clone)]
 pub struct CliZfsManager;
@@ -126,20 +126,16 @@ impl ZfsManager for CliZfsManager {
         }
         args.push(&target);
 
-        let mut child = Command::new("zfs")
+        let child = Command::new("zfs")
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
-        let mut stdout = child.stdout.take().expect("stdout was piped");
-        let copy_result = std::io::copy(&mut stdout, out);
-        drop(stdout);
-        let status = child.wait().map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
-        let mut stderr = String::new();
-        if let Some(mut s) = child.stderr.take() {
-            let _ = s.read_to_string(&mut stderr);
-        }
+        let (copy_result, status, stderr) = run_and_drain_stderr(child, |child| {
+            let mut stdout = child.stdout.take().expect("stdout was piped");
+            std::io::copy(&mut stdout, out).map(|_| ())
+        });
         if !status.success() {
             return Err(ZfsError::CommandFailed(format!("zfs {}", args.join(" ")), status, stderr));
         }
@@ -148,20 +144,16 @@ impl ZfsManager for CliZfsManager {
     }
 
     fn receive_snapshot(&self, dataset: &str, input: &mut dyn Read) -> Result<(), ZfsError> {
-        let mut child = Command::new("zfs")
+        let child = Command::new("zfs")
             .args(["receive", dataset])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
-        let mut stdin = child.stdin.take().expect("stdin was piped");
-        let copy_result = std::io::copy(input, &mut stdin);
-        drop(stdin);
-        let status = child.wait().map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
-        let mut stderr = String::new();
-        if let Some(mut s) = child.stderr.take() {
-            let _ = s.read_to_string(&mut stderr);
-        }
+        let (copy_result, status, stderr) = run_and_drain_stderr(child, |child| {
+            let mut stdin = child.stdin.take().expect("stdin was piped");
+            std::io::copy(input, &mut stdin).map(|_| ())
+        });
         if !status.success() {
             return Err(ZfsError::CommandFailed(format!("zfs receive {dataset}"), status, stderr));
         }
@@ -205,5 +197,66 @@ impl ZfsManager for CliZfsManager {
             .collect();
         children.sort();
         Ok(children)
+    }
+}
+
+/// Runs `copy` (the caller's stdout-or-stdin transfer against `child`) while
+/// draining `child`'s stderr concurrently on its own thread, rather than
+/// only after `child.wait()` returns. Both `send_snapshot` and
+/// `receive_snapshot` used to drain stderr strictly after waiting: if the
+/// child wrote enough to stderr to fill the OS pipe buffer while blocked
+/// mid-transfer on stdout/stdin, and this process was itself blocked inside
+/// `copy` waiting on that same child, neither side could make progress --
+/// a real deadlock, not just a slow path.
+fn run_and_drain_stderr(
+    mut child: Child,
+    copy: impl FnOnce(&mut Child) -> io::Result<()>,
+) -> (io::Result<()>, ExitStatus, String) {
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let copy_result = copy(&mut child);
+    let status = child.wait().expect("wait should not fail on an already-spawned child");
+    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    (copy_result, status, stderr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_and_drain_stderr_does_not_deadlock_when_the_child_floods_stderr_mid_transfer() {
+        // Without concurrent draining, this child blocks writing ~300KB to
+        // stderr (comfortably past any real OS pipe buffer size) before it
+        // ever reaches its `echo done`, so a `copy` that's waiting on
+        // stdout would hang forever. Bounded by a real timeout so a
+        // regression fails the test instead of hanging the suite.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let child = Command::new("sh")
+                .args(["-c", "yes e | head -c 300000 1>&2; echo done"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut out = Vec::new();
+            let (copy_result, status, stderr) = run_and_drain_stderr(child, |child| {
+                let mut stdout = child.stdout.take().expect("stdout was piped");
+                io::copy(&mut stdout, &mut out).map(|_| ())
+            });
+            let _ = done_tx.send((copy_result.is_ok(), status.success(), stderr.len(), out));
+        });
+
+        let (copy_ok, exited_ok, stderr_len, stdout_bytes) =
+            done_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("expected no deadlock: run_and_drain_stderr must return");
+        assert!(copy_ok, "expected the stdout copy to succeed");
+        assert!(exited_ok, "expected the child to exit successfully");
+        assert_eq!(stderr_len, 300_000, "expected the full flooded stderr to have been drained");
+        assert_eq!(String::from_utf8_lossy(&stdout_bytes).trim(), "done");
     }
 }

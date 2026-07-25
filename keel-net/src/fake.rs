@@ -41,7 +41,7 @@ impl NetManager for FakeNetManager {
         if !self.bridges.lock().unwrap().contains(bridge) {
             return Err(NetError::NotFound(bridge.to_string()));
         }
-        let gateway = crate::bridge_gateway(address);
+        let gateway = crate::bridge_gateway(address)?;
         self.bridge_addresses.lock().unwrap().insert(bridge.to_string(), gateway);
         self.attachments.lock().unwrap().insert(
             epair_base.to_string(),

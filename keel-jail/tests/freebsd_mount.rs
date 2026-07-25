@@ -39,6 +39,35 @@ fn mount_nullfs_then_is_mounted_then_unmount_round_trips_through_the_real_kernel
 }
 
 #[test]
+fn mount_nullfs_called_twice_in_a_row_does_not_stack_a_duplicate_mount() {
+    // Real mount(8) doesn't check is_mounted first and silently stacks a
+    // second nullfs mount rather than erroring - reproduced here by calling
+    // mount_nullfs twice and confirming only one mount(8) entry exists for
+    // this target afterward (via `mount -p`'s own listing), not by relying
+    // on unmount() alone (a stacked mount would still "successfully"
+    // unmount once, leaving the first mount silently in place underneath).
+    let mounts = CliMountManager::new();
+    let source = Path::new("/zroot/keel/volumes");
+    let target = Path::new("/tmp/keel-mount-test-no-duplicate-stacking");
+    let _ = std::process::Command::new("umount").arg(target).output();
+    let _ = std::process::Command::new("umount").arg(target).output();
+    std::fs::create_dir_all(target).unwrap();
+
+    mounts.mount_nullfs(source, target).expect("first mount_nullfs should succeed");
+    mounts.mount_nullfs(source, target).expect("second mount_nullfs should succeed, not stack a duplicate");
+
+    let output = std::process::Command::new("mount").arg("-p").output().unwrap();
+    let target_str = target.to_string_lossy();
+    let entries = String::from_utf8_lossy(&output.stdout).lines().filter(|line| line.contains(target_str.as_ref())).count();
+    assert_eq!(entries, 1, "expected exactly one mount(8) entry for {target_str}, got {entries}");
+
+    // Single real unmount must be enough - if this leaves the target still
+    // mounted, a duplicate was stacked underneath after all.
+    mounts.unmount(target).expect("unmount should succeed");
+    assert_eq!(mounts.is_mounted(target).unwrap(), false, "one unmount must fully clear a mount_nullfs that was called twice");
+}
+
+#[test]
 fn unmount_on_a_never_mounted_target_returns_not_mounted() {
     let mounts = CliMountManager::new();
     let target = Path::new("/tmp/keel-mount-test-never-mounted");

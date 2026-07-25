@@ -79,7 +79,7 @@ impl NetManager for ProcessNetManager {
         // Service on the node. `bridge_gateway`'s returned string already
         // carries an explicit prefix length, so `alias` here needs no
         // separate netmask handling the way `add_alias`'s VIP case does.
-        let gateway = crate::bridge_gateway(address);
+        let gateway = crate::bridge_gateway(address)?;
         let gateway_set = Self::run("ifconfig", &[bridge, "inet", &gateway, "alias"])?;
         if !gateway_set.status.success() && !Self::stderr_contains(&gateway_set, "File exists") {
             return Err(NetError::CommandFailed(

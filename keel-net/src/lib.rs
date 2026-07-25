@@ -12,12 +12,30 @@ pub use process::ProcessNetManager;
 ///
 /// For example, a jail addressed `10.0.60.5/24` gets the gateway
 /// `10.0.60.1/24`.
-pub(crate) fn bridge_gateway(address: &str) -> String {
-    let net: ipnet::Ipv4Net = address
-        .parse()
-        .expect("network.address is validated by keel_spec::validate_address before reaching NetManager");
+pub(crate) fn bridge_gateway(address: &str) -> Result<String, NetError> {
+    let net: ipnet::Ipv4Net = address.parse().map_err(|_| NetError::InvalidAddress(address.to_string()))?;
     let gateway_ip = std::net::Ipv4Addr::from(u32::from(net.network()) + 1);
-    format!("{gateway_ip}/{}", net.prefix_len())
+    Ok(format!("{gateway_ip}/{}", net.prefix_len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_gateway_computes_the_networks_first_host_address() {
+        assert_eq!(bridge_gateway("10.0.60.5/24").unwrap(), "10.0.60.1/24");
+    }
+
+    #[test]
+    fn bridge_gateway_on_a_malformed_address_returns_a_typed_error_instead_of_panicking() {
+        // `NetManager::attach_jail` is a public trait method: any caller
+        // that hasn't gone through `keel_spec::validate_address` first
+        // (true only for `Reconciler::apply` today, not something this
+        // crate can enforce) must get a typed error back, not crash the
+        // whole process.
+        assert!(matches!(bridge_gateway("not-an-address"), Err(NetError::InvalidAddress(addr)) if addr == "not-an-address"));
+    }
 }
 
 pub trait NetManager {

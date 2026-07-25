@@ -8,4 +8,6 @@ pub enum NetError {
     CommandFailed(String, std::process::ExitStatus, String),
     #[error("bridge '{0}' not found")]
     NotFound(String),
+    #[error("invalid network address '{0}'")]
+    InvalidAddress(String),
 }

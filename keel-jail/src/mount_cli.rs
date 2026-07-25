@@ -44,6 +44,15 @@ impl MountManager for CliMountManager {
     }
 
     fn mount_nullfs(&self, source: &Path, target: &Path) -> Result<(), MountError> {
+        // Real mount(8) doesn't check this itself: naming an already-mounted
+        // target doesn't error, it silently stacks a second nullfs mount on
+        // top. `FakeMountManager` (a `HashSet`) is safe to call repeatedly
+        // by construction, so this check is what makes the real
+        // implementation honor that same contract, rather than leaving it
+        // to every call site to remember to guard with `is_mounted` first.
+        if self.is_mounted(target)? {
+            return Ok(());
+        }
         Self::run_checked("mount", &["-t", "nullfs", &source.to_string_lossy(), &target.to_string_lossy()])
     }
 
