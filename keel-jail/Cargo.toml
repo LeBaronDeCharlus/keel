@@ -8,3 +8,6 @@ thiserror = "1"
 
 [dev-dependencies]
 keel-zfs = { path = "../keel-zfs" }
+
+[lints]
+workspace = true

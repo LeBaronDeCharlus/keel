@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub use keel_spec::ErrorBody;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeRegistration {
     pub id: String,
@@ -70,11 +72,6 @@ pub struct NodeStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub pod_cidr: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ErrorBody {
-    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -9,3 +9,6 @@ thiserror = "1"
 
 [dev-dependencies]
 keel-jail = { path = "../keel-jail" }
+
+[lints]
+workspace = true

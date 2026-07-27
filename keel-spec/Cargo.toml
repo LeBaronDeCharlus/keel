@@ -8,3 +8,6 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 ipnet = "2"
 thiserror = "1"
+
+[lints]
+workspace = true

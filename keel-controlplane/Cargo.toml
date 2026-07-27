@@ -12,3 +12,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 ipnet = "2"
 keel-spec = { path = "../keel-spec" }
+
+[lints]
+workspace = true

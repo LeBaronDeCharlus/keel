@@ -477,7 +477,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 Ok(cert) => {
                     if let Err(e) = self.write_cert_to_ingress_jail(&record.spec.spec.host, &cert) {
                         eprintln!("keel-agentd: failed to write certificate for ingress '{name}' into the ingress jail: {e}");
-                        self.ingress_backoff.get_mut(&name).unwrap().record_attempt(Instant::now());
+                        self.ingress_backoff.entry(name.clone()).or_default().record_attempt(Instant::now());
                         continue;
                     }
                     let mut updated = record;
@@ -492,14 +492,14 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                     }));
                     if let Err(e) = ingress_store::save(&self.state_dir, &updated) {
                         eprintln!("keel-agentd: failed to persist certificate expiry for ingress '{name}': {e}");
-                        self.ingress_backoff.get_mut(&name).unwrap().record_attempt(Instant::now());
+                        self.ingress_backoff.entry(name.clone()).or_default().record_attempt(Instant::now());
                         continue;
                     }
                     self.ingress_records.insert(name, updated);
                 }
                 Err(e) => {
                     eprintln!("keel-agentd: certificate issuance failed for ingress '{name}': {e}");
-                    self.ingress_backoff.get_mut(&name).unwrap().record_attempt(Instant::now());
+                    self.ingress_backoff.entry(name.clone()).or_default().record_attempt(Instant::now());
                 }
             }
         }
@@ -584,7 +584,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
             // name's existing backoff state rather than a separate cadence.
             // Recorded *before* calling `delete`, since a successful delete
             // removes this very backoff entry.
-            self.backoff.get_mut(name).unwrap().record_attempt(now);
+            self.backoff.entry(name.to_string()).or_default().record_attempt(now);
             return self.delete(name);
         }
 
@@ -592,7 +592,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
 
         if !exists {
             let result = self.provision(name, &record);
-            self.backoff.get_mut(name).unwrap().record_attempt(now);
+            self.backoff.entry(name.to_string()).or_default().record_attempt(now);
             if result.is_err() {
                 self.rollback_provision(name, &record);
             }
@@ -603,7 +603,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 // The only place genuine uptime is observable — see
                 // `BackoffState::note_running`'s own doc comment for why
                 // this can't be inferred from attempt timing alone.
-                self.backoff.get_mut(name).unwrap().note_running(now);
+                self.backoff.entry(name.to_string()).or_default().note_running(now);
                 let pcpu_percent =
                     keel_spec::cores_to_pcpu_percent(keel_spec::parse_cpu_cores(&record.spec.spec.resources.cpu)?);
                 let memory_bytes = keel_spec::parse_memory_bytes(&record.spec.spec.resources.memory)?;
@@ -613,7 +613,7 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
                 Ok(())
             } else {
                 let result = self.restart(name, &record);
-                self.backoff.get_mut(name).unwrap().record_attempt(now);
+                self.backoff.entry(name.to_string()).or_default().record_attempt(now);
                 result
             }
         }

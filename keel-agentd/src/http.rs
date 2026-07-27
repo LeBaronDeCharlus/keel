@@ -1,9 +1,9 @@
 use crate::reconciler::ReconcileError;
-use crate::wire::ErrorBody;
 use crate::worker::Command;
 use crate::{PodCidrSlot, ServiceVipSlot};
 use ipnet::IpNet;
 use keel_spec::JailSpec;
+use keel_spec::{error_response, yaml_response};
 use rustls::{ServerConnection, StreamOwned};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -494,17 +494,6 @@ fn status_for_error(error: &ReconcileError) -> u16 {
         ReconcileError::Zfs(keel_zfs::ZfsError::Busy(_)) => 409,
         _ => 500,
     }
-}
-
-fn error_response(status: u16, message: String) -> (u16, Vec<u8>) {
-    let body = serde_yaml::to_string(&ErrorBody { error: message })
-        .expect("ErrorBody serialization should not fail");
-    (status, body.into_bytes())
-}
-
-fn yaml_response<T: serde::Serialize>(status: u16, value: &T) -> (u16, Vec<u8>) {
-    let body = serde_yaml::to_string(value).expect("wire type serialization should not fail");
-    (status, body.into_bytes())
 }
 
 #[cfg(test)]

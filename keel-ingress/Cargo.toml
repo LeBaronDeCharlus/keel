@@ -14,3 +14,6 @@ instant-acme = { version = "0.8", features = ["rcgen"] }
 x509-parser = "0.18"
 rcgen = "0.14"
 time = "0.3"
+
+[lints]
+workspace = true

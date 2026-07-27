@@ -20,3 +20,6 @@ keel-jail = { path = "../keel-jail" }
 keel-zfs = { path = "../keel-zfs" }
 keel-net = { path = "../keel-net" }
 keel-ingress = { path = "../keel-ingress" }
+
+[lints]
+workspace = true

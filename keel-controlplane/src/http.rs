@@ -1,6 +1,7 @@
 use crate::tls;
-use crate::wire::{ErrorBody, Heartbeat, NodeRegistration, RegisterResponse};
+use crate::wire::{Heartbeat, NodeRegistration, RegisterResponse};
 use crate::worker::{Command, ForceRepinError, ReplicaAction, ScheduleOrResolveError};
+use keel_spec::{error_response, yaml_response};
 use rustls::{ServerConnection, StreamOwned};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -740,17 +741,6 @@ fn forward(
         return Err(format!("truncated response: expected {content_length} bytes, got {actual}"));
     }
     Ok((status, response[header_len..].to_vec()))
-}
-
-fn error_response(status: u16, message: String) -> (u16, Vec<u8>) {
-    let body = serde_yaml::to_string(&ErrorBody { error: message })
-        .expect("ErrorBody serialization should not fail");
-    (status, body.into_bytes())
-}
-
-fn yaml_response<T: serde::Serialize>(status: u16, value: &T) -> (u16, Vec<u8>) {
-    let body = serde_yaml::to_string(value).expect("wire type serialization should not fail");
-    (status, body.into_bytes())
 }
 
 #[cfg(test)]

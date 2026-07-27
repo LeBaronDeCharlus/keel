@@ -2,6 +2,8 @@ use crate::ingress_record::IngressRecord;
 use crate::record::JailRecord;
 use serde::{Deserialize, Serialize};
 
+pub use keel_spec::ErrorBody;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JailStatus {
     pub record: JailRecord,
@@ -18,11 +20,6 @@ pub struct IngressStatus {
 pub struct BackoffStatus {
     pub retry_in_secs: Option<u64>,
     pub current_delay_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ErrorBody {
-    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

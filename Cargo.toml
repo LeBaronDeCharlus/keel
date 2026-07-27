@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["keel-spec", "keel-jail", "keel-zfs", "keel-net", "keel-agentd", "keelctl", "keel-controlplane", "keel-ingress", "keel-dashboard"]
+
+[workspace.lints.clippy]
+all = "warn"

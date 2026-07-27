@@ -2,6 +2,7 @@ pub mod error;
 pub mod resources;
 pub mod types;
 pub mod validate;
+pub mod wire;
 
 pub use error::SpecError;
 pub use resources::{cores_to_pcpu_percent, parse_cpu_cores, parse_memory_bytes};
@@ -14,6 +15,7 @@ pub use validate::{
     validate_address, validate_bridge, validate_email, validate_host, validate_image, validate_mount_path,
     validate_name, validate_transition, validate_volumes,
 };
+pub use wire::{error_response, yaml_response, ErrorBody};
 
 pub fn parse_and_validate(yaml: &str) -> Result<JailSpec, SpecError> {
     let spec: JailSpec = serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
