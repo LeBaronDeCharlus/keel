@@ -22,7 +22,13 @@ fn run_sysctl(name: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[cfg(test)]
+// `detect()` shells out to the real `sysctl` binary with BSD OIDs
+// (`hw.ncpu`, `hw.physmem`). Those exist on FreeBSD (and macOS, which
+// inherits BSD sysctl naming) but not on Linux, where `sysctl` has no `hw`
+// namespace at all. Gated the same way `tests/freebsd_*.rs` already gates
+// real-driver coverage, so `cargo test --workspace` on the Linux CI runner
+// skips this module rather than failing deterministically.
+#[cfg(all(test, target_os = "freebsd"))]
 mod tests {
     use super::*;
 
