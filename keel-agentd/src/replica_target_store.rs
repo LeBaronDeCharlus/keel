@@ -35,6 +35,21 @@ pub fn save(state_dir: &Path, target: &ReplicaTarget) -> Result<(), StoreError> 
     Ok(())
 }
 
+/// Deletes `replica_name`'s persisted `ReplicaTarget`, if any. No path in
+/// this codebase ever called this before it existed: a standby's
+/// bookkeeping for a replica accumulated on disk forever once created,
+/// with no eviction mechanism at all. Idempotent -- removing an
+/// already-absent target is a no-op success, not an error, matching this
+/// project's usual "safe to call more than once" convention for teardown.
+pub fn remove(state_dir: &Path, replica_name: &str) -> Result<(), StoreError> {
+    let path = dir(state_dir).join(format!("{replica_name}.yaml"));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StoreError::Io(path, e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +95,37 @@ mod tests {
         // see nothing here -- proving replica targets don't collide with
         // `store::load_all`'s own `.yaml` scan of `state_dir` itself.
         assert_eq!(crate::store::load_all(&dir).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn remove_deletes_a_persisted_target() {
+        let dir = test_state_dir("remove_deletes_a_persisted_target");
+        let target = sample("db-0");
+        save(&dir, &target).unwrap();
+        assert_eq!(load_all(&dir).unwrap(), vec![target]);
+
+        remove(&dir, "db-0").unwrap();
+
+        assert_eq!(load_all(&dir).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn remove_on_an_already_absent_target_is_a_no_op_success() {
+        let dir = test_state_dir("remove_on_an_already_absent_target_is_a_no_op_success");
+        assert!(remove(&dir, "never-existed").is_ok());
+    }
+
+    #[test]
+    fn remove_only_deletes_the_named_target_not_others() {
+        let dir = test_state_dir("remove_only_deletes_the_named_target_not_others");
+        save(&dir, &sample("db-0")).unwrap();
+        save(&dir, &sample("db-1")).unwrap();
+
+        remove(&dir, "db-0").unwrap();
+
+        let remaining = load_all(&dir).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].replica_name, "db-1");
     }
 
     #[test]

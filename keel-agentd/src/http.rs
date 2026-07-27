@@ -264,6 +264,7 @@ fn route(
         ("GET", ["volumes", name]) => handle_get_volume(name, commands),
         ("DELETE", ["volumes", name]) => handle_delete_volume(name, commands),
         ("GET", ["replica-targets", name]) => handle_get_replica_target(name, replica_targets),
+        ("DELETE", ["replica-targets", name]) => handle_delete_replica_target(name, replica_targets),
         ("PUT", ["ingress", name]) => handle_apply_ingress(name, &request.body, commands, service_vips),
         ("GET", ["ingress"]) => handle_get_ingress(None, commands),
         ("GET", ["ingress", name]) => handle_get_ingress(Some(name.to_string()), commands),
@@ -280,6 +281,15 @@ fn handle_get_replica_target(name: &str, replica_targets: &crate::ReplicaTargetR
         }
         Some(_) => yaml_response(200, &crate::wire::ReplicaTargetStatus { replica_name: name.to_string(), ready: true }),
     }
+}
+
+/// Idempotent, matching `ReplicaTargetRegistry::remove`'s own contract: no
+/// caller invokes this yet (see that method's doc comment for why), but the
+/// capability is now reachable over the wire for whatever future trigger
+/// ends up calling it.
+fn handle_delete_replica_target(name: &str, replica_targets: &crate::ReplicaTargetRegistry) -> (u16, Vec<u8>) {
+    replica_targets.remove(name);
+    (200, Vec::new())
 }
 
 fn handle_apply(
@@ -959,6 +969,35 @@ mod tests {
         let (status, body) = send_request(&socket_path, "GET", "/replica-targets/db-0", "");
         assert_eq!(status, 200);
         assert!(body.contains("ready: true"), "got: {body}");
+    }
+
+    #[test]
+    fn delete_replica_target_clears_it_so_a_later_get_returns_404() {
+        let dir = std::env::temp_dir().join("keel-agentd-http-test-replica-targets-delete");
+        let _ = std::fs::remove_dir_all(&dir);
+        let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
+        targets.ensure_for_test("db-0", "zroot/keel/volumes/db-0-data", "10.0.0.4:7621");
+        let socket_path = start_test_server_with_replica_targets("delete_replica_target_clears_it_so_a_later_get_returns_404", targets);
+
+        let (status, _) = send_request(&socket_path, "DELETE", "/replica-targets/db-0", "");
+        assert_eq!(status, 200);
+
+        let (status, _) = send_request(&socket_path, "GET", "/replica-targets/db-0", "");
+        assert_eq!(status, 404, "expected the target to be gone after DELETE");
+    }
+
+    #[test]
+    fn delete_replica_target_on_an_unknown_name_is_still_200() {
+        // Idempotent by design (mirrors ReplicaTargetRegistry::remove's own
+        // no-op-on-absent contract): deleting a target that's already gone,
+        // or was never created, is not an error.
+        let dir = std::env::temp_dir().join("keel-agentd-http-test-replica-targets-delete-unknown");
+        let _ = std::fs::remove_dir_all(&dir);
+        let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
+        let socket_path = start_test_server_with_replica_targets("delete_replica_target_on_an_unknown_name_is_still_200", targets);
+
+        let (status, _) = send_request(&socket_path, "DELETE", "/replica-targets/missing", "");
+        assert_eq!(status, 200);
     }
 
     use crate::tls;

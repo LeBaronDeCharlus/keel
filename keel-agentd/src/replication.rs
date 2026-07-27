@@ -117,6 +117,19 @@ impl ReplicaTargetRegistry {
         self.by_name.lock().unwrap().get(replica_name).cloned()
     }
 
+    /// Clears `replica_name`'s bookkeeping from both memory and disk. No
+    /// caller invokes this yet -- wiring it into an actual trigger (e.g. a
+    /// new endpoint the control plane calls when a standby relationship
+    /// ends) is follow-up work, but the capability itself was entirely
+    /// missing before this: a `ReplicaTarget` accumulated forever once
+    /// created, with no eviction mechanism at all.
+    pub fn remove(&self, replica_name: &str) {
+        self.by_name.lock().unwrap().remove(replica_name);
+        if let Err(e) = replica_target_store::remove(&self.state_dir, replica_name) {
+            eprintln!("keel-agentd: failed to remove persisted replica target '{replica_name}': {e}");
+        }
+    }
+
     /// Creates the target on first contact (`volume_dataset`/`source_node_addr`
     /// as given, `last_snapshot: None`) or refreshes `source_node_addr` on an
     /// existing one, without touching its `last_snapshot`. Persists to disk.
@@ -379,6 +392,29 @@ mod tests {
         write_header(&mut buf, "db-0", "keel-repl-1", None, 7).unwrap();
         let header = read_header(&mut buf.as_slice()).unwrap();
         assert_eq!(header.generation, 7);
+    }
+
+    #[test]
+    fn remove_clears_a_target_from_both_memory_and_disk() {
+        let dir = test_state_dir("remove_clears_a_target_from_both_memory_and_disk");
+        let targets = ReplicaTargetRegistry::load(dir.clone()).unwrap();
+        targets.ensure_for_test("db-0", "zroot/keel/volumes/db-0-data", "10.0.0.4:7621");
+        assert!(targets.get("db-0").is_some());
+
+        targets.remove("db-0");
+
+        assert!(targets.get("db-0").is_none(), "expected the target gone from the in-memory registry");
+        // A fresh load from the same state_dir must not resurrect it either.
+        let reloaded = ReplicaTargetRegistry::load(dir).unwrap();
+        assert!(reloaded.get("db-0").is_none(), "expected the target gone from disk too");
+    }
+
+    #[test]
+    fn remove_on_an_unknown_replica_is_a_harmless_no_op() {
+        let dir = test_state_dir("remove_on_an_unknown_replica_is_a_harmless_no_op");
+        let targets = ReplicaTargetRegistry::load(dir).unwrap();
+        targets.remove("never-existed");
+        assert!(targets.get("never-existed").is_none());
     }
 
     #[test]
