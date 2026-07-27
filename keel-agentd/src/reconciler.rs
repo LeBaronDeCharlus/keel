@@ -9,7 +9,8 @@ use keel_net::NetManager;
 use keel_spec::{IngressSpec, JailSpec};
 use keel_zfs::ZfsManager;
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
@@ -553,8 +554,17 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         let crt_path = certs_dir.join(format!("{host}.crt"));
         let key_path = certs_dir.join(format!("{host}.key"));
         std::fs::write(&crt_path, &cert.cert_pem).map_err(|e| ReconcileError::Store(StoreError::Io(crt_path, e)))?;
-        std::fs::write(&key_path, &cert.key_pem).map_err(|e| ReconcileError::Store(StoreError::Io(key_path.clone(), e)))?;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+        // Created with mode 0600 from the moment the file exists (via
+        // OpenOptions rather than write-then-chmod), so the private key is
+        // never briefly readable at the default (umask-dependent, typically
+        // 0644) permissions in between.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_path)
+            .and_then(|mut f| f.write_all(cert.key_pem.as_bytes()))
             .map_err(|e| ReconcileError::Store(StoreError::Io(key_path, e)))?;
         Ok(())
     }

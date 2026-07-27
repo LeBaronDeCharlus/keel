@@ -135,7 +135,8 @@ impl ZfsManager for CliZfsManager {
         let (copy_result, status, stderr) = run_and_drain_stderr(child, |child| {
             let mut stdout = child.stdout.take().expect("stdout was piped");
             std::io::copy(&mut stdout, out).map(|_| ())
-        });
+        })
+        .map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
         if !status.success() {
             return Err(ZfsError::CommandFailed(format!("zfs {}", args.join(" ")), status, stderr));
         }
@@ -153,7 +154,8 @@ impl ZfsManager for CliZfsManager {
         let (copy_result, status, stderr) = run_and_drain_stderr(child, |child| {
             let mut stdin = child.stdin.take().expect("stdin was piped");
             std::io::copy(input, &mut stdin).map(|_| ())
-        });
+        })
+        .map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
         if !status.success() {
             return Err(ZfsError::CommandFailed(format!("zfs receive {dataset}"), status, stderr));
         }
@@ -211,7 +213,7 @@ impl ZfsManager for CliZfsManager {
 fn run_and_drain_stderr(
     mut child: Child,
     copy: impl FnOnce(&mut Child) -> io::Result<()>,
-) -> (io::Result<()>, ExitStatus, String) {
+) -> io::Result<(io::Result<()>, ExitStatus, String)> {
     let stderr_handle = child.stderr.take().map(|mut stderr| {
         std::thread::spawn(move || {
             let mut buf = String::new();
@@ -220,9 +222,9 @@ fn run_and_drain_stderr(
         })
     });
     let copy_result = copy(&mut child);
-    let status = child.wait().expect("wait should not fail on an already-spawned child");
+    let status = child.wait()?;
     let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    (copy_result, status, stderr)
+    Ok((copy_result, status, stderr))
 }
 
 #[cfg(test)]
@@ -248,7 +250,8 @@ mod tests {
             let (copy_result, status, stderr) = run_and_drain_stderr(child, |child| {
                 let mut stdout = child.stdout.take().expect("stdout was piped");
                 io::copy(&mut stdout, &mut out).map(|_| ())
-            });
+            })
+            .unwrap();
             let _ = done_tx.send((copy_result.is_ok(), status.success(), stderr.len(), out));
         });
 
