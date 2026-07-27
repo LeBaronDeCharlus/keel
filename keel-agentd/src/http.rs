@@ -46,7 +46,13 @@ pub fn run(
         let service_vips = service_vips.clone();
         let replica_targets = replica_targets.clone();
         thread::spawn(move || {
-            let _ = handle_connection(stream, &commands, &pod_cidr_slot, &service_vips, &replica_targets);
+            let _ = handle_connection(
+                stream,
+                &commands,
+                &pod_cidr_slot,
+                &service_vips,
+                &replica_targets,
+            );
         });
     }
 }
@@ -68,9 +74,19 @@ pub fn run_tls(
         let service_vips = service_vips.clone();
         let replica_targets = replica_targets.clone();
         thread::spawn(move || {
-            let Ok(conn) = ServerConnection::new(tls_config) else { return };
+            let Ok(conn) = ServerConnection::new(tls_config) else {
+                return;
+            };
             let mut tls_stream = TlsStream::new(conn, stream);
-            if handle_connection_tls(&mut tls_stream, &commands, &pod_cidr_slot, &service_vips, &replica_targets).is_err() {
+            if handle_connection_tls(
+                &mut tls_stream,
+                &commands,
+                &pod_cidr_slot,
+                &service_vips,
+                &replica_targets,
+            )
+            .is_err()
+            {
                 eprintln!("keel-agentd: TLS handshake or request handling failed for a connection");
             }
         });
@@ -94,7 +110,13 @@ fn handle_connection(
         Some(r) => r,
         None => return Ok(()),
     };
-    let (status, body) = route(&request, commands, pod_cidr_slot, service_vips, replica_targets);
+    let (status, body) = route(
+        &request,
+        commands,
+        pod_cidr_slot,
+        service_vips,
+        replica_targets,
+    );
     write_response(&mut stream, status, &body)
 }
 
@@ -109,7 +131,13 @@ fn handle_connection_tls(
         Some(r) => r,
         None => return Ok(()),
     };
-    let (status, body) = route(&request, commands, pod_cidr_slot, service_vips, replica_targets);
+    let (status, body) = route(
+        &request,
+        commands,
+        pod_cidr_slot,
+        service_vips,
+        replica_targets,
+    );
     write_response_tls(stream, status, &body)
 }
 
@@ -252,34 +280,57 @@ fn route(
     service_vips: &ServiceVipSlot,
     replica_targets: &crate::ReplicaTargetRegistry,
 ) -> (u16, Vec<u8>) {
-    let segments: Vec<&str> =
-        request.path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = request
+        .path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     match (request.method.as_str(), segments.as_slice()) {
         ("PUT", ["jails", name]) => handle_apply(name, &request.body, commands, pod_cidr_slot),
         ("GET", ["jails"]) => handle_get(None, commands),
         ("GET", ["jails", name]) => handle_get(Some(name.to_string()), commands),
         ("DELETE", ["jails", name]) => handle_delete(name, commands),
-        ("PUT", ["jails", name, "replicate-to"]) => handle_set_replicate_to(name, &request.body, commands),
+        ("PUT", ["jails", name, "replicate-to"]) => {
+            handle_set_replicate_to(name, &request.body, commands)
+        }
         ("GET", ["volumes"]) => handle_list_volumes(commands),
         ("GET", ["volumes", name]) => handle_get_volume(name, commands),
         ("DELETE", ["volumes", name]) => handle_delete_volume(name, commands),
         ("GET", ["replica-targets", name]) => handle_get_replica_target(name, replica_targets),
-        ("DELETE", ["replica-targets", name]) => handle_delete_replica_target(name, replica_targets),
-        ("PUT", ["ingress", name]) => handle_apply_ingress(name, &request.body, commands, service_vips),
+        ("DELETE", ["replica-targets", name]) => {
+            handle_delete_replica_target(name, replica_targets)
+        }
+        ("PUT", ["ingress", name]) => {
+            handle_apply_ingress(name, &request.body, commands, service_vips)
+        }
         ("GET", ["ingress"]) => handle_get_ingress(None, commands),
         ("GET", ["ingress", name]) => handle_get_ingress(Some(name.to_string()), commands),
         ("DELETE", ["ingress", name]) => handle_delete_ingress(name, commands),
-        _ => error_response(404, format!("no route for {} {}", request.method, request.path)),
+        _ => error_response(
+            404,
+            format!("no route for {} {}", request.method, request.path),
+        ),
     }
 }
 
-fn handle_get_replica_target(name: &str, replica_targets: &crate::ReplicaTargetRegistry) -> (u16, Vec<u8>) {
+fn handle_get_replica_target(
+    name: &str,
+    replica_targets: &crate::ReplicaTargetRegistry,
+) -> (u16, Vec<u8>) {
     match replica_targets.get(name) {
         None => error_response(404, format!("no replica target '{name}'")),
-        Some(target) if target.last_snapshot.is_none() => {
-            error_response(409, format!("replica target '{name}' has not completed a first full replication yet"))
-        }
-        Some(_) => yaml_response(200, &crate::wire::ReplicaTargetStatus { replica_name: name.to_string(), ready: true }),
+        Some(target) if target.last_snapshot.is_none() => error_response(
+            409,
+            format!("replica target '{name}' has not completed a first full replication yet"),
+        ),
+        Some(_) => yaml_response(
+            200,
+            &crate::wire::ReplicaTargetStatus {
+                replica_name: name.to_string(),
+                ready: true,
+            },
+        ),
     }
 }
 
@@ -287,7 +338,10 @@ fn handle_get_replica_target(name: &str, replica_targets: &crate::ReplicaTargetR
 /// caller invokes this yet (see that method's doc comment for why), but the
 /// capability is now reachable over the wire for whatever future trigger
 /// ends up calling it.
-fn handle_delete_replica_target(name: &str, replica_targets: &crate::ReplicaTargetRegistry) -> (u16, Vec<u8>) {
+fn handle_delete_replica_target(
+    name: &str,
+    replica_targets: &crate::ReplicaTargetRegistry,
+) -> (u16, Vec<u8>) {
     replica_targets.remove(name);
     (200, Vec::new())
 }
@@ -305,7 +359,10 @@ fn handle_apply(
     if spec.metadata.name != path_name {
         return error_response(
             400,
-            format!("path name '{path_name}' does not match spec.metadata.name '{}'", spec.metadata.name),
+            format!(
+                "path name '{path_name}' does not match spec.metadata.name '{}'",
+                spec.metadata.name
+            ),
         );
     }
     if let Some(pod_cidr) = pod_cidr_slot.get() {
@@ -348,18 +405,27 @@ fn handle_apply_ingress(
     if spec.metadata.name != path_name {
         return error_response(
             400,
-            format!("path name '{path_name}' does not match spec.metadata.name '{}'", spec.metadata.name),
+            format!(
+                "path name '{path_name}' does not match spec.metadata.name '{}'",
+                spec.metadata.name
+            ),
         );
     }
     if !service_vips.names().contains(&spec.spec.backend.service) {
         return error_response(
             400,
-            format!("backend.service '{}' does not name a currently-known Service", spec.spec.backend.service),
+            format!(
+                "backend.service '{}' does not name a currently-known Service",
+                spec.spec.backend.service
+            ),
         );
     }
 
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::ApplyIngress(spec, reply_tx)).is_err() {
+    if commands
+        .send(Command::ApplyIngress(spec, reply_tx))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -371,7 +437,10 @@ fn handle_apply_ingress(
 
 fn handle_get_ingress(name: Option<String>, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::GetIngress(name.clone(), reply_tx)).is_err() {
+    if commands
+        .send(Command::GetIngress(name.clone(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     let statuses = match reply_rx.recv() {
@@ -389,7 +458,10 @@ fn handle_get_ingress(name: Option<String>, commands: &Sender<Command>) -> (u16,
 
 fn handle_delete_ingress(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::DeleteIngress(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::DeleteIngress(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -409,7 +481,14 @@ fn handle_set_replicate_to(name: &str, body: &[u8], commands: &Sender<Command>) 
         }
     };
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::SetReplicateTo(name.to_string(), replicate_to, reply_tx)).is_err() {
+    if commands
+        .send(Command::SetReplicateTo(
+            name.to_string(),
+            replicate_to,
+            reply_tx,
+        ))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -439,7 +518,10 @@ fn handle_get(name: Option<String>, commands: &Sender<Command>) -> (u16, Vec<u8>
 
 fn handle_delete(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::Delete(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::Delete(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -463,11 +545,19 @@ fn handle_list_volumes(commands: &Sender<Command>) -> (u16, Vec<u8>) {
 
 fn handle_get_volume(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::GetVolume(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::GetVolume(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     match reply_rx.recv() {
-        Ok(Ok(())) => yaml_response(200, &crate::wire::VolumeStatus { name: name.to_string() }),
+        Ok(Ok(())) => yaml_response(
+            200,
+            &crate::wire::VolumeStatus {
+                name: name.to_string(),
+            },
+        ),
         Ok(Err(e)) => error_response(status_for_error(&e), e.to_string()),
         Err(_) => error_response(500, "reconciler worker did not respond".to_string()),
     }
@@ -475,7 +565,10 @@ fn handle_get_volume(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
 
 fn handle_delete_volume(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::DeleteVolume(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::DeleteVolume(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "reconciler worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -515,7 +608,10 @@ mod tests {
         let _client = UnixStream::connect(&socket_path).unwrap();
         let (server_stream, _) = listener.accept().unwrap();
         apply_unix_read_timeout(&server_stream);
-        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+        assert_eq!(
+            server_stream.read_timeout().unwrap(),
+            Some(CONNECTION_READ_TIMEOUT)
+        );
     }
 
     #[test]
@@ -525,7 +621,10 @@ mod tests {
         let _client = TcpStream::connect(addr).unwrap();
         let (server_stream, _) = listener.accept().unwrap();
         apply_tcp_read_timeout(&server_stream);
-        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+        assert_eq!(
+            server_stream.read_timeout().unwrap(),
+            Some(CONNECTION_READ_TIMEOUT)
+        );
     }
 
     fn sample_spec_yaml(name: &str) -> String {
@@ -565,17 +664,40 @@ mod tests {
         let socket_path = short_unique_socket_path();
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).unwrap();
-        thread::spawn(move || run(listener, commands, PodCidrSlot::new(), crate::ServiceVipSlot::new(), replica_targets));
+        thread::spawn(move || {
+            run(
+                listener,
+                commands,
+                PodCidrSlot::new(),
+                crate::ServiceVipSlot::new(),
+                replica_targets,
+            )
+        });
         socket_path
     }
 
-    fn start_test_server_with_pod_cidr(name: &str, pod_cidr: Option<&str>) -> (PathBuf, PodCidrSlot) {
+    fn start_test_server_with_pod_cidr(
+        name: &str,
+        pod_cidr: Option<&str>,
+    ) -> (PathBuf, PodCidrSlot) {
         let state_dir = std::env::temp_dir().join(format!("keel-agentd-http-test-state-{name}"));
         let _ = std::fs::remove_dir_all(&state_dir);
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
         let replica_targets = crate::ReplicaTargetRegistry::load(state_dir.clone()).unwrap();
-        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            state_dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
         let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let pod_cidr_slot = PodCidrSlot::new();
@@ -587,26 +709,60 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).unwrap();
         let slot_clone = pod_cidr_slot.clone();
-        thread::spawn(move || run(listener, commands, slot_clone, crate::ServiceVipSlot::new(), replica_targets));
+        thread::spawn(move || {
+            run(
+                listener,
+                commands,
+                slot_clone,
+                crate::ServiceVipSlot::new(),
+                replica_targets,
+            )
+        });
         (socket_path, pod_cidr_slot)
     }
 
-    fn start_test_server_with_replica_targets(name: &str, targets: crate::ReplicaTargetRegistry) -> PathBuf {
+    fn start_test_server_with_replica_targets(
+        name: &str,
+        targets: crate::ReplicaTargetRegistry,
+    ) -> PathBuf {
         let state_dir = std::env::temp_dir().join(format!("keel-agentd-http-test-state-{name}"));
         let _ = std::fs::remove_dir_all(&state_dir);
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
-        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            state_dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
         let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let socket_path = short_unique_socket_path();
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).unwrap();
-        thread::spawn(move || run(listener, commands, PodCidrSlot::new(), crate::ServiceVipSlot::new(), targets));
+        thread::spawn(move || {
+            run(
+                listener,
+                commands,
+                PodCidrSlot::new(),
+                crate::ServiceVipSlot::new(),
+                targets,
+            )
+        });
         socket_path
     }
 
-    fn start_test_server_with_service_vips(name: &str, entries: &[(&str, &str, u16)]) -> (PathBuf, crate::ServiceVipSlot) {
+    fn start_test_server_with_service_vips(
+        name: &str,
+        entries: &[(&str, &str, u16)],
+    ) -> (PathBuf, crate::ServiceVipSlot) {
         let state_dir = std::env::temp_dir().join(format!("keel-agentd-http-test-state-{name}"));
         let _ = std::fs::remove_dir_all(&state_dir);
         let zfs = FakeZfsManager::new();
@@ -630,12 +786,14 @@ mod tests {
         let service_vips = crate::ServiceVipSlot::new();
         let proxy_entries: Vec<_> = entries
             .iter()
-            .map(|(n, vip, port)| keel_controlplane::wire::ServiceProxyEntry {
-                name: n.to_string(),
-                vip: vip.to_string(),
-                port: *port,
-                replicas: vec![],
-            })
+            .map(
+                |(n, vip, port)| keel_controlplane::wire::ServiceProxyEntry {
+                    name: n.to_string(),
+                    vip: vip.to_string(),
+                    port: *port,
+                    replicas: vec![],
+                },
+            )
             .collect();
         service_vips.set_all(&proxy_entries);
 
@@ -643,14 +801,24 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).unwrap();
         let thread_service_vips = service_vips.clone();
-        thread::spawn(move || run(listener, commands, PodCidrSlot::new(), thread_service_vips, replica_targets));
+        thread::spawn(move || {
+            run(
+                listener,
+                commands,
+                PodCidrSlot::new(),
+                thread_service_vips,
+                replica_targets,
+            )
+        });
         (socket_path, service_vips)
     }
 
     fn send_request(socket_path: &PathBuf, method: &str, path: &str, body: &str) -> (u16, String) {
         let mut stream = UnixStream::connect(socket_path).unwrap();
-        let request =
-            format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
         stream.write_all(request.as_bytes()).unwrap();
         // Under heavy scheduling contention (observed intermittently during
         // Milestone 5 VM verification, running the full workspace suite
@@ -660,7 +828,11 @@ mod tests {
         // (signal EOF so the server stops expecting more body) is already
         // moot if the server's done reading.
         if let Err(e) = stream.shutdown(std::net::Shutdown::Write) {
-            assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "unexpected shutdown error: {e}");
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::NotConnected,
+                "unexpected shutdown error: {e}"
+            );
         }
 
         let mut response = Vec::new();
@@ -680,18 +852,31 @@ mod tests {
     #[test]
     fn put_valid_spec_returns_200_and_provisions_the_jail() {
         let socket_path = start_test_server("put_valid_spec_returns_200_and_provisions_the_jail");
-        let (status, _) = send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
+        let (status, _) = send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
         assert_eq!(status, 200);
 
         let (status, body) = send_request(&socket_path, "GET", "/jails/web-1", "");
         assert_eq!(status, 200);
-        assert!(body.contains("running: true"), "expected running: true in body: {body}");
+        assert!(
+            body.contains("running: true"),
+            "expected running: true in body: {body}"
+        );
     }
 
     #[test]
     fn put_with_mismatched_path_and_body_name_returns_400() {
         let socket_path = start_test_server("put_with_mismatched_path_and_body_name_returns_400");
-        let (status, body) = send_request(&socket_path, "PUT", "/jails/other-name", &sample_spec_yaml("web-1"));
+        let (status, body) = send_request(
+            &socket_path,
+            "PUT",
+            "/jails/other-name",
+            &sample_spec_yaml("web-1"),
+        );
         assert_eq!(status, 400);
         assert!(body.contains("does not match"));
     }
@@ -699,9 +884,15 @@ mod tests {
     #[test]
     fn put_changing_an_immutable_field_returns_409() {
         let socket_path = start_test_server("put_changing_an_immutable_field_returns_409");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
 
-        let changed_yaml = sample_spec_yaml("web-1").replace("base/14.2-web", "base/different-image");
+        let changed_yaml =
+            sample_spec_yaml("web-1").replace("base/14.2-web", "base/different-image");
         let (status, _) = send_request(&socket_path, "PUT", "/jails/web-1", &changed_yaml);
         assert_eq!(status, 409);
     }
@@ -723,7 +914,12 @@ mod tests {
     #[test]
     fn delete_removes_a_provisioned_jail() {
         let socket_path = start_test_server("delete_removes_a_provisioned_jail");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
         let (status, _) = send_request(&socket_path, "DELETE", "/jails/web-1", "");
         assert_eq!(status, 200);
 
@@ -740,7 +936,12 @@ mod tests {
     #[test]
     fn get_volume_on_a_provisioned_volume_returns_200() {
         let socket_path = start_test_server("get_volume_on_a_provisioned_volume_returns_200");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml_with_volume("web-1", "web-data"));
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml_with_volume("web-1", "web-data"),
+        );
 
         let (status, body) = send_request(&socket_path, "GET", "/volumes/web-data", "");
         assert_eq!(status, 200);
@@ -750,7 +951,12 @@ mod tests {
     #[test]
     fn get_volumes_lists_every_provisioned_volume() {
         let socket_path = start_test_server("get_volumes_lists_every_provisioned_volume");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml_with_volume("web-1", "web-data"));
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml_with_volume("web-1", "web-data"),
+        );
 
         let (status, body) = send_request(&socket_path, "GET", "/volumes", "");
         assert_eq!(status, 200);
@@ -759,7 +965,8 @@ mod tests {
 
     #[test]
     fn get_volumes_on_a_pool_with_no_volumes_returns_an_empty_list() {
-        let socket_path = start_test_server("get_volumes_on_a_pool_with_no_volumes_returns_an_empty_list");
+        let socket_path =
+            start_test_server("get_volumes_on_a_pool_with_no_volumes_returns_an_empty_list");
         let (status, body) = send_request(&socket_path, "GET", "/volumes", "");
         assert_eq!(status, 200);
         assert_eq!(body.trim(), "[]");
@@ -781,12 +988,21 @@ mod tests {
 
     #[test]
     fn delete_volume_survives_the_owning_jails_deletion_then_succeeds() {
-        let socket_path = start_test_server("delete_volume_survives_the_owning_jails_deletion_then_succeeds");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml_with_volume("web-1", "web-data"));
+        let socket_path =
+            start_test_server("delete_volume_survives_the_owning_jails_deletion_then_succeeds");
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml_with_volume("web-1", "web-data"),
+        );
         send_request(&socket_path, "DELETE", "/jails/web-1", "");
 
         let (status, _) = send_request(&socket_path, "GET", "/volumes/web-data", "");
-        assert_eq!(status, 200, "the volume dataset must survive the jail's deletion");
+        assert_eq!(
+            status, 200,
+            "the volume dataset must survive the jail's deletion"
+        );
 
         let (status, _) = send_request(&socket_path, "DELETE", "/volumes/web-data", "");
         assert_eq!(status, 200);
@@ -797,10 +1013,21 @@ mod tests {
 
     #[test]
     fn put_replicate_to_retargets_an_existing_jails_replication_address() {
-        let socket_path = start_test_server("put_replicate_to_retargets_an_existing_jails_replication_address");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
+        let socket_path =
+            start_test_server("put_replicate_to_retargets_an_existing_jails_replication_address");
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
 
-        let (status, _) = send_request(&socket_path, "PUT", "/jails/web-1/replicate-to", "replicate_to: 10.0.0.9:7622\n");
+        let (status, _) = send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1/replicate-to",
+            "replicate_to: 10.0.0.9:7622\n",
+        );
         assert_eq!(status, 200);
 
         let (status, body) = send_request(&socket_path, "GET", "/jails/web-1", "");
@@ -811,15 +1038,30 @@ mod tests {
     #[test]
     fn put_replicate_to_on_an_unknown_name_returns_404() {
         let socket_path = start_test_server("put_replicate_to_on_an_unknown_name_returns_404");
-        let (status, _) = send_request(&socket_path, "PUT", "/jails/missing/replicate-to", "replicate_to: 10.0.0.9:7622\n");
+        let (status, _) = send_request(
+            &socket_path,
+            "PUT",
+            "/jails/missing/replicate-to",
+            "replicate_to: 10.0.0.9:7622\n",
+        );
         assert_eq!(status, 404);
     }
 
     #[test]
     fn get_jails_lists_all_applied_jails() {
         let socket_path = start_test_server("get_jails_lists_all_applied_jails");
-        send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
-        send_request(&socket_path, "PUT", "/jails/web-2", &sample_spec_yaml("web-2"));
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-2",
+            &sample_spec_yaml("web-2"),
+        );
 
         let (status, body) = send_request(&socket_path, "GET", "/jails", "");
         assert_eq!(status, 200);
@@ -829,8 +1071,9 @@ mod tests {
 
     #[test]
     fn oversized_content_length_closes_the_connection_without_reading_the_body() {
-        let socket_path =
-            start_test_server("oversized_content_length_closes_the_connection_without_reading_the_body");
+        let socket_path = start_test_server(
+            "oversized_content_length_closes_the_connection_without_reading_the_body",
+        );
         let mut stream = UnixStream::connect(&socket_path).unwrap();
         let request = format!(
             "PUT /jails/web-1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
@@ -849,7 +1092,10 @@ mod tests {
 
     #[test]
     fn put_with_address_inside_the_stored_pod_cidr_is_accepted() {
-        let (socket_path, _slot) = start_test_server_with_pod_cidr("put_with_address_inside_the_stored_pod_cidr_is_accepted", Some("10.0.4.0/24"));
+        let (socket_path, _slot) = start_test_server_with_pod_cidr(
+            "put_with_address_inside_the_stored_pod_cidr_is_accepted",
+            Some("10.0.4.0/24"),
+        );
         let yaml = sample_spec_yaml("web-1").replace("10.0.0.5/24", "10.0.4.5/24");
         let (status, _) = send_request(&socket_path, "PUT", "/jails/web-1", &yaml);
         assert_eq!(status, 200);
@@ -857,50 +1103,90 @@ mod tests {
 
     #[test]
     fn put_with_address_outside_the_stored_pod_cidr_is_rejected_before_any_side_effect() {
-        let (socket_path, _slot) = start_test_server_with_pod_cidr("put_with_address_outside_the_stored_pod_cidr_is_rejected", Some("10.0.4.0/24"));
-        let (status, body) = send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
+        let (socket_path, _slot) = start_test_server_with_pod_cidr(
+            "put_with_address_outside_the_stored_pod_cidr_is_rejected",
+            Some("10.0.4.0/24"),
+        );
+        let (status, body) = send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
         assert_eq!(status, 400);
-        assert!(body.contains("10.0.0.5/24"), "expected the given address in the error, got: {body}");
-        assert!(body.contains("10.0.4.0/24"), "expected the node's actual block in the error, got: {body}");
+        assert!(
+            body.contains("10.0.0.5/24"),
+            "expected the given address in the error, got: {body}"
+        );
+        assert!(
+            body.contains("10.0.4.0/24"),
+            "expected the node's actual block in the error, got: {body}"
+        );
 
         let (status, _) = send_request(&socket_path, "GET", "/jails/web-1", "");
-        assert_eq!(status, 404, "the rejected apply must never have reached the reconciler");
+        assert_eq!(
+            status, 404,
+            "the rejected apply must never have reached the reconciler"
+        );
     }
 
     #[test]
     fn put_with_no_stored_pod_cidr_skips_the_subnet_check() {
-        let (socket_path, _slot) = start_test_server_with_pod_cidr("put_with_no_stored_pod_cidr_skips_the_subnet_check", None);
-        let (status, _) = send_request(&socket_path, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
-        assert_eq!(status, 200, "single-node/never-registered mode must skip the subnet check entirely");
+        let (socket_path, _slot) = start_test_server_with_pod_cidr(
+            "put_with_no_stored_pod_cidr_skips_the_subnet_check",
+            None,
+        );
+        let (status, _) = send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml("web-1"),
+        );
+        assert_eq!(
+            status, 200,
+            "single-node/never-registered mode must skip the subnet check entirely"
+        );
     }
 
     #[test]
     fn put_ingress_then_get_it_back() {
-        let (socket, service_vips) =
-            start_test_server_with_service_vips("put_ingress_then_get_it_back", &[("hugo-site", "10.0.0.9", 8080)]);
+        let (socket, service_vips) = start_test_server_with_service_vips(
+            "put_ingress_then_get_it_back",
+            &[("hugo-site", "10.0.0.9", 8080)],
+        );
         let body = "apiVersion: keel/v1\nkind: Ingress\nmetadata:\n  name: blog\nspec:\n  host: example.com\n  backend:\n    service: hugo-site\n    port: 8080\n  tls:\n    email: admin@example.com\n";
         let (status, _) = send_request(&socket, "PUT", "/ingress/blog", body);
         assert_eq!(status, 200);
         let (status, response_body) = send_request(&socket, "GET", "/ingress/blog", "");
         assert_eq!(status, 200);
-        assert!(response_body.contains("host: example.com"), "got: {response_body}");
+        assert!(
+            response_body.contains("host: example.com"),
+            "got: {response_body}"
+        );
         let _ = service_vips;
     }
 
     #[test]
     fn put_ingress_rejects_an_unknown_backend_service() {
-        let (socket, _service_vips) =
-            start_test_server_with_service_vips("put_ingress_rejects_an_unknown_backend_service", &[]);
+        let (socket, _service_vips) = start_test_server_with_service_vips(
+            "put_ingress_rejects_an_unknown_backend_service",
+            &[],
+        );
         let body = "apiVersion: keel/v1\nkind: Ingress\nmetadata:\n  name: blog\nspec:\n  host: example.com\n  backend:\n    service: does-not-exist\n    port: 8080\n  tls:\n    email: admin@example.com\n";
         let (status, response_body) = send_request(&socket, "PUT", "/ingress/blog", body);
         assert_eq!(status, 400);
-        assert!(response_body.contains("does-not-exist"), "got: {response_body}");
+        assert!(
+            response_body.contains("does-not-exist"),
+            "got: {response_body}"
+        );
     }
 
     #[test]
     fn delete_ingress_then_get_is_404() {
-        let (socket, _service_vips) =
-            start_test_server_with_service_vips("delete_ingress_then_get_is_404", &[("hugo-site", "10.0.0.9", 8080)]);
+        let (socket, _service_vips) = start_test_server_with_service_vips(
+            "delete_ingress_then_get_is_404",
+            &[("hugo-site", "10.0.0.9", 8080)],
+        );
         let body = "apiVersion: keel/v1\nkind: Ingress\nmetadata:\n  name: blog\nspec:\n  host: example.com\n  backend:\n    service: hugo-site\n    port: 8080\n  tls:\n    email: admin@example.com\n";
         let _ = send_request(&socket, "PUT", "/ingress/blog", body);
         let (status, _) = send_request(&socket, "DELETE", "/ingress/blog", "");
@@ -913,7 +1199,10 @@ mod tests {
     fn get_ingress_lists_all_applied_ingresses() {
         let (socket, _service_vips) = start_test_server_with_service_vips(
             "get_ingress_lists_all_applied_ingresses",
-            &[("hugo-site", "10.0.0.9", 8080), ("umami", "10.0.0.10", 3000)],
+            &[
+                ("hugo-site", "10.0.0.9", 8080),
+                ("umami", "10.0.0.10", 3000),
+            ],
         );
         let blog_body = "apiVersion: keel/v1\nkind: Ingress\nmetadata:\n  name: blog\nspec:\n  host: example.com\n  backend:\n    service: hugo-site\n    port: 8080\n  tls:\n    email: admin@example.com\n";
         let stats_body = "apiVersion: keel/v1\nkind: Ingress\nmetadata:\n  name: stats\nspec:\n  host: stats.example.com\n  backend:\n    service: umami\n    port: 3000\n  tls:\n    email: admin@example.com\n";
@@ -931,7 +1220,10 @@ mod tests {
         let dir = std::env::temp_dir().join("keel-agentd-http-test-replica-targets-unknown");
         let _ = std::fs::remove_dir_all(&dir);
         let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
-        let socket_path = start_test_server_with_replica_targets("get_replica_target_on_an_unknown_name_returns_404", targets);
+        let socket_path = start_test_server_with_replica_targets(
+            "get_replica_target_on_an_unknown_name_returns_404",
+            targets,
+        );
         let (status, _) = send_request(&socket_path, "GET", "/replica-targets/missing", "");
         assert_eq!(status, 404);
     }
@@ -942,7 +1234,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
         targets.ensure_for_test("db-0", "zroot/keel/volumes/db-0-data", "10.0.0.4:7621");
-        let socket_path = start_test_server_with_replica_targets("get_replica_target_before_a_first_snapshot_returns_409", targets);
+        let socket_path = start_test_server_with_replica_targets(
+            "get_replica_target_before_a_first_snapshot_returns_409",
+            targets,
+        );
         let (status, _) = send_request(&socket_path, "GET", "/replica-targets/db-0", "");
         assert_eq!(status, 409);
     }
@@ -954,7 +1249,10 @@ mod tests {
         let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
         targets.ensure_for_test("db-0", "zroot/keel/volumes/db-0-data", "10.0.0.4:7621");
         targets.record_snapshot_for_test("db-0", "keel-repl-1");
-        let socket_path = start_test_server_with_replica_targets("get_replica_target_after_a_first_snapshot_returns_200_and_ready_true", targets);
+        let socket_path = start_test_server_with_replica_targets(
+            "get_replica_target_after_a_first_snapshot_returns_200_and_ready_true",
+            targets,
+        );
         let (status, body) = send_request(&socket_path, "GET", "/replica-targets/db-0", "");
         assert_eq!(status, 200);
         assert!(body.contains("ready: true"), "got: {body}");
@@ -966,7 +1264,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
         targets.ensure_for_test("db-0", "zroot/keel/volumes/db-0-data", "10.0.0.4:7621");
-        let socket_path = start_test_server_with_replica_targets("delete_replica_target_clears_it_so_a_later_get_returns_404", targets);
+        let socket_path = start_test_server_with_replica_targets(
+            "delete_replica_target_clears_it_so_a_later_get_returns_404",
+            targets,
+        );
 
         let (status, _) = send_request(&socket_path, "DELETE", "/replica-targets/db-0", "");
         assert_eq!(status, 200);
@@ -983,7 +1284,10 @@ mod tests {
         let dir = std::env::temp_dir().join("keel-agentd-http-test-replica-targets-delete-unknown");
         let _ = std::fs::remove_dir_all(&dir);
         let targets = crate::ReplicaTargetRegistry::load(dir).unwrap();
-        let socket_path = start_test_server_with_replica_targets("delete_replica_target_on_an_unknown_name_is_still_200", targets);
+        let socket_path = start_test_server_with_replica_targets(
+            "delete_replica_target_on_an_unknown_name_is_still_200",
+            targets,
+        );
 
         let (status, _) = send_request(&socket_path, "DELETE", "/replica-targets/missing", "");
         assert_eq!(status, 200);
@@ -996,7 +1300,8 @@ mod tests {
     }
 
     fn start_tcp_test_server(name: &str) -> String {
-        let state_dir = std::env::temp_dir().join(format!("keel-agentd-http-tcp-test-state-{name}"));
+        let state_dir =
+            std::env::temp_dir().join(format!("keel-agentd-http-tcp-test-state-{name}"));
         let _ = std::fs::remove_dir_all(&state_dir);
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
@@ -1026,14 +1331,28 @@ mod tests {
             Duration::from_secs(3600),
         )
         .unwrap();
-        thread::spawn(move || run_tls(listener, commands, reloading_tls, PodCidrSlot::new(), crate::ServiceVipSlot::new(), replica_targets));
+        thread::spawn(move || {
+            run_tls(
+                listener,
+                commands,
+                reloading_tls,
+                PodCidrSlot::new(),
+                crate::ServiceVipSlot::new(),
+                replica_targets,
+            )
+        });
         addr
     }
 
     fn client_tls_config() -> Arc<rustls::ClientConfig> {
         Arc::new(
-            tls::load_client_config(&fixture("fixture-client.crt"), &fixture("fixture-client.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_client_config(
+                &fixture("fixture-client.crt"),
+                &fixture("fixture-client.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         )
     }
 
@@ -1042,8 +1361,10 @@ mod tests {
         let tcp_stream = TcpStream::connect(addr).unwrap();
         let conn = rustls::ClientConnection::new(client_tls_config(), server_name).unwrap();
         let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
-        let request =
-            format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
         stream.write_all(request.as_bytes()).unwrap();
         stream.sock.shutdown(std::net::Shutdown::Write).ok();
         let mut response = Vec::new();
@@ -1066,13 +1387,18 @@ mod tests {
 
     #[test]
     fn put_valid_spec_over_tcp_returns_200_and_provisions_the_jail() {
-        let addr = start_tcp_test_server("put_valid_spec_over_tcp_returns_200_and_provisions_the_jail");
-        let (status, _) = send_request_tcp(&addr, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
+        let addr =
+            start_tcp_test_server("put_valid_spec_over_tcp_returns_200_and_provisions_the_jail");
+        let (status, _) =
+            send_request_tcp(&addr, "PUT", "/jails/web-1", &sample_spec_yaml("web-1"));
         assert_eq!(status, 200);
 
         let (status, body) = send_request_tcp(&addr, "GET", "/jails/web-1", "");
         assert_eq!(status, 200);
-        assert!(body.contains("running: true"), "expected running: true in body: {body}");
+        assert!(
+            body.contains("running: true"),
+            "expected running: true in body: {body}"
+        );
     }
 
     #[test]
@@ -1100,17 +1426,24 @@ mod tests {
 
     #[test]
     fn a_client_with_no_certificate_cannot_complete_the_tcp_handshake() {
-        let addr = start_tcp_test_server("a_client_with_no_certificate_cannot_complete_the_tcp_handshake");
+        let addr =
+            start_tcp_test_server("a_client_with_no_certificate_cannot_complete_the_tcp_handshake");
         let roots = {
             let mut roots = rustls::RootCertStore::empty();
-            let cert = rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(fixture("ca.crt")).unwrap()))
-                .next()
-                .unwrap()
-                .unwrap();
+            let cert = rustls_pemfile::certs(&mut std::io::BufReader::new(
+                std::fs::File::open(fixture("ca.crt")).unwrap(),
+            ))
+            .next()
+            .unwrap()
+            .unwrap();
             roots.add(cert).unwrap();
             roots
         };
-        let bare_config = Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+        let bare_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
         let server_name = tls::server_name_from_addr(&addr).unwrap();
         let tcp_stream = TcpStream::connect(&addr).unwrap();
         let conn = rustls::ClientConnection::new(bare_config, server_name).unwrap();
@@ -1121,7 +1454,8 @@ mod tests {
         // acknowledgement before considering itself done. So the failure
         // must be observed across the full write+read round trip, not the
         // write alone.
-        let write_result = stream.write_all(b"GET /jails HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        let write_result = stream
+            .write_all(b"GET /jails HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
         let mut response = Vec::new();
         let read_result = stream.read_to_end(&mut response);
         assert!(
@@ -1132,10 +1466,17 @@ mod tests {
 
     #[test]
     fn a_client_with_a_wrong_ca_certificate_cannot_complete_the_tcp_handshake() {
-        let addr = start_tcp_test_server("a_client_with_a_wrong_ca_certificate_cannot_complete_the_tcp_handshake");
+        let addr = start_tcp_test_server(
+            "a_client_with_a_wrong_ca_certificate_cannot_complete_the_tcp_handshake",
+        );
         let wrong_config = Arc::new(
-            tls::load_client_config(&fixture("wrong-ca-node.crt"), &fixture("wrong-ca-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_client_config(
+                &fixture("wrong-ca-node.crt"),
+                &fixture("wrong-ca-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         let server_name = tls::server_name_from_addr(&addr).unwrap();
         let tcp_stream = TcpStream::connect(&addr).unwrap();
@@ -1145,7 +1486,8 @@ mod tests {
         // be observed across the full write+read round trip, not the write
         // alone, since a TLS 1.3 client can finish its own handshake side
         // before reading the server's rejection.
-        let write_result = stream.write_all(b"GET /jails HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        let write_result = stream
+            .write_all(b"GET /jails HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
         let mut response = Vec::new();
         let read_result = stream.read_to_end(&mut response);
         assert!(
@@ -1156,7 +1498,9 @@ mod tests {
 
     #[test]
     fn a_client_with_a_revoked_certificate_cannot_complete_the_tcp_handshake() {
-        let addr = start_tcp_test_server("a_client_with_a_revoked_certificate_cannot_complete_the_tcp_handshake");
+        let addr = start_tcp_test_server(
+            "a_client_with_a_revoked_certificate_cannot_complete_the_tcp_handshake",
+        );
         let revoked_config = Arc::new(
             tls::load_client_config(
                 &fixture("revoked-node.crt"),
@@ -1170,7 +1514,8 @@ mod tests {
         let tcp_stream = TcpStream::connect(&addr).unwrap();
         let conn = rustls::ClientConnection::new(revoked_config, server_name).unwrap();
         let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
-        let write_result = stream.write_all(b"GET /jails HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        let write_result = stream
+            .write_all(b"GET /jails HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
         let mut response = Vec::new();
         let read_result = stream.read_to_end(&mut response);
         assert!(
@@ -1181,7 +1526,8 @@ mod tests {
 
     #[test]
     fn reloading_tls_server_config_picks_up_a_replaced_certificate_without_restart() {
-        let cert_dir = std::env::temp_dir().join(format!("keel-agentd-reload-test-{}", std::process::id()));
+        let cert_dir =
+            std::env::temp_dir().join(format!("keel-agentd-reload-test-{}", std::process::id()));
         std::fs::create_dir_all(&cert_dir).unwrap();
         let cert_path = cert_dir.join("node.crt");
         let key_path = cert_dir.join("node.key");
@@ -1197,22 +1543,47 @@ mod tests {
         )
         .unwrap();
 
-        let state_dir = std::env::temp_dir()
-            .join(format!("keel-agentd-reload-test-state-{}", std::process::id()));
+        let state_dir = std::env::temp_dir().join(format!(
+            "keel-agentd-reload-test-state-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&state_dir);
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
         let replica_targets = crate::ReplicaTargetRegistry::load(state_dir.clone()).unwrap();
-        let reconciler =
-            Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            state_dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
         let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        thread::spawn(move || run_tls(listener, commands, reloading, PodCidrSlot::new(), crate::ServiceVipSlot::new(), replica_targets));
+        thread::spawn(move || {
+            run_tls(
+                listener,
+                commands,
+                reloading,
+                PodCidrSlot::new(),
+                crate::ServiceVipSlot::new(),
+                replica_targets,
+            )
+        });
 
         let (status, _) = send_request_tcp(&addr, "GET", "/jails", "");
-        assert_eq!(status, 200, "expected the initial fixture-node certificate to be served");
+        assert_eq!(
+            status, 200,
+            "expected the initial fixture-node certificate to be served"
+        );
 
         std::fs::copy(fixture("wrong-ca-node.crt"), &cert_path).unwrap();
         std::fs::copy(fixture("wrong-ca-node.key"), &key_path).unwrap();
@@ -1227,7 +1598,10 @@ mod tests {
 
     #[test]
     fn reloading_tls_keeps_serving_the_last_good_config_if_the_replacement_is_malformed() {
-        let cert_dir = std::env::temp_dir().join(format!("keel-agentd-reload-bad-test-{}", std::process::id()));
+        let cert_dir = std::env::temp_dir().join(format!(
+            "keel-agentd-reload-bad-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&cert_dir).unwrap();
         let cert_path = cert_dir.join("node.crt");
         let key_path = cert_dir.join("node.key");
@@ -1243,19 +1617,41 @@ mod tests {
         )
         .unwrap();
 
-        let state_dir = std::env::temp_dir()
-            .join(format!("keel-agentd-reload-bad-test-state-{}", std::process::id()));
+        let state_dir = std::env::temp_dir().join(format!(
+            "keel-agentd-reload-bad-test-state-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&state_dir);
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
         let replica_targets = crate::ReplicaTargetRegistry::load(state_dir.clone()).unwrap();
-        let reconciler =
-            Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), state_dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            state_dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
         let (_worker_handle, commands) = worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        thread::spawn(move || run_tls(listener, commands, reloading, PodCidrSlot::new(), crate::ServiceVipSlot::new(), replica_targets));
+        thread::spawn(move || {
+            run_tls(
+                listener,
+                commands,
+                reloading,
+                PodCidrSlot::new(),
+                crate::ServiceVipSlot::new(),
+                replica_targets,
+            )
+        });
 
         std::fs::write(&cert_path, "not a certificate").unwrap();
         thread::sleep(Duration::from_millis(200));

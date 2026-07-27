@@ -18,7 +18,8 @@ pub fn load_all(state_dir: &Path) -> Result<Vec<IngressRecord>, StoreError> {
             continue;
         }
         let content = fs::read_to_string(&path).map_err(|e| StoreError::Io(path.clone(), e))?;
-        let record: IngressRecord = serde_yaml::from_str(&content).map_err(|e| StoreError::Parse(path.clone(), e))?;
+        let record: IngressRecord =
+            serde_yaml::from_str(&content).map_err(|e| StoreError::Parse(path.clone(), e))?;
         records.push(record);
     }
     Ok(records)
@@ -29,7 +30,8 @@ pub fn save(state_dir: &Path, record: &IngressRecord) -> Result<(), StoreError> 
     fs::create_dir_all(&dir).map_err(|e| StoreError::Io(dir.clone(), e))?;
     let path = dir.join(format!("{}.yaml", record.spec.metadata.name));
     let tmp_path = dir.join(format!("{}.yaml.tmp", record.spec.metadata.name));
-    let content = serde_yaml::to_string(record).expect("IngressRecord serialization should not fail");
+    let content =
+        serde_yaml::to_string(record).expect("IngressRecord serialization should not fail");
     fs::write(&tmp_path, content).map_err(|e| StoreError::Io(tmp_path.clone(), e))?;
     fs::rename(&tmp_path, &path).map_err(|e| StoreError::Io(path.clone(), e))?;
     Ok(())
@@ -60,11 +62,18 @@ mod tests {
             spec: keel_spec::IngressSpec {
                 api_version: "keel/v1".to_string(),
                 kind: "Ingress".to_string(),
-                metadata: Metadata { name: name.to_string() },
+                metadata: Metadata {
+                    name: name.to_string(),
+                },
                 spec: IngressSpecBody {
                     host: "example.com".to_string(),
-                    backend: IngressBackend { service: "hugo-site".to_string(), port: 8080 },
-                    tls: IngressTls { email: "admin@example.com".to_string() },
+                    backend: IngressBackend {
+                        service: "hugo-site".to_string(),
+                        port: 8080,
+                    },
+                    tls: IngressTls {
+                        email: "admin@example.com".to_string(),
+                    },
                 },
             },
             cert_expires_at_unix: None,

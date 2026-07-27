@@ -57,14 +57,27 @@ where
     let handle = thread::spawn(move || {
         let mut replicating: std::collections::HashSet<String> = std::collections::HashSet::new();
         for command in rx {
-            handle_command(&mut reconciler, command, &zfs, &pool, &commands_for_thread, &mut replicating, &replicate_tls);
+            handle_command(
+                &mut reconciler,
+                command,
+                &zfs,
+                &pool,
+                &commands_for_thread,
+                &mut replicating,
+                &replicate_tls,
+            );
         }
     });
     (handle, tx)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: NetManager, M: MountManager>(
+fn handle_command<
+    J: JailRuntime,
+    Z: ZfsManager + Clone + Send + 'static,
+    N: NetManager,
+    M: MountManager,
+>(
     reconciler: &mut Reconciler<J, Z, N, M>,
     command: Command,
     zfs: &Z,
@@ -75,7 +88,8 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
 ) {
     match command {
         Command::Apply(spec, reply) => {
-            let is_stateful_and_replicated = !spec.spec.volumes.is_empty() && spec.spec.replicate_to.is_some();
+            let is_stateful_and_replicated =
+                !spec.spec.volumes.is_empty() && spec.spec.replicate_to.is_some();
             let name = spec.metadata.name.clone();
             let result = reconciler.apply(spec);
             // Reconcile immediately so a client's apply/delete call
@@ -154,7 +168,10 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
             for status in reconciler.list(Instant::now()) {
                 let spec = &status.record.spec.spec;
                 let name = status.record.spec.metadata.name.clone();
-                if !spec.volumes.is_empty() && spec.replicate_to.is_some() && replicating.insert(name.clone()) {
+                if !spec.volumes.is_empty()
+                    && spec.replicate_to.is_some()
+                    && replicating.insert(name.clone())
+                {
                     match replicate_tls {
                         Some(tls) => {
                             let volume_name = format!("{name}-data");
@@ -178,7 +195,11 @@ fn handle_command<J: JailRuntime, Z: ZfsManager + Clone + Send + 'static, N: Net
                     .map(|record| crate::wire::IngressStatus { record })
                     .into_iter()
                     .collect(),
-                None => reconciler.list_ingress().into_iter().map(|record| crate::wire::IngressStatus { record }).collect(),
+                None => reconciler
+                    .list_ingress()
+                    .into_iter()
+                    .map(|record| crate::wire::IngressStatus { record })
+                    .collect(),
             };
             let _ = reply.send(statuses);
         }
@@ -195,7 +216,7 @@ mod tests {
     use super::*;
     use keel_jail::{FakeJailRuntime, FakeMountManager};
     use keel_net::FakeNetManager;
-    use keel_spec::{Metadata, NetworkSpec, RestartPolicy, ResourcesSpec, Spec, VolumeMount};
+    use keel_spec::{Metadata, NetworkSpec, ResourcesSpec, RestartPolicy, Spec, VolumeMount};
     use keel_zfs::FakeZfsManager;
     use std::path::PathBuf;
 
@@ -203,7 +224,9 @@ mod tests {
         JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: Spec {
                 image: "base/14.2-web".to_string(),
                 command: vec!["/usr/local/bin/myapp".to_string()],
@@ -212,7 +235,10 @@ mod tests {
                     bridge: "keel0".to_string(),
                     address: "10.0.0.5/24".to_string(),
                 },
-                resources: ResourcesSpec { cpu: "2".to_string(), memory: "512M".to_string() },
+                resources: ResourcesSpec {
+                    cpu: "2".to_string(),
+                    memory: "512M".to_string(),
+                },
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
@@ -252,25 +278,36 @@ mod tests {
         let commands = spawn_test_worker("apply_command_persists_and_reconciles_immediately");
 
         let (reply_tx, reply_rx) = mpsc::channel();
-        commands.send(Command::Apply(sample_spec("web-1"), reply_tx)).unwrap();
+        commands
+            .send(Command::Apply(sample_spec("web-1"), reply_tx))
+            .unwrap();
         assert!(reply_rx.recv().unwrap().is_ok());
 
         let (get_tx, get_rx) = mpsc::channel();
-        commands.send(Command::Get(Some("web-1".to_string()), get_tx)).unwrap();
+        commands
+            .send(Command::Get(Some("web-1".to_string()), get_tx))
+            .unwrap();
         let statuses = get_rx.recv().unwrap();
         assert_eq!(statuses.len(), 1);
-        assert!(statuses[0].running, "expected apply to trigger an immediate reconcile that provisions the jail");
+        assert!(
+            statuses[0].running,
+            "expected apply to trigger an immediate reconcile that provisions the jail"
+        );
     }
 
     #[test]
     fn invalid_apply_command_returns_an_error_without_crashing_the_worker() {
-        let commands = spawn_test_worker("invalid_apply_command_returns_an_error_without_crashing_the_worker");
+        let commands =
+            spawn_test_worker("invalid_apply_command_returns_an_error_without_crashing_the_worker");
         let mut invalid = sample_spec("web-1");
         invalid.metadata.name = "Invalid_Name".to_string();
 
         let (reply_tx, reply_rx) = mpsc::channel();
         commands.send(Command::Apply(invalid, reply_tx)).unwrap();
-        assert!(matches!(reply_rx.recv().unwrap(), Err(ReconcileError::InvalidSpec(_))));
+        assert!(matches!(
+            reply_rx.recv().unwrap(),
+            Err(ReconcileError::InvalidSpec(_))
+        ));
 
         let (get_tx, get_rx) = mpsc::channel();
         commands.send(Command::Get(None, get_tx)).unwrap();
@@ -282,11 +319,15 @@ mod tests {
         let commands = spawn_test_worker("delete_command_removes_the_record");
 
         let (apply_tx, apply_rx) = mpsc::channel();
-        commands.send(Command::Apply(sample_spec("web-1"), apply_tx)).unwrap();
+        commands
+            .send(Command::Apply(sample_spec("web-1"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let (delete_tx, delete_rx) = mpsc::channel();
-        commands.send(Command::Delete("web-1".to_string(), delete_tx)).unwrap();
+        commands
+            .send(Command::Delete("web-1".to_string(), delete_tx))
+            .unwrap();
         assert!(delete_rx.recv().unwrap().is_ok());
 
         let (get_tx, get_rx) = mpsc::channel();
@@ -298,13 +339,19 @@ mod tests {
     fn delete_command_on_unknown_name_returns_not_found() {
         let commands = spawn_test_worker("delete_command_on_unknown_name_returns_not_found");
         let (delete_tx, delete_rx) = mpsc::channel();
-        commands.send(Command::Delete("missing".to_string(), delete_tx)).unwrap();
-        assert!(matches!(delete_rx.recv().unwrap(), Err(ReconcileError::NotFound(_))));
+        commands
+            .send(Command::Delete("missing".to_string(), delete_tx))
+            .unwrap();
+        assert!(matches!(
+            delete_rx.recv().unwrap(),
+            Err(ReconcileError::NotFound(_))
+        ));
     }
 
     #[test]
     fn tick_command_is_processed_without_blocking_subsequent_commands() {
-        let commands = spawn_test_worker("tick_command_is_processed_without_blocking_subsequent_commands");
+        let commands =
+            spawn_test_worker("tick_command_is_processed_without_blocking_subsequent_commands");
         commands.send(Command::Tick).unwrap();
 
         // mpsc is FIFO: this Get is only answered once Tick has already
@@ -316,10 +363,13 @@ mod tests {
 
     #[test]
     fn committed_resources_command_returns_the_reconcilers_totals() {
-        let commands = spawn_test_worker("committed_resources_command_returns_the_reconcilers_totals");
+        let commands =
+            spawn_test_worker("committed_resources_command_returns_the_reconcilers_totals");
 
         let (apply_tx, apply_rx) = mpsc::channel();
-        commands.send(Command::Apply(sample_spec("web-1"), apply_tx)).unwrap();
+        commands
+            .send(Command::Apply(sample_spec("web-1"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -333,7 +383,13 @@ mod tests {
         let commands = spawn_test_worker("add_route_command_calls_through_to_the_net_manager");
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::AddRoute("10.0.5.0/24".to_string(), "192.168.64.5".to_string(), tx)).unwrap();
+        commands
+            .send(Command::AddRoute(
+                "10.0.5.0/24".to_string(),
+                "192.168.64.5".to_string(),
+                tx,
+            ))
+            .unwrap();
         assert!(rx.recv().unwrap().is_ok());
     }
 
@@ -342,11 +398,19 @@ mod tests {
         let commands = spawn_test_worker("remove_route_command_calls_through_to_the_net_manager");
 
         let (add_tx, add_rx) = mpsc::channel();
-        commands.send(Command::AddRoute("10.0.5.0/24".to_string(), "192.168.64.5".to_string(), add_tx)).unwrap();
+        commands
+            .send(Command::AddRoute(
+                "10.0.5.0/24".to_string(),
+                "192.168.64.5".to_string(),
+                add_tx,
+            ))
+            .unwrap();
         add_rx.recv().unwrap().unwrap();
 
         let (rm_tx, rm_rx) = mpsc::channel();
-        commands.send(Command::RemoveRoute("10.0.5.0/24".to_string(), rm_tx)).unwrap();
+        commands
+            .send(Command::RemoveRoute("10.0.5.0/24".to_string(), rm_tx))
+            .unwrap();
         assert!(rm_rx.recv().unwrap().is_ok());
     }
 
@@ -359,7 +423,8 @@ mod tests {
             FakeNetManager::new(),
             FakeMountManager::new(),
             "zroot".to_string(),
-            std::env::temp_dir().join("keel-agentd-worker-test-add_service_alias_command_round_trips"),
+            std::env::temp_dir()
+                .join("keel-agentd-worker-test-add_service_alias_command_round_trips"),
             Box::new(keel_ingress::FakeAcmeClient::new()),
             Box::new(keel_ingress::FakeDnsProvider::new()),
             Box::new(crate::nginx::FakeNginxController::new()),
@@ -373,11 +438,23 @@ mod tests {
         let (_worker_handle, commands) = spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::AddServiceAlias("keel0".to_string(), "10.0.250.7".to_string(), tx)).unwrap();
+        commands
+            .send(Command::AddServiceAlias(
+                "keel0".to_string(),
+                "10.0.250.7".to_string(),
+                tx,
+            ))
+            .unwrap();
         assert!(rx.recv().unwrap().is_ok());
 
         let (tx2, rx2) = mpsc::channel();
-        commands.send(Command::RemoveServiceAlias("keel0".to_string(), "10.0.250.7".to_string(), tx2)).unwrap();
+        commands
+            .send(Command::RemoveServiceAlias(
+                "keel0".to_string(),
+                "10.0.250.7".to_string(),
+                tx2,
+            ))
+            .unwrap();
         assert!(rx2.recv().unwrap().is_ok());
     }
 
@@ -386,12 +463,22 @@ mod tests {
         let commands = spawn_test_worker("get_volume_and_delete_volume_commands_round_trip");
 
         let (get_tx, get_rx) = mpsc::channel();
-        commands.send(Command::GetVolume("web-data".to_string(), get_tx)).unwrap();
-        assert!(matches!(get_rx.recv().unwrap(), Err(ReconcileError::Zfs(keel_zfs::ZfsError::NotFound(_)))));
+        commands
+            .send(Command::GetVolume("web-data".to_string(), get_tx))
+            .unwrap();
+        assert!(matches!(
+            get_rx.recv().unwrap(),
+            Err(ReconcileError::Zfs(keel_zfs::ZfsError::NotFound(_)))
+        ));
 
         let (del_tx, del_rx) = mpsc::channel();
-        commands.send(Command::DeleteVolume("web-data".to_string(), del_tx)).unwrap();
-        assert!(matches!(del_rx.recv().unwrap(), Err(ReconcileError::Zfs(keel_zfs::ZfsError::NotFound(_)))));
+        commands
+            .send(Command::DeleteVolume("web-data".to_string(), del_tx))
+            .unwrap();
+        assert!(matches!(
+            del_rx.recv().unwrap(),
+            Err(ReconcileError::Zfs(keel_zfs::ZfsError::NotFound(_)))
+        ));
     }
 
     #[test]
@@ -404,12 +491,21 @@ mod tests {
                 keel_spec::JailSpec {
                     api_version: "keel/v1".to_string(),
                     kind: "Jail".to_string(),
-                    metadata: keel_spec::Metadata { name: "web-1".to_string() },
+                    metadata: keel_spec::Metadata {
+                        name: "web-1".to_string(),
+                    },
                     spec: keel_spec::Spec {
                         image: "base/14.2-web".to_string(),
                         command: vec!["/usr/local/bin/myapp".to_string()],
-                        network: keel_spec::NetworkSpec { vnet: true, bridge: "keel0".to_string(), address: "10.0.0.5/24".to_string() },
-                        resources: keel_spec::ResourcesSpec { cpu: "1".to_string(), memory: "256M".to_string() },
+                        network: keel_spec::NetworkSpec {
+                            vnet: true,
+                            bridge: "keel0".to_string(),
+                            address: "10.0.0.5/24".to_string(),
+                        },
+                        resources: keel_spec::ResourcesSpec {
+                            cpu: "1".to_string(),
+                            memory: "256M".to_string(),
+                        },
                         restart_policy: keel_spec::RestartPolicy::Always,
                         volumes: vec![keel_spec::VolumeMount {
                             name: "web-data".to_string(),
@@ -428,18 +524,30 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         commands.send(Command::ListVolumes(tx)).unwrap();
         let volumes = rx.recv().unwrap().unwrap();
-        assert_eq!(volumes, vec![crate::wire::VolumeStatus { name: "web-data".to_string() }]);
+        assert_eq!(
+            volumes,
+            vec![crate::wire::VolumeStatus {
+                name: "web-data".to_string()
+            }]
+        );
     }
 
     fn sample_ingress_spec(name: &str) -> IngressSpec {
         IngressSpec {
             api_version: "keel/v1".to_string(),
             kind: "Ingress".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: keel_spec::IngressSpecBody {
                 host: "example.com".to_string(),
-                backend: keel_spec::IngressBackend { service: "hugo-site".to_string(), port: 8080 },
-                tls: keel_spec::IngressTls { email: "admin@example.com".to_string() },
+                backend: keel_spec::IngressBackend {
+                    service: "hugo-site".to_string(),
+                    port: 8080,
+                },
+                tls: keel_spec::IngressTls {
+                    email: "admin@example.com".to_string(),
+                },
             },
         }
     }
@@ -449,11 +557,15 @@ mod tests {
         let commands = spawn_test_worker("apply_ingress_command_persists_and_lists_it");
 
         let (reply_tx, reply_rx) = mpsc::channel();
-        commands.send(Command::ApplyIngress(sample_ingress_spec("blog"), reply_tx)).unwrap();
+        commands
+            .send(Command::ApplyIngress(sample_ingress_spec("blog"), reply_tx))
+            .unwrap();
         assert!(reply_rx.recv().unwrap().is_ok());
 
         let (get_tx, get_rx) = mpsc::channel();
-        commands.send(Command::GetIngress(Some("blog".to_string()), get_tx)).unwrap();
+        commands
+            .send(Command::GetIngress(Some("blog".to_string()), get_tx))
+            .unwrap();
         let statuses = get_rx.recv().unwrap();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].record.spec.spec.host, "example.com");
@@ -463,7 +575,9 @@ mod tests {
     fn get_ingress_command_with_no_name_lists_everything() {
         let commands = spawn_test_worker("get_ingress_command_with_no_name_lists_everything");
         let (apply_tx, apply_rx) = mpsc::channel();
-        commands.send(Command::ApplyIngress(sample_ingress_spec("blog"), apply_tx)).unwrap();
+        commands
+            .send(Command::ApplyIngress(sample_ingress_spec("blog"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let (get_tx, get_rx) = mpsc::channel();
@@ -475,7 +589,9 @@ mod tests {
     fn get_ingress_command_on_unknown_name_returns_empty() {
         let commands = spawn_test_worker("get_ingress_command_on_unknown_name_returns_empty");
         let (get_tx, get_rx) = mpsc::channel();
-        commands.send(Command::GetIngress(Some("missing".to_string()), get_tx)).unwrap();
+        commands
+            .send(Command::GetIngress(Some("missing".to_string()), get_tx))
+            .unwrap();
         assert!(get_rx.recv().unwrap().is_empty());
     }
 
@@ -483,11 +599,15 @@ mod tests {
     fn delete_ingress_command_removes_the_record() {
         let commands = spawn_test_worker("delete_ingress_command_removes_the_record");
         let (apply_tx, apply_rx) = mpsc::channel();
-        commands.send(Command::ApplyIngress(sample_ingress_spec("blog"), apply_tx)).unwrap();
+        commands
+            .send(Command::ApplyIngress(sample_ingress_spec("blog"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let (delete_tx, delete_rx) = mpsc::channel();
-        commands.send(Command::DeleteIngress("blog".to_string(), delete_tx)).unwrap();
+        commands
+            .send(Command::DeleteIngress("blog".to_string(), delete_tx))
+            .unwrap();
         assert!(delete_rx.recv().unwrap().is_ok());
 
         let (get_tx, get_rx) = mpsc::channel();
@@ -497,10 +617,16 @@ mod tests {
 
     #[test]
     fn delete_ingress_command_on_unknown_name_returns_not_found() {
-        let commands = spawn_test_worker("delete_ingress_command_on_unknown_name_returns_not_found");
+        let commands =
+            spawn_test_worker("delete_ingress_command_on_unknown_name_returns_not_found");
         let (delete_tx, delete_rx) = mpsc::channel();
-        commands.send(Command::DeleteIngress("missing".to_string(), delete_tx)).unwrap();
-        assert!(matches!(delete_rx.recv().unwrap(), Err(ReconcileError::NotFound(_))));
+        commands
+            .send(Command::DeleteIngress("missing".to_string(), delete_tx))
+            .unwrap();
+        assert!(matches!(
+            delete_rx.recv().unwrap(),
+            Err(ReconcileError::NotFound(_))
+        ));
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -508,22 +634,41 @@ mod tests {
     }
 
     fn test_reloading_tls() -> Arc<ReloadingTls> {
-        ReloadingTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), fixture("ca.crt"), fixture("crl.pem"), Duration::from_secs(3600))
-            .unwrap()
+        ReloadingTls::spawn(
+            fixture("fixture-node.crt"),
+            fixture("fixture-node.key"),
+            fixture("ca.crt"),
+            fixture("crl.pem"),
+            Duration::from_secs(3600),
+        )
+        .unwrap()
     }
 
     fn stateful_replicated_spec(name: &str, replicate_to: &str) -> JailSpec {
         JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: Spec {
                 image: "base/14.2-web".to_string(),
                 command: vec!["/usr/local/bin/myapp".to_string()],
-                network: NetworkSpec { vnet: true, bridge: "keel0".to_string(), address: "10.0.0.6/24".to_string() },
-                resources: ResourcesSpec { cpu: "1".to_string(), memory: "256M".to_string() },
+                network: NetworkSpec {
+                    vnet: true,
+                    bridge: "keel0".to_string(),
+                    address: "10.0.0.6/24".to_string(),
+                },
+                resources: ResourcesSpec {
+                    cpu: "1".to_string(),
+                    memory: "256M".to_string(),
+                },
                 restart_policy: RestartPolicy::Always,
-                volumes: vec![VolumeMount { name: format!("{name}-data"), mount_path: "/var/db".to_string(), size: "1G".to_string() }],
+                volumes: vec![VolumeMount {
+                    name: format!("{name}-data"),
+                    mount_path: "/var/db".to_string(),
+                    size: "1G".to_string(),
+                }],
                 replicate_to: Some(replicate_to.to_string()),
                 generation: 0,
             },
@@ -548,7 +693,9 @@ mod tests {
             FakeNetManager::new(),
             FakeMountManager::new(),
             "zroot".to_string(),
-            test_state_dir("deleting_a_stateful_replicated_jail_clears_it_from_the_replicating_guard"),
+            test_state_dir(
+                "deleting_a_stateful_replicated_jail_clears_it_from_the_replicating_guard",
+            ),
             Box::new(keel_ingress::FakeAcmeClient::new()),
             Box::new(keel_ingress::FakeDnsProvider::new()),
             Box::new(crate::nginx::FakeNginxController::new()),
@@ -560,22 +707,58 @@ mod tests {
         let tls = Some(test_reloading_tls());
 
         let (apply_tx, apply_rx) = mpsc::channel();
-        handle_command(&mut reconciler, Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), apply_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        handle_command(
+            &mut reconciler,
+            Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), apply_tx),
+            &zfs,
+            "zroot",
+            &commands,
+            &mut replicating,
+            &tls,
+        );
         apply_rx.recv().unwrap().unwrap();
-        assert!(replicating.contains("db-0"), "expected the initial apply to start tracking its replication loop");
+        assert!(
+            replicating.contains("db-0"),
+            "expected the initial apply to start tracking its replication loop"
+        );
 
         let (delete_tx, delete_rx) = mpsc::channel();
-        handle_command(&mut reconciler, Command::Delete("db-0".to_string(), delete_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        handle_command(
+            &mut reconciler,
+            Command::Delete("db-0".to_string(), delete_tx),
+            &zfs,
+            "zroot",
+            &commands,
+            &mut replicating,
+            &tls,
+        );
         delete_rx.recv().unwrap().unwrap();
-        assert!(!replicating.contains("db-0"), "delete must clear the name out of the replicating guard");
+        assert!(
+            !replicating.contains("db-0"),
+            "delete must clear the name out of the replicating guard"
+        );
 
         // Re-applying the same name later must be able to start a fresh
         // loop -- i.e. `replicating.insert` must return `true` again, not
         // silently no-op forever because the name was never removed.
         let (reapply_tx, reapply_rx) = mpsc::channel();
-        handle_command(&mut reconciler, Command::Apply(stateful_replicated_spec("db-0", "10.0.0.9:7622"), reapply_tx), &zfs, "zroot", &commands, &mut replicating, &tls);
+        handle_command(
+            &mut reconciler,
+            Command::Apply(
+                stateful_replicated_spec("db-0", "10.0.0.9:7622"),
+                reapply_tx,
+            ),
+            &zfs,
+            "zroot",
+            &commands,
+            &mut replicating,
+            &tls,
+        );
         reapply_rx.recv().unwrap().unwrap();
-        assert!(replicating.contains("db-0"), "expected the re-apply to start tracking a new replication loop");
+        assert!(
+            replicating.contains("db-0"),
+            "expected the re-apply to start tracking a new replication loop"
+        );
     }
 
     #[test]
@@ -590,7 +773,9 @@ mod tests {
         // empty `replicating` set, exactly as a real restart would), send
         // `Command::ResumeReplicationLoops`, and confirm a replication loop
         // actually starts and completes a real send.
-        let dir = test_state_dir("resume_replication_loops_starts_a_loop_for_a_record_persisted_before_a_restart");
+        let dir = test_state_dir(
+            "resume_replication_loops_starts_a_loop_for_a_record_persisted_before_a_restart",
+        );
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
 
@@ -604,7 +789,15 @@ mod tests {
         let receiver_zfs_clone = receiver_zfs.clone();
         let targets_clone = targets.clone();
         let reloading_tls = test_reloading_tls();
-        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone, reloading_tls));
+        std::thread::spawn(move || {
+            crate::replication::run(
+                listener,
+                receiver_zfs_clone,
+                "zroot".to_string(),
+                targets_clone,
+                reloading_tls,
+            )
+        });
 
         // The "previous process": apply and reconcile directly against a
         // `Reconciler`, never touching `worker::spawn` or `Command::Apply`,
@@ -623,7 +816,9 @@ mod tests {
                 crate::ServiceVipSlot::new(),
             )
             .unwrap();
-            reconciler.apply(stateful_replicated_spec("db-resume", &addr)).unwrap();
+            reconciler
+                .apply(stateful_replicated_spec("db-resume", &addr))
+                .unwrap();
             let failures = reconciler.reconcile(Instant::now());
             assert!(failures.is_empty(), "expected the initial reconcile to provision the jail and its volume cleanly: {failures:?}");
         }
@@ -644,10 +839,17 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = spawn(restarted_reconciler, zfs.clone(), "zroot".to_string(), Some(test_reloading_tls()));
+        let (_worker_handle, commands) = spawn(
+            restarted_reconciler,
+            zfs.clone(),
+            "zroot".to_string(),
+            Some(test_reloading_tls()),
+        );
 
         let (resume_tx, resume_rx) = mpsc::channel();
-        commands.send(Command::ResumeReplicationLoops(resume_tx)).unwrap();
+        commands
+            .send(Command::ResumeReplicationLoops(resume_tx))
+            .unwrap();
         resume_rx.recv().unwrap();
 
         // The resumed loop uses the same 30s tick interval as a
@@ -655,7 +857,10 @@ mod tests {
         // (rather than a single blind sleep) with a generous upper bound.
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
         loop {
-            if receiver_zfs.dataset_exists("zroot/keel/volumes/db-resume-data").unwrap_or(false) {
+            if receiver_zfs
+                .dataset_exists("zroot/keel/volumes/db-resume-data")
+                .unwrap_or(false)
+            {
                 break;
             }
             assert!(
@@ -664,6 +869,8 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(200));
         }
-        assert!(targets.get("db-resume").is_some_and(|t| t.last_snapshot.is_some()));
+        assert!(targets
+            .get("db-resume")
+            .is_some_and(|t| t.last_snapshot.is_some()));
     }
 }

@@ -4,9 +4,17 @@ use ipnet::IpNet;
 pub fn validate_name(name: &str) -> Result<(), SpecError> {
     let valid = !name.is_empty()
         && name.len() <= 63
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && name.chars().last().is_some_and(|c| c.is_ascii_alphanumeric());
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
     if valid {
         Ok(())
     } else {
@@ -55,19 +63,17 @@ pub fn validate_mount_path(mount_path: &str) -> Result<(), SpecError> {
 /// out of `jails/`/`volumes/`, which share the same `<pool>/keel/` parent and
 /// hold other tenants' live datasets.
 pub fn validate_image(image: &str) -> Result<(), SpecError> {
-    let valid = image
-        .strip_prefix("base/")
-        .is_some_and(|rest| {
-            !rest.is_empty()
-                && rest.split('/').all(|segment| {
-                    !segment.is_empty()
-                        && segment != "."
-                        && segment != ".."
-                        && segment
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
-                })
-        });
+    let valid = image.strip_prefix("base/").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'
+                    })
+            })
+    });
     if valid {
         Ok(())
     } else {
@@ -91,7 +97,10 @@ pub fn validate_bridge(bridge: &str) -> Result<(), SpecError> {
     }
 }
 
-pub fn validate_transition(old: &crate::types::JailSpec, new: &crate::types::JailSpec) -> Result<(), SpecError> {
+pub fn validate_transition(
+    old: &crate::types::JailSpec,
+    new: &crate::types::JailSpec,
+) -> Result<(), SpecError> {
     if old.spec.image != new.spec.image {
         return Err(SpecError::ImmutableField("spec.image"));
     }
@@ -111,8 +120,14 @@ pub fn validate_host(host: &str) -> Result<(), SpecError> {
             !label.is_empty()
                 && label.len() <= 63
                 && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && label.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-                && label.chars().last().is_some_and(|c| c.is_ascii_alphanumeric())
+                && label
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                && label
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
         });
     if valid {
         Ok(())
@@ -153,7 +168,10 @@ mod tests {
 
     #[test]
     fn rejects_malformed_names() {
-        assert_eq!(validate_name(""), Err(SpecError::InvalidName("".to_string())));
+        assert_eq!(
+            validate_name(""),
+            Err(SpecError::InvalidName("".to_string()))
+        );
         assert_eq!(
             validate_name(&"a".repeat(64)),
             Err(SpecError::InvalidName("a".repeat(64)))
@@ -168,7 +186,9 @@ mod tests {
         );
         assert_eq!(
             validate_name("Has_Upper_And_Underscore"),
-            Err(SpecError::InvalidName("Has_Upper_And_Underscore".to_string()))
+            Err(SpecError::InvalidName(
+                "Has_Upper_And_Underscore".to_string()
+            ))
         );
     }
 
@@ -186,7 +206,11 @@ mod tests {
     }
 
     fn volume(name: &str, mount_path: &str, size: &str) -> VolumeMount {
-        VolumeMount { name: name.to_string(), mount_path: mount_path.to_string(), size: size.to_string() }
+        VolumeMount {
+            name: name.to_string(),
+            mount_path: mount_path.to_string(),
+            size: size.to_string(),
+        }
     }
 
     #[test]
@@ -196,26 +220,41 @@ mod tests {
 
     #[test]
     fn validate_volumes_accepts_well_formed_distinct_volumes() {
-        let volumes = vec![volume("web-data", "/data", "1G"), volume("web-cache", "/cache", "512M")];
+        let volumes = vec![
+            volume("web-data", "/data", "1G"),
+            volume("web-cache", "/cache", "512M"),
+        ];
         assert!(validate_volumes(&volumes).is_ok());
     }
 
     #[test]
     fn validate_volumes_rejects_a_malformed_name() {
         let volumes = vec![volume("Invalid_Name", "/data", "1G")];
-        assert!(matches!(validate_volumes(&volumes), Err(SpecError::InvalidName(_))));
+        assert!(matches!(
+            validate_volumes(&volumes),
+            Err(SpecError::InvalidName(_))
+        ));
     }
 
     #[test]
     fn validate_volumes_rejects_a_duplicate_name() {
-        let volumes = vec![volume("web-data", "/data", "1G"), volume("web-data", "/other", "2G")];
-        assert_eq!(validate_volumes(&volumes), Err(SpecError::DuplicateVolumeName("web-data".to_string())));
+        let volumes = vec![
+            volume("web-data", "/data", "1G"),
+            volume("web-data", "/other", "2G"),
+        ];
+        assert_eq!(
+            validate_volumes(&volumes),
+            Err(SpecError::DuplicateVolumeName("web-data".to_string()))
+        );
     }
 
     #[test]
     fn validate_volumes_rejects_a_malformed_size() {
         let volumes = vec![volume("web-data", "/data", "not-a-size")];
-        assert!(matches!(validate_volumes(&volumes), Err(SpecError::InvalidMemory(_))));
+        assert!(matches!(
+            validate_volumes(&volumes),
+            Err(SpecError::InvalidMemory(_))
+        ));
     }
 
     #[test]
@@ -255,7 +294,10 @@ mod tests {
 
     #[test]
     fn rejects_the_bare_root_mount_path() {
-        assert_eq!(validate_mount_path("/"), Err(SpecError::InvalidMountPath("/".to_string())));
+        assert_eq!(
+            validate_mount_path("/"),
+            Err(SpecError::InvalidMountPath("/".to_string()))
+        );
     }
 
     #[test]
@@ -300,17 +342,31 @@ mod tests {
 
     #[test]
     fn rejects_bridges_outside_the_keel_naming_convention() {
-        assert_eq!(validate_bridge("lo0"), Err(SpecError::InvalidBridge("lo0".to_string())));
-        assert_eq!(validate_bridge("em0"), Err(SpecError::InvalidBridge("em0".to_string())));
-        assert_eq!(validate_bridge("bridge0"), Err(SpecError::InvalidBridge("bridge0".to_string())));
-        assert_eq!(validate_bridge("keel"), Err(SpecError::InvalidBridge("keel".to_string())));
+        assert_eq!(
+            validate_bridge("lo0"),
+            Err(SpecError::InvalidBridge("lo0".to_string()))
+        );
+        assert_eq!(
+            validate_bridge("em0"),
+            Err(SpecError::InvalidBridge("em0".to_string()))
+        );
+        assert_eq!(
+            validate_bridge("bridge0"),
+            Err(SpecError::InvalidBridge("bridge0".to_string()))
+        );
+        assert_eq!(
+            validate_bridge("keel"),
+            Err(SpecError::InvalidBridge("keel".to_string()))
+        );
     }
 
     fn sample_spec() -> JailSpec {
         JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: "web-1".to_string() },
+            metadata: Metadata {
+                name: "web-1".to_string(),
+            },
             spec: Spec {
                 image: "base/14.2-web".to_string(),
                 command: vec!["/usr/local/bin/myapp".to_string()],
@@ -319,7 +375,10 @@ mod tests {
                     bridge: "keel0".to_string(),
                     address: "10.0.0.5/24".to_string(),
                 },
-                resources: ResourcesSpec { cpu: "2".to_string(), memory: "512M".to_string() },
+                resources: ResourcesSpec {
+                    cpu: "2".to_string(),
+                    memory: "512M".to_string(),
+                },
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
@@ -364,7 +423,10 @@ mod tests {
         let old = sample_spec();
         let mut new = sample_spec();
         new.spec.volumes = vec![volume("web-data", "/data", "1G")];
-        assert_eq!(validate_transition(&old, &new), Err(SpecError::ImmutableField("spec.volumes")));
+        assert_eq!(
+            validate_transition(&old, &new),
+            Err(SpecError::ImmutableField("spec.volumes"))
+        );
     }
 
     #[test]

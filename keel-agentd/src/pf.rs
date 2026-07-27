@@ -7,7 +7,11 @@ pub enum PfError {
 }
 
 pub trait PfController {
-    fn ensure_redirect_rules(&self, public_iface: &str, ingress_bridge_addr: &str) -> Result<(), PfError>;
+    fn ensure_redirect_rules(
+        &self,
+        public_iface: &str,
+        ingress_bridge_addr: &str,
+    ) -> Result<(), PfError>;
 }
 
 #[derive(Default)]
@@ -31,11 +35,18 @@ impl FakePfController {
 }
 
 impl PfController for FakePfController {
-    fn ensure_redirect_rules(&self, public_iface: &str, ingress_bridge_addr: &str) -> Result<(), PfError> {
+    fn ensure_redirect_rules(
+        &self,
+        public_iface: &str,
+        ingress_bridge_addr: &str,
+    ) -> Result<(), PfError> {
         if *self.fail.lock().unwrap() {
             return Err(PfError::Command("simulated pfctl failure".to_string()));
         }
-        self.applied.lock().unwrap().push((public_iface.to_string(), ingress_bridge_addr.to_string()));
+        self.applied
+            .lock()
+            .unwrap()
+            .push((public_iface.to_string(), ingress_bridge_addr.to_string()));
         Ok(())
     }
 }
@@ -55,12 +66,17 @@ impl Default for PfctlController {
 }
 
 impl PfController for PfctlController {
-    fn ensure_redirect_rules(&self, public_iface: &str, ingress_bridge_addr: &str) -> Result<(), PfError> {
+    fn ensure_redirect_rules(
+        &self,
+        public_iface: &str,
+        ingress_bridge_addr: &str,
+    ) -> Result<(), PfError> {
         let rules = format!(
             "rdr pass on {public_iface} inet proto tcp from any to {public_iface} port 80 -> {ingress_bridge_addr} port 80\nrdr pass on {public_iface} inet proto tcp from any to {public_iface} port 443 -> {ingress_bridge_addr} port 443\n"
         );
         let rules_path = std::path::Path::new("/usr/local/etc/keel/pf-ingress.conf");
-        std::fs::create_dir_all(rules_path.parent().unwrap()).map_err(|e| PfError::Command(e.to_string()))?;
+        std::fs::create_dir_all(rules_path.parent().unwrap())
+            .map_err(|e| PfError::Command(e.to_string()))?;
         std::fs::write(rules_path, &rules).map_err(|e| PfError::Command(e.to_string()))?;
         let output = std::process::Command::new("pfctl")
             .args(["-a", "keel-ingress", "-f"])
@@ -70,7 +86,9 @@ impl PfController for PfctlController {
         if output.status.success() {
             Ok(())
         } else {
-            Err(PfError::Command(String::from_utf8_lossy(&output.stderr).to_string()))
+            Err(PfError::Command(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
         }
     }
 }
@@ -83,7 +101,10 @@ mod tests {
     fn ensure_redirect_rules_records_the_applied_rule() {
         let pf = FakePfController::new();
         pf.ensure_redirect_rules("em0", "10.0.0.2").unwrap();
-        assert_eq!(pf.applied_rules(), vec![("em0".to_string(), "10.0.0.2".to_string())]);
+        assert_eq!(
+            pf.applied_rules(),
+            vec![("em0".to_string(), "10.0.0.2".to_string())]
+        );
     }
 
     #[test]

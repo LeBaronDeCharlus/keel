@@ -8,11 +8,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// snapshot. The returned handle is read-only from the caller's side - the
 /// browser-facing HTTP layer only ever reads it, never blocking on a live
 /// control-plane round trip.
-pub fn spawn(client: Box<dyn ControlPlaneClient>, poll_interval: Duration) -> Arc<RwLock<Snapshot>> {
+pub fn spawn(
+    client: Box<dyn ControlPlaneClient>,
+    poll_interval: Duration,
+) -> Arc<RwLock<Snapshot>> {
     let snapshot = Arc::new(RwLock::new(Snapshot::default()));
     let snapshot_for_thread = Arc::clone(&snapshot);
     thread::spawn(move || loop {
-        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         let previous = snapshot_for_thread.read().unwrap().clone();
         let next = poll_once(client.as_ref(), &previous, now_unix);
         *snapshot_for_thread.write().unwrap() = next;

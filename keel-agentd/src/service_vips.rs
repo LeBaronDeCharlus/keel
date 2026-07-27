@@ -30,10 +30,14 @@ impl ServiceVipSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keel_controlplane::wire::ServiceReplica;
 
     fn entry(name: &str, vip: &str, port: u16) -> ServiceProxyEntry {
-        ServiceProxyEntry { name: name.to_string(), vip: vip.to_string(), port, replicas: vec![] }
+        ServiceProxyEntry {
+            name: name.to_string(),
+            vip: vip.to_string(),
+            port,
+            replicas: vec![],
+        }
     }
 
     #[test]
@@ -62,8 +66,14 @@ mod tests {
     #[test]
     fn names_lists_every_currently_known_service() {
         let slot = ServiceVipSlot::new();
-        slot.set_all(&[entry("hugo-site", "10.0.0.9", 8080), entry("umami", "10.0.0.10", 3000)]);
-        assert_eq!(slot.names(), HashSet::from(["hugo-site".to_string(), "umami".to_string()]));
+        slot.set_all(&[
+            entry("hugo-site", "10.0.0.9", 8080),
+            entry("umami", "10.0.0.10", 3000),
+        ]);
+        assert_eq!(
+            slot.names(),
+            HashSet::from(["hugo-site".to_string(), "umami".to_string()])
+        );
     }
 
     #[test]

@@ -57,7 +57,10 @@ mod tests {
     #[test]
     fn includes_the_stable_conf_d_extension_point() {
         let config = render_nginx_config(&[]);
-        assert!(config.contains("include /usr/local/etc/nginx/conf.d/*.conf;"), "got: {config}");
+        assert!(
+            config.contains("include /usr/local/etc/nginx/conf.d/*.conf;"),
+            "got: {config}"
+        );
     }
 
     #[test]
@@ -71,7 +74,10 @@ mod tests {
 
     #[test]
     fn multiple_backends_each_get_their_own_server_block() {
-        let config = render_nginx_config(&[backend("a.example.com", "10.0.0.9", 8080), backend("b.example.com", "10.0.0.10", 9090)]);
+        let config = render_nginx_config(&[
+            backend("a.example.com", "10.0.0.9", 8080),
+            backend("b.example.com", "10.0.0.10", 9090),
+        ]);
         assert!(config.contains("server_name a.example.com;"));
         assert!(config.contains("proxy_pass http://10.0.0.9:8080;"));
         assert!(config.contains("server_name b.example.com;"));
@@ -81,6 +87,9 @@ mod tests {
     #[test]
     fn rendering_is_deterministic_for_the_same_input() {
         let backends = vec![backend("example.com", "10.0.0.9", 8080)];
-        assert_eq!(render_nginx_config(&backends), render_nginx_config(&backends));
+        assert_eq!(
+            render_nginx_config(&backends),
+            render_nginx_config(&backends)
+        );
     }
 }

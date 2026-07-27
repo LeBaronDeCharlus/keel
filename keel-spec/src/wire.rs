@@ -30,7 +30,12 @@ mod tests {
 
     #[test]
     fn yaml_response_carries_the_status_and_yaml_encodes_the_value() {
-        let (status, body) = yaml_response(200, &ErrorBody { error: "ok".to_string() });
+        let (status, body) = yaml_response(
+            200,
+            &ErrorBody {
+                error: "ok".to_string(),
+            },
+        );
         assert_eq!(status, 200);
         let parsed: ErrorBody = serde_yaml::from_str(std::str::from_utf8(&body).unwrap()).unwrap();
         assert_eq!(parsed.error, "ok");

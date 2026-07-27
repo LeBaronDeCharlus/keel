@@ -117,8 +117,10 @@ mod tests {
 
     #[test]
     fn node_registration_without_a_replicate_addr_field_defaults_to_none() {
-        let parsed: NodeRegistration =
-            serde_yaml::from_str("id: node-1\naddr: 192.168.64.4\ncapacity_cpu: 4\ncapacity_memory: 8589934592\n").unwrap();
+        let parsed: NodeRegistration = serde_yaml::from_str(
+            "id: node-1\naddr: 192.168.64.4\ncapacity_cpu: 4\ncapacity_memory: 8589934592\n",
+        )
+        .unwrap();
         assert_eq!(parsed.replicate_addr, None);
     }
 
@@ -155,7 +157,9 @@ mod tests {
 
     #[test]
     fn register_response_round_trips_through_yaml() {
-        let response = RegisterResponse { pod_cidr: "10.0.4.0/24".to_string() };
+        let response = RegisterResponse {
+            pod_cidr: "10.0.4.0/24".to_string(),
+        };
         let yaml = serde_yaml::to_string(&response).unwrap();
         let parsed: RegisterResponse = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, response);
@@ -163,8 +167,12 @@ mod tests {
 
     #[test]
     fn heartbeat_round_trips_through_yaml() {
-        let heartbeat =
-            Heartbeat { committed_cpu: 2.0, committed_memory: 1024 * 1024 * 1024, jails: vec![], ingresses: vec![] };
+        let heartbeat = Heartbeat {
+            committed_cpu: 2.0,
+            committed_memory: 1024 * 1024 * 1024,
+            jails: vec![],
+            ingresses: vec![],
+        };
         let yaml = serde_yaml::to_string(&heartbeat).unwrap();
         let parsed: Heartbeat = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, heartbeat);
@@ -176,8 +184,14 @@ mod tests {
             committed_cpu: 2.0,
             committed_memory: 1024 * 1024 * 1024,
             jails: vec![
-                JailHealth { name: "web-0".to_string(), running: true },
-                JailHealth { name: "web-1".to_string(), running: false },
+                JailHealth {
+                    name: "web-0".to_string(),
+                    running: true,
+                },
+                JailHealth {
+                    name: "web-1".to_string(),
+                    running: false,
+                },
             ],
             ingresses: vec![],
         };
@@ -188,7 +202,8 @@ mod tests {
 
     #[test]
     fn heartbeat_without_a_jails_field_defaults_to_empty() {
-        let parsed: Heartbeat = serde_yaml::from_str("committed_cpu: 1\ncommitted_memory: 2\n").unwrap();
+        let parsed: Heartbeat =
+            serde_yaml::from_str("committed_cpu: 1\ncommitted_memory: 2\n").unwrap();
         assert_eq!(parsed.jails, vec![]);
     }
 
@@ -227,7 +242,8 @@ mod tests {
 
     #[test]
     fn heartbeat_without_an_ingresses_field_defaults_to_empty() {
-        let parsed: Heartbeat = serde_yaml::from_str("committed_cpu: 1\ncommitted_memory: 2\n").unwrap();
+        let parsed: Heartbeat =
+            serde_yaml::from_str("committed_cpu: 1\ncommitted_memory: 2\n").unwrap();
         assert_eq!(parsed.ingresses, vec![]);
     }
 
@@ -265,7 +281,9 @@ mod tests {
 
     #[test]
     fn error_body_round_trips_through_yaml() {
-        let body = ErrorBody { error: "unknown node 'node-9'".to_string() };
+        let body = ErrorBody {
+            error: "unknown node 'node-9'".to_string(),
+        };
         let yaml = serde_yaml::to_string(&body).unwrap();
         let parsed: ErrorBody = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, body);
@@ -273,9 +291,16 @@ mod tests {
 
     #[test]
     fn service_replica_round_trips_through_yaml() {
-        let replica = ServiceReplica { name: "web-0".to_string(), node: "node-4".to_string(), address: "10.0.60.2".to_string() };
+        let replica = ServiceReplica {
+            name: "web-0".to_string(),
+            node: "node-4".to_string(),
+            address: "10.0.60.2".to_string(),
+        };
         let yaml = serde_yaml::to_string(&replica).unwrap();
-        assert_eq!(serde_yaml::from_str::<ServiceReplica>(&yaml).unwrap(), replica);
+        assert_eq!(
+            serde_yaml::from_str::<ServiceReplica>(&yaml).unwrap(),
+            replica
+        );
     }
 
     #[test]

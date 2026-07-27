@@ -1,17 +1,17 @@
+use crate::addresses::{self, UsedAddresses};
+use crate::pending_fences::PendingFences;
 use crate::placements::Placements;
 use crate::registry::{PodCidrCollision, Registry, ResolveError, UnknownNode};
 use crate::scheduler::{self, ScheduleError};
+use crate::services::{self, Owner, Services};
+use crate::standbys::Standbys;
+use crate::wire;
 use crate::wire::{NodeState, NodeStatus};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
-use crate::addresses::{self, UsedAddresses};
-use crate::pending_fences::PendingFences;
-use crate::services::{self, Owner, Services};
-use crate::standbys::Standbys;
-use crate::wire;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ScheduleOrResolveError {
@@ -66,6 +66,9 @@ pub enum ForceRepinError {
     NoFreeAddress,
 }
 
+// Schedule/TearDown are both short-lived per-reconcile values, not stored in bulk; boxing the
+// larger variant would add an indirection with no measurable benefit here.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplicaAction {
     Schedule {
@@ -87,16 +90,39 @@ pub enum ReplicaAction {
 }
 
 pub enum Command {
-    Register(String, String, Option<String>, f64, u64, Sender<Result<ipnet::Ipv4Net, PodCidrCollision>>),
-    Heartbeat(String, f64, u64, Vec<crate::wire::JailHealth>, Vec<crate::wire::IngressHealth>, Sender<Result<(), UnknownNode>>),
+    Register(
+        String,
+        String,
+        Option<String>,
+        f64,
+        u64,
+        Sender<Result<ipnet::Ipv4Net, PodCidrCollision>>,
+    ),
+    Heartbeat(
+        String,
+        f64,
+        u64,
+        Vec<crate::wire::JailHealth>,
+        Vec<crate::wire::IngressHealth>,
+        Sender<Result<(), UnknownNode>>,
+    ),
     List(Sender<Vec<NodeStatus>>),
     Resolve(String, Sender<Result<String, ResolveError>>),
-    ResolveOrSchedule(String, Sender<Result<(String, String), ScheduleOrResolveError>>),
+    ResolveOrSchedule(
+        String,
+        Sender<Result<(String, String), ScheduleOrResolveError>>,
+    ),
     ResolvePlacement(String, Sender<Result<(String, String), PlacementError>>),
     RecordPlacement(String, String, Sender<()>),
     RemovePlacement(String, Sender<()>),
     OwnerOf(String, Sender<Option<Owner>>),
-    ApplyService(String, u32, keel_spec::JailTemplate, u16, Sender<Result<(), services::ApplyServiceError>>),
+    ApplyService(
+        String,
+        u32,
+        keel_spec::JailTemplate,
+        u16,
+        Sender<Result<(), services::ApplyServiceError>>,
+    ),
     /// Computes a point-in-time `Vec<ReplicaAction>` from the current
     /// `placements`/`registry`/`used_addresses` snapshot, but reserves
     /// nothing: nothing is recorded in shared state here. The caller
@@ -135,10 +161,16 @@ pub enum Command {
     /// 9/10's "no hard admission guarantee" / "no overcommit protection
     /// beyond the ranking itself").
     ReconcileServices(Sender<Vec<ReplicaAction>>),
-    DiscoverService(String, Sender<Result<Vec<wire::ServiceReplica>, services::UnknownService>>),
+    DiscoverService(
+        String,
+        Sender<Result<Vec<wire::ServiceReplica>, services::UnknownService>>,
+    ),
     ListServices(Sender<Vec<wire::ServiceSummary>>),
     ListServiceProxyEntries(Sender<Vec<wire::ServiceProxyEntry>>),
-    DeleteService(String, Sender<Result<Vec<ReplicaAction>, services::UnknownService>>),
+    DeleteService(
+        String,
+        Sender<Result<Vec<ReplicaAction>, services::UnknownService>>,
+    ),
     RecordReplicaAddress(String, String, std::net::Ipv4Addr, Sender<()>),
     ReleaseReplicaAddress(String, Sender<()>),
     RecordStandby(String, String, Sender<()>),
@@ -162,7 +194,16 @@ pub fn spawn(
     let handle = thread::spawn(move || {
         for command in rx {
             run_catching_panics(std::panic::AssertUnwindSafe(|| {
-                handle_command(&mut registry, &mut placements, &mut services, &mut used_addresses, &mut standbys, &mut pending_fences, &state_dir, command);
+                handle_command(
+                    &mut registry,
+                    &mut placements,
+                    &mut services,
+                    &mut used_addresses,
+                    &mut standbys,
+                    &mut pending_fences,
+                    &state_dir,
+                    command,
+                );
             }));
         }
     });
@@ -225,11 +266,25 @@ fn handle_command(
 ) {
     match command {
         Command::Register(id, addr, replicate_addr, capacity_cpu, capacity_memory, reply) => {
-            let result = registry.register(id, addr, replicate_addr, capacity_cpu, capacity_memory, Instant::now());
+            let result = registry.register(
+                id,
+                addr,
+                replicate_addr,
+                capacity_cpu,
+                capacity_memory,
+                Instant::now(),
+            );
             let _ = reply.send(result);
         }
         Command::Heartbeat(id, committed_cpu, committed_memory, jails, ingresses, reply) => {
-            let result = registry.heartbeat(&id, committed_cpu, committed_memory, jails, ingresses, Instant::now());
+            let result = registry.heartbeat(
+                &id,
+                committed_cpu,
+                committed_memory,
+                jails,
+                ingresses,
+                Instant::now(),
+            );
             let _ = reply.send(result);
         }
         Command::List(reply) => {
@@ -242,7 +297,10 @@ fn handle_command(
         Command::ResolveOrSchedule(jail_name, reply) => {
             let now = Instant::now();
             let result = if let Some(node_id) = placements.get(&jail_name).map(|s| s.to_string()) {
-                registry.resolve(&node_id, now).map(|addr| (node_id, addr)).map_err(ScheduleOrResolveError::from)
+                registry
+                    .resolve(&node_id, now)
+                    .map(|addr| (node_id, addr))
+                    .map_err(ScheduleOrResolveError::from)
             } else {
                 let nodes: Vec<scheduler::NodeResources> = registry
                     .list(now)
@@ -256,14 +314,14 @@ fn handle_command(
                         committed_memory: status.committed_memory,
                     })
                     .collect();
-                scheduler::pick_node(&nodes).map_err(ScheduleOrResolveError::from).and_then(
-                    |node_id| {
+                scheduler::pick_node(&nodes)
+                    .map_err(ScheduleOrResolveError::from)
+                    .and_then(|node_id| {
                         registry
                             .resolve(&node_id, now)
                             .map(|addr| (node_id, addr))
                             .map_err(ScheduleOrResolveError::from)
-                    },
-                )
+                    })
             };
             let _ = reply.send(result);
         }
@@ -297,7 +355,10 @@ fn handle_command(
                     if let Some(owner) = services::owner_of(&candidate, placements, services) {
                         let is_self = matches!(&owner, Owner::Service(other) if other == &name);
                         if !is_self {
-                            return Err(services::ApplyServiceError::NameConflict { name: candidate, owner });
+                            return Err(services::ApplyServiceError::NameConflict {
+                                name: candidate,
+                                owner,
+                            });
                         }
                     }
                 }
@@ -333,7 +394,8 @@ fn handle_command(
                 let placed: Vec<(u32, String, String)> = placements
                     .iter()
                     .filter_map(|(jail_name, node_id)| {
-                        services::replica_index(service_name, jail_name).map(|idx| (idx, jail_name.to_string(), node_id.to_string()))
+                        services::replica_index(service_name, jail_name)
+                            .map(|idx| (idx, jail_name.to_string(), node_id.to_string()))
                     })
                     .collect();
                 // Deliberately NOT also requiring `is_jail_running`: a
@@ -370,15 +432,27 @@ fn handle_command(
                     placed.iter().map(|(idx, _, _)| *idx).collect()
                 };
 
-                let (to_add, to_remove) = services::diff_replicas(record.desired_replicas, &present_indices);
+                let (to_add, to_remove) =
+                    services::diff_replicas(record.desired_replicas, &present_indices);
                 let mut busy = services::nodes_hosting_service(service_name, placements);
 
                 for idx in to_add {
                     let replica_name = services::replica_name(service_name, idx);
-                    let Ok(node_id) = services::pick_node_for_service(alive_nodes.clone(), &busy) else { continue };
-                    let Some(pod_cidr) = registry.pod_cidr(&node_id) else { continue };
-                    let Some(address) = addresses::first_free_address(pod_cidr, &node_id, &working_used) else { continue };
-                    let Ok(node_addr) = registry.resolve(&node_id, now) else { continue };
+                    let Ok(node_id) = services::pick_node_for_service(alive_nodes.clone(), &busy)
+                    else {
+                        continue;
+                    };
+                    let Some(pod_cidr) = registry.pod_cidr(&node_id) else {
+                        continue;
+                    };
+                    let Some(address) =
+                        addresses::first_free_address(pod_cidr, &node_id, &working_used)
+                    else {
+                        continue;
+                    };
+                    let Ok(node_addr) = registry.resolve(&node_id, now) else {
+                        continue;
+                    };
                     working_used.record(replica_name.clone(), node_id.clone(), address);
                     busy.insert(node_id.clone());
                     // Reflect this replica's own cost immediately, so the
@@ -391,10 +465,14 @@ fn handle_command(
                     // best before the pass started, unaware of what it just
                     // committed here.
                     if let Some(n) = alive_nodes.iter_mut().find(|n| n.id == node_id) {
-                        if let Ok(cpu_cost) = keel_spec::parse_cpu_cores(&record.template.resources.cpu) {
+                        if let Ok(cpu_cost) =
+                            keel_spec::parse_cpu_cores(&record.template.resources.cpu)
+                        {
                             n.committed_cpu += cpu_cost;
                         }
-                        if let Ok(memory_cost) = keel_spec::parse_memory_bytes(&record.template.resources.memory) {
+                        if let Ok(memory_cost) =
+                            keel_spec::parse_memory_bytes(&record.template.resources.memory)
+                        {
                             n.committed_memory += memory_cost;
                         }
                     }
@@ -405,7 +483,11 @@ fn handle_command(
                         services::pick_node_for_service(alive_nodes.clone(), &busy)
                             .ok()
                             .filter(|standby_id| standby_id != &node_id)
-                            .and_then(|standby_id| registry.replicate_addr(&standby_id).map(|addr| (standby_id, addr)))
+                            .and_then(|standby_id| {
+                                registry
+                                    .replicate_addr(&standby_id)
+                                    .map(|addr| (standby_id, addr))
+                            })
                             .map(|(id, addr)| (Some(id), Some(addr)))
                             .unwrap_or((None, None))
                     };
@@ -434,9 +516,17 @@ fn handle_command(
 
                 for idx in to_remove {
                     let replica_name = services::replica_name(service_name, idx);
-                    let Some(node_id) = placements.get(&replica_name).map(|s| s.to_string()) else { continue };
-                    let Ok(node_addr) = registry.resolve(&node_id, now) else { continue };
-                    actions.push(ReplicaAction::TearDown { replica_name, node_id, node_addr });
+                    let Some(node_id) = placements.get(&replica_name).map(|s| s.to_string()) else {
+                        continue;
+                    };
+                    let Ok(node_addr) = registry.resolve(&node_id, now) else {
+                        continue;
+                    };
+                    actions.push(ReplicaAction::TearDown {
+                        replica_name,
+                        node_id,
+                        node_addr,
+                    });
                 }
             }
 
@@ -446,7 +536,13 @@ fn handle_command(
             let result = if services.get(&name).is_none() {
                 Err(services::UnknownService(name.clone()))
             } else {
-                Ok(healthy_replicas(&name, placements, registry, used_addresses, Instant::now()))
+                Ok(healthy_replicas(
+                    &name,
+                    placements,
+                    registry,
+                    used_addresses,
+                    Instant::now(),
+                ))
             };
             let _ = reply.send(result);
         }
@@ -487,7 +583,11 @@ fn handle_command(
                     .filter_map(|(jail_name, node_id)| {
                         services::replica_index(&name, jail_name)?;
                         let node_addr = registry.resolve(node_id, now).ok()?;
-                        Some(ReplicaAction::TearDown { replica_name: jail_name.to_string(), node_id: node_id.to_string(), node_addr })
+                        Some(ReplicaAction::TearDown {
+                            replica_name: jail_name.to_string(),
+                            node_id: node_id.to_string(),
+                            node_addr,
+                        })
                     })
                     .collect();
                 services.remove(&name);
@@ -532,14 +632,20 @@ fn handle_command(
         Command::PrepareForceRepin(replica_name, reply) => {
             let now = Instant::now();
             let result = (|| {
-                let old_node_id = placements.get(&replica_name).map(|s| s.to_string()).ok_or_else(|| ForceRepinError::NotPlaced(replica_name.clone()))?;
+                let old_node_id = placements
+                    .get(&replica_name)
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| ForceRepinError::NotPlaced(replica_name.clone()))?;
                 // Checked before the primary-aliveness check below: a
                 // non-stateful replica (no recorded standby at all) must
                 // report NotStateful regardless of whether its sole node
                 // happens to be Alive or Dead, rather than reporting
                 // PrimaryStillAlive first and never surfacing NotStateful for
                 // an Alive-but-stateless replica.
-                let standby_node_id = standbys.get(&replica_name).map(|s| s.to_string()).ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
+                let standby_node_id = standbys
+                    .get(&replica_name)
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
                 if registry.resolve(&old_node_id, now).is_ok() {
                     return Err(ForceRepinError::PrimaryStillAlive(old_node_id));
                 }
@@ -555,7 +661,9 @@ fn handle_command(
                 // API), not a replication target embedded in a spec. Do not
                 // "fix" this to replicate_addr() by symmetry with
                 // fresh_standby_addr below -- they serve different purposes.
-                let standby_addr = registry.resolve(&standby_node_id, now).map_err(ForceRepinError::StandbyUnresolvable)?;
+                let standby_addr = registry
+                    .resolve(&standby_node_id, now)
+                    .map_err(ForceRepinError::StandbyUnresolvable)?;
 
                 let service_name = services::owner_of(&replica_name, placements, services)
                     .and_then(|owner| match owner {
@@ -563,7 +671,11 @@ fn handle_command(
                         Owner::Unmanaged => None,
                     })
                     .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
-                let template = services.get(&service_name).ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?.template.clone();
+                let template = services
+                    .get(&service_name)
+                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?
+                    .template
+                    .clone();
 
                 let alive_nodes: Vec<scheduler::NodeResources> = registry
                     .list(now)
@@ -589,10 +701,16 @@ fn handle_command(
                 // its replication loop where to connect -- it must be the
                 // fresh standby's replication-listener address (Task 8b),
                 // not its main HTTP address.
-                let fresh_standby_addr = registry.replicate_addr(&fresh_standby_node_id).ok_or(ForceRepinError::NoFreshStandby)?;
+                let fresh_standby_addr = registry
+                    .replicate_addr(&fresh_standby_node_id)
+                    .ok_or(ForceRepinError::NoFreshStandby)?;
 
-                let pod_cidr = registry.pod_cidr(&standby_node_id).ok_or(ForceRepinError::NoFreeAddress)?;
-                let address = addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses).ok_or(ForceRepinError::NoFreeAddress)?;
+                let pod_cidr = registry
+                    .pod_cidr(&standby_node_id)
+                    .ok_or(ForceRepinError::NoFreeAddress)?;
+                let address =
+                    addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses)
+                        .ok_or(ForceRepinError::NoFreeAddress)?;
                 let next_generation = placements.generation(&replica_name) + 1;
 
                 Ok(ForceRepinPrep {
@@ -629,9 +747,15 @@ fn healthy_replicas(
         .iter()
         .filter_map(|(jail_name, node_id)| {
             services::replica_index(name, jail_name)?;
-            if registry.resolve(node_id, now).is_ok() && registry.is_jail_running(node_id, jail_name) {
+            if registry.resolve(node_id, now).is_ok()
+                && registry.is_jail_running(node_id, jail_name)
+            {
                 let address = used_addresses.address_of(jail_name)?;
-                Some(wire::ServiceReplica { name: jail_name.to_string(), node: node_id.to_string(), address: address.to_string() })
+                Some(wire::ServiceReplica {
+                    name: jail_name.to_string(),
+                    node: node_id.to_string(),
+                    address: address.to_string(),
+                })
             } else {
                 None
             }
@@ -676,7 +800,10 @@ mod tests {
         run_catching_panics(std::panic::AssertUnwindSafe(|| {
             ran = true;
         }));
-        assert!(ran, "a closure that doesn't panic must still run to completion");
+        assert!(
+            ran,
+            "a closure that doesn't panic must still run to completion"
+        );
     }
 
     fn test_cluster_cidr() -> ipnet::Ipv4Net {
@@ -691,7 +818,10 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("keel-controlplane-worker-test-{}-{id}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-worker-test-{}-{id}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -700,8 +830,14 @@ mod tests {
         JailTemplate {
             image: "base/14.2-web".to_string(),
             command: vec!["/usr/local/bin/myapp".to_string()],
-            network: TemplateNetworkSpec { vnet: true, bridge: "keel0".to_string() },
-            resources: ResourcesSpec { cpu: "1".to_string(), memory: "256M".to_string() },
+            network: TemplateNetworkSpec {
+                vnet: true,
+                bridge: "keel0".to_string(),
+            },
+            resources: ResourcesSpec {
+                cpu: "1".to_string(),
+                memory: "256M".to_string(),
+            },
             restart_policy: RestartPolicy::Always,
             volumes: vec![],
         }
@@ -709,7 +845,16 @@ mod tests {
 
     #[test]
     fn register_command_makes_the_node_visible_in_list() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (reg_tx, reg_rx) = mpsc::channel();
         commands
@@ -733,16 +878,43 @@ mod tests {
 
     #[test]
     fn heartbeat_command_on_unknown_id_returns_an_error() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (hb_tx, hb_rx) = mpsc::channel();
-        commands.send(Command::Heartbeat("missing".to_string(), 0.0, 0, vec![], vec![], hb_tx)).unwrap();
+        commands
+            .send(Command::Heartbeat(
+                "missing".to_string(),
+                0.0,
+                0,
+                vec![],
+                vec![],
+                hb_tx,
+            ))
+            .unwrap();
         assert!(hb_rx.recv().unwrap().is_err());
     }
 
     #[test]
     fn heartbeat_command_on_a_registered_node_succeeds() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (reg_tx, reg_rx) = mpsc::channel();
         commands
@@ -758,15 +930,41 @@ mod tests {
         reg_rx.recv().unwrap().unwrap();
 
         let (hb_tx, hb_rx) = mpsc::channel();
-        commands.send(Command::Heartbeat("node-1".to_string(), 0.0, 0, vec![], vec![], hb_tx)).unwrap();
+        commands
+            .send(Command::Heartbeat(
+                "node-1".to_string(),
+                0.0,
+                0,
+                vec![],
+                vec![],
+                hb_tx,
+            ))
+            .unwrap();
         assert!(hb_rx.recv().unwrap().is_ok());
     }
 
     #[test]
     fn apply_service_command_carries_the_port_through() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 1, template(), 8080, tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                1,
+                template(),
+                8080,
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap().unwrap();
 
         let (list_tx, list_rx) = mpsc::channel();
@@ -778,30 +976,67 @@ mod tests {
 
     #[test]
     fn list_service_proxy_entries_reflects_only_alive_and_running_replicas() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
 
         let (apply_tx, apply_rx) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 1, template(), 8080, apply_tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                1,
+                template(),
+                8080,
+                apply_tx,
+            ))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
 
         // Not yet marked running via a heartbeat -> not yet "healthy".
         let (entries_tx, entries_rx) = mpsc::channel();
-        commands.send(Command::ListServiceProxyEntries(entries_tx)).unwrap();
+        commands
+            .send(Command::ListServiceProxyEntries(entries_tx))
+            .unwrap();
         let entries = entries_rx.recv().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "web");
         assert_eq!(entries[0].port, 8080);
-        assert!(entries[0].replicas.is_empty(), "web-0 has no recorded address/running-jail signal yet");
+        assert!(
+            entries[0].replicas.is_empty(),
+            "web-0 has no recorded address/running-jail signal yet"
+        );
     }
 
     #[test]
     fn list_service_proxy_entries_is_empty_with_no_services() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         let (tx, rx) = mpsc::channel();
         commands.send(Command::ListServiceProxyEntries(tx)).unwrap();
         assert_eq!(rx.recv().unwrap(), vec![]);
@@ -809,7 +1044,16 @@ mod tests {
 
     #[test]
     fn list_command_on_a_fresh_worker_is_empty() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (list_tx, list_rx) = mpsc::channel();
         commands.send(Command::List(list_tx)).unwrap();
@@ -818,7 +1062,16 @@ mod tests {
 
     #[test]
     fn resolve_command_on_a_registered_alive_node_returns_its_address() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (reg_tx, reg_rx) = mpsc::channel();
         commands
@@ -834,223 +1087,552 @@ mod tests {
         reg_rx.recv().unwrap().unwrap();
 
         let (resolve_tx, resolve_rx) = mpsc::channel();
-        commands.send(Command::Resolve("node-1".to_string(), resolve_tx)).unwrap();
+        commands
+            .send(Command::Resolve("node-1".to_string(), resolve_tx))
+            .unwrap();
         assert_eq!(resolve_rx.recv().unwrap(), Ok("10.0.0.1".to_string()));
     }
 
     #[test]
     fn resolve_command_on_an_unknown_node_returns_an_error() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (resolve_tx, resolve_rx) = mpsc::channel();
-        commands.send(Command::Resolve("missing".to_string(), resolve_tx)).unwrap();
+        commands
+            .send(Command::Resolve("missing".to_string(), resolve_tx))
+            .unwrap();
         assert!(resolve_rx.recv().unwrap().is_err());
     }
 
-    fn register_node(commands: &Sender<Command>, id: &str, addr: &str, capacity_cpu: f64, capacity_memory: u64) {
+    fn register_node(
+        commands: &Sender<Command>,
+        id: &str,
+        addr: &str,
+        capacity_cpu: f64,
+        capacity_memory: u64,
+    ) {
         let (reg_tx, reg_rx) = mpsc::channel();
         commands
-            .send(Command::Register(id.to_string(), addr.to_string(), None, capacity_cpu, capacity_memory, reg_tx))
+            .send(Command::Register(
+                id.to_string(),
+                addr.to_string(),
+                None,
+                capacity_cpu,
+                capacity_memory,
+                reg_tx,
+            ))
             .unwrap();
         reg_rx.recv().unwrap().unwrap();
     }
 
-    fn register_node_with_replicate_addr(commands: &Sender<Command>, id: &str, addr: &str, replicate_addr: &str, capacity_cpu: f64, capacity_memory: u64) {
+    fn register_node_with_replicate_addr(
+        commands: &Sender<Command>,
+        id: &str,
+        addr: &str,
+        replicate_addr: &str,
+        capacity_cpu: f64,
+        capacity_memory: u64,
+    ) {
         let (reg_tx, reg_rx) = mpsc::channel();
         commands
-            .send(Command::Register(id.to_string(), addr.to_string(), Some(replicate_addr.to_string()), capacity_cpu, capacity_memory, reg_tx))
+            .send(Command::Register(
+                id.to_string(),
+                addr.to_string(),
+                Some(replicate_addr.to_string()),
+                capacity_cpu,
+                capacity_memory,
+                reg_tx,
+            ))
             .unwrap();
         reg_rx.recv().unwrap().unwrap();
     }
 
-    fn heartbeat_node(commands: &Sender<Command>, id: &str, committed_cpu: f64, committed_memory: u64) {
+    fn heartbeat_node(
+        commands: &Sender<Command>,
+        id: &str,
+        committed_cpu: f64,
+        committed_memory: u64,
+    ) {
         let (hb_tx, hb_rx) = mpsc::channel();
-        commands.send(Command::Heartbeat(id.to_string(), committed_cpu, committed_memory, vec![], vec![], hb_tx)).unwrap();
+        commands
+            .send(Command::Heartbeat(
+                id.to_string(),
+                committed_cpu,
+                committed_memory,
+                vec![],
+                vec![],
+                hb_tx,
+            ))
+            .unwrap();
         hb_rx.recv().unwrap().unwrap();
     }
 
     #[test]
     fn resolve_or_schedule_on_a_fresh_jail_name_with_equal_headroom_breaks_ties_by_ascending_id() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ResolveOrSchedule("web-1".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Ok(("node-1".to_string(), "10.0.0.1".to_string())));
+        commands
+            .send(Command::ResolveOrSchedule("web-1".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Ok(("node-1".to_string(), "10.0.0.1".to_string()))
+        );
     }
 
     #[test]
     fn resolve_or_schedule_on_a_fresh_jail_name_schedules_onto_the_node_with_more_headroom() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 100);
         register_node(&commands, "node-2", "10.0.0.2", 4.0, 100);
         heartbeat_node(&commands, "node-1", 3.0, 10); // 25% cpu headroom
         heartbeat_node(&commands, "node-2", 1.0, 10); // 75% cpu headroom
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ResolveOrSchedule("web-1".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Ok(("node-2".to_string(), "10.0.0.2".to_string())));
+        commands
+            .send(Command::ResolveOrSchedule("web-1".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Ok(("node-2".to_string(), "10.0.0.2".to_string()))
+        );
     }
 
     #[test]
     fn resolve_or_schedule_on_an_already_placed_jail_is_sticky() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
 
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-1".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-1".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ResolveOrSchedule("web-1".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Ok(("node-1".to_string(), "10.0.0.1".to_string())));
+        commands
+            .send(Command::ResolveOrSchedule("web-1".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Ok(("node-1".to_string(), "10.0.0.1".to_string()))
+        );
     }
 
     #[test]
     fn resolve_or_schedule_with_no_alive_nodes_returns_no_available_nodes() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ResolveOrSchedule("web-1".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Err(ScheduleOrResolveError::Schedule(ScheduleError::NoAvailableNodes)));
+        commands
+            .send(Command::ResolveOrSchedule("web-1".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Err(ScheduleOrResolveError::Schedule(
+                ScheduleError::NoAvailableNodes
+            ))
+        );
     }
 
     #[test]
     fn resolve_placement_on_an_unplaced_jail_returns_not_placed() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ResolvePlacement("web-1".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Err(PlacementError::NotPlaced("web-1".to_string())));
+        commands
+            .send(Command::ResolvePlacement("web-1".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Err(PlacementError::NotPlaced("web-1".to_string()))
+        );
     }
 
     #[test]
     fn record_then_remove_placement_is_reflected_by_resolve_placement() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
 
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-1".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-1".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ResolvePlacement("web-1".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Ok(("node-1".to_string(), "10.0.0.1".to_string())));
+        commands
+            .send(Command::ResolvePlacement("web-1".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Ok(("node-1".to_string(), "10.0.0.1".to_string()))
+        );
 
         let (rem_tx, rem_rx) = mpsc::channel();
-        commands.send(Command::RemovePlacement("web-1".to_string(), rem_tx)).unwrap();
+        commands
+            .send(Command::RemovePlacement("web-1".to_string(), rem_tx))
+            .unwrap();
         rem_rx.recv().unwrap();
 
         let (tx2, rx2) = mpsc::channel();
-        commands.send(Command::ResolvePlacement("web-1".to_string(), tx2)).unwrap();
-        assert_eq!(rx2.recv().unwrap(), Err(PlacementError::NotPlaced("web-1".to_string())));
+        commands
+            .send(Command::ResolvePlacement("web-1".to_string(), tx2))
+            .unwrap();
+        assert_eq!(
+            rx2.recv().unwrap(),
+            Err(PlacementError::NotPlaced("web-1".to_string()))
+        );
     }
 
     #[test]
     fn apply_service_command_creates_a_new_service() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 3, template(), 8080, tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                3,
+                template(),
+                8080,
+                tx,
+            ))
+            .unwrap();
         assert_eq!(rx.recv().unwrap(), Ok(()));
     }
 
     #[test]
     fn apply_service_command_rejects_a_template_change_on_an_existing_service() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (tx1, rx1) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 3, template(), 8080, tx1)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                3,
+                template(),
+                8080,
+                tx1,
+            ))
+            .unwrap();
         rx1.recv().unwrap().unwrap();
 
         let mut changed = template();
         changed.image = "base/different-image".to_string();
         let (tx2, rx2) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 3, changed, 8080, tx2)).unwrap();
-        assert_eq!(rx2.recv().unwrap(), Err(ApplyServiceError::TemplateChanged("web".to_string())));
-    }
-
-    #[test]
-    fn apply_service_command_rejects_a_name_already_used_by_an_unmanaged_jail() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
-
-        let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
-        rec_rx.recv().unwrap();
-
-        let (tx, rx) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 1, template(), 8080, tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                3,
+                changed,
+                8080,
+                tx2,
+            ))
+            .unwrap();
         assert_eq!(
-            rx.recv().unwrap(),
-            Err(ApplyServiceError::NameConflict { name: "web-0".to_string(), owner: Owner::Unmanaged })
+            rx2.recv().unwrap(),
+            Err(ApplyServiceError::TemplateChanged("web".to_string()))
         );
     }
 
     #[test]
-    fn apply_service_command_reapplying_the_same_service_with_more_replicas_does_not_conflict_with_itself() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+    fn apply_service_command_rejects_a_name_already_used_by_an_unmanaged_jail() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
+
+        let (rec_tx, rec_rx) = mpsc::channel();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
+        rec_rx.recv().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                1,
+                template(),
+                8080,
+                tx,
+            ))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Err(ApplyServiceError::NameConflict {
+                name: "web-0".to_string(),
+                owner: Owner::Unmanaged
+            })
+        );
+    }
+
+    #[test]
+    fn apply_service_command_reapplying_the_same_service_with_more_replicas_does_not_conflict_with_itself(
+    ) {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (tx1, rx1) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 1, template(), 8080, tx1)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                1,
+                template(),
+                8080,
+                tx1,
+            ))
+            .unwrap();
         rx1.recv().unwrap().unwrap();
 
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
 
         let (tx2, rx2) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 3, template(), 8080, tx2)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                3,
+                template(),
+                8080,
+                tx2,
+            ))
+            .unwrap();
         assert_eq!(rx2.recv().unwrap(), Ok(()));
     }
 
     #[test]
     fn owner_of_command_on_an_unplaced_name_is_none() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::OwnerOf("web-0".to_string(), tx)).unwrap();
+        commands
+            .send(Command::OwnerOf("web-0".to_string(), tx))
+            .unwrap();
         assert_eq!(rx.recv().unwrap(), None);
     }
 
     #[test]
     fn owner_of_command_on_a_service_replica_names_that_service() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
 
         let (apply_tx, apply_rx) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 1, template(), 8080, apply_tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                1,
+                template(),
+                8080,
+                apply_tx,
+            ))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::OwnerOf("web-0".to_string(), tx)).unwrap();
+        commands
+            .send(Command::OwnerOf("web-0".to_string(), tx))
+            .unwrap();
         assert_eq!(rx.recv().unwrap(), Some(Owner::Service("web".to_string())));
     }
 
     fn apply_service(commands: &Sender<Command>, name: &str, replicas: u32) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ApplyService(name.to_string(), replicas, template(), 8080, tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                name.to_string(),
+                replicas,
+                template(),
+                8080,
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap().unwrap();
     }
 
     fn stateful_template() -> JailTemplate {
         let mut t = template();
-        t.volumes = vec![VolumeMount { name: "data".to_string(), mount_path: "/data".to_string(), size: "1G".to_string() }];
+        t.volumes = vec![VolumeMount {
+            name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            size: "1G".to_string(),
+        }];
         t
     }
 
-    fn apply_service_with_template(commands: &Sender<Command>, name: &str, replicas: u32, template: JailTemplate) {
+    fn apply_service_with_template(
+        commands: &Sender<Command>,
+        name: &str,
+        replicas: u32,
+        template: JailTemplate,
+    ) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::ApplyService(name.to_string(), replicas, template, 8080, tx)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                name.to_string(),
+                replicas,
+                template,
+                8080,
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap().unwrap();
     }
 
     fn record_placement(commands: &Sender<Command>, jail_name: &str, node_id: &str) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement(jail_name.to_string(), node_id.to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                jail_name.to_string(),
+                node_id.to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
     }
 
@@ -1060,14 +1642,30 @@ mod tests {
         rx.recv().unwrap()
     }
 
-    fn heartbeat_with_jails(commands: &Sender<Command>, id: &str, jails: Vec<crate::wire::JailHealth>) {
+    fn heartbeat_with_jails(
+        commands: &Sender<Command>,
+        id: &str,
+        jails: Vec<crate::wire::JailHealth>,
+    ) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::Heartbeat(id.to_string(), 0.0, 0, jails, vec![], tx)).unwrap();
+        commands
+            .send(Command::Heartbeat(
+                id.to_string(),
+                0.0,
+                0,
+                jails,
+                vec![],
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap().unwrap();
     }
 
     fn running(name: &str) -> crate::wire::JailHealth {
-        crate::wire::JailHealth { name: name.to_string(), running: true }
+        crate::wire::JailHealth {
+            name: name.to_string(),
+            running: true,
+        }
     }
 
     #[test]
@@ -1106,8 +1704,10 @@ mod tests {
 
         // "The restart": a fresh spawn() loading from the same state_dir,
         // with no explicit re-apply/re-record of anything.
-        let placements: Placements = crate::store::load_or_default(&state_dir.join("placements.yaml"));
-        let used_addresses: UsedAddresses = crate::store::load_or_default(&state_dir.join("used_addresses.yaml"));
+        let placements: Placements =
+            crate::store::load_or_default(&state_dir.join("placements.yaml"));
+        let used_addresses: UsedAddresses =
+            crate::store::load_or_default(&state_dir.join("used_addresses.yaml"));
         let services = Services::load(&state_dir, test_service_cidr());
         let restarted_commands = spawn(
             Registry::new(test_cluster_cidr()),
@@ -1119,7 +1719,13 @@ mod tests {
             state_dir,
         )
         .1;
-        register_node(&restarted_commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(
+            &restarted_commands,
+            "node-1",
+            "10.0.0.1",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
         heartbeat_with_jails(&restarted_commands, "node-1", vec![running("web-0")]);
 
         assert_eq!(
@@ -1146,72 +1752,157 @@ mod tests {
             register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
 
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordStandby("db-0".to_string(), "node-2".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordStandby(
+                    "db-0".to_string(),
+                    "node-2".to_string(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
 
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPendingFence("db-1".to_string(), "node-3".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordPendingFence(
+                    "db-1".to_string(),
+                    "node-3".to_string(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
 
             // A second, separately-recorded fence, so its *absence* after
             // restart is provably due to RemovePendingFence, not just never
             // having been recorded in the first place.
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPendingFence("db-2".to_string(), "node-4".to_string(), tx)).unwrap();
-            rx.recv().unwrap();
-            let (tx, rx) = mpsc::channel();
-            commands.send(Command::RemovePendingFence("db-2".to_string(), tx)).unwrap();
-            rx.recv().unwrap();
-
-            let (tx, rx) = mpsc::channel();
             commands
-                .send(Command::RecordReplicaAddress("db-3".to_string(), "node-1".to_string(), "10.0.60.5".parse().unwrap(), tx))
+                .send(Command::RecordPendingFence(
+                    "db-2".to_string(),
+                    "node-4".to_string(),
+                    tx,
+                ))
                 .unwrap();
             rx.recv().unwrap();
             let (tx, rx) = mpsc::channel();
             commands
-                .send(Command::RecordReplicaAddress("db-4".to_string(), "node-1".to_string(), "10.0.60.6".parse().unwrap(), tx))
+                .send(Command::RemovePendingFence("db-2".to_string(), tx))
                 .unwrap();
-            rx.recv().unwrap();
-            let (tx, rx) = mpsc::channel();
-            commands.send(Command::ReleaseReplicaAddress("db-4".to_string(), tx)).unwrap();
             rx.recv().unwrap();
 
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPlacement("db-5".to_string(), "node-1".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordReplicaAddress(
+                    "db-3".to_string(),
+                    "node-1".to_string(),
+                    "10.0.60.5".parse().unwrap(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPlacement("db-6".to_string(), "node-1".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordReplicaAddress(
+                    "db-4".to_string(),
+                    "node-1".to_string(),
+                    "10.0.60.6".parse().unwrap(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RemovePlacement("db-6".to_string(), tx)).unwrap();
+            commands
+                .send(Command::ReleaseReplicaAddress("db-4".to_string(), tx))
+                .unwrap();
+            rx.recv().unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            commands
+                .send(Command::RecordPlacement(
+                    "db-5".to_string(),
+                    "node-1".to_string(),
+                    tx,
+                ))
+                .unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands
+                .send(Command::RecordPlacement(
+                    "db-6".to_string(),
+                    "node-1".to_string(),
+                    tx,
+                ))
+                .unwrap();
+            rx.recv().unwrap();
+            let (tx, rx) = mpsc::channel();
+            commands
+                .send(Command::RemovePlacement("db-6".to_string(), tx))
+                .unwrap();
             rx.recv().unwrap();
 
             apply_service(&commands, "web", 1);
             apply_service(&commands, "api", 1);
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::DeleteService("api".to_string(), tx)).unwrap();
+            commands
+                .send(Command::DeleteService("api".to_string(), tx))
+                .unwrap();
             rx.recv().unwrap().unwrap();
         }
 
         let standbys: Standbys = crate::store::load_or_default(&state_dir.join("standbys.yaml"));
-        assert_eq!(standbys.get("db-0"), Some("node-2"), "RecordStandby must survive a restart");
+        assert_eq!(
+            standbys.get("db-0"),
+            Some("node-2"),
+            "RecordStandby must survive a restart"
+        );
 
-        let pending_fences: PendingFences = crate::store::load_or_default(&state_dir.join("pending_fences.yaml"));
-        assert_eq!(pending_fences.for_node("node-3"), vec!["db-1".to_string()], "RecordPendingFence must survive a restart");
-        assert_eq!(pending_fences.for_node("node-4"), Vec::<String>::new(), "RemovePendingFence must survive a restart");
+        let pending_fences: PendingFences =
+            crate::store::load_or_default(&state_dir.join("pending_fences.yaml"));
+        assert_eq!(
+            pending_fences.for_node("node-3"),
+            vec!["db-1".to_string()],
+            "RecordPendingFence must survive a restart"
+        );
+        assert_eq!(
+            pending_fences.for_node("node-4"),
+            Vec::<String>::new(),
+            "RemovePendingFence must survive a restart"
+        );
 
-        let used_addresses: UsedAddresses = crate::store::load_or_default(&state_dir.join("used_addresses.yaml"));
-        assert_eq!(used_addresses.address_of("db-3"), Some("10.0.60.5".parse().unwrap()), "RecordReplicaAddress must survive a restart");
-        assert_eq!(used_addresses.address_of("db-4"), None, "ReleaseReplicaAddress must survive a restart");
+        let used_addresses: UsedAddresses =
+            crate::store::load_or_default(&state_dir.join("used_addresses.yaml"));
+        assert_eq!(
+            used_addresses.address_of("db-3"),
+            Some("10.0.60.5".parse().unwrap()),
+            "RecordReplicaAddress must survive a restart"
+        );
+        assert_eq!(
+            used_addresses.address_of("db-4"),
+            None,
+            "ReleaseReplicaAddress must survive a restart"
+        );
 
-        let placements: Placements = crate::store::load_or_default(&state_dir.join("placements.yaml"));
-        assert_eq!(placements.get("db-5"), Some("node-1"), "RecordPlacement must survive a restart");
-        assert_eq!(placements.get("db-6"), None, "RemovePlacement must survive a restart");
+        let placements: Placements =
+            crate::store::load_or_default(&state_dir.join("placements.yaml"));
+        assert_eq!(
+            placements.get("db-5"),
+            Some("node-1"),
+            "RecordPlacement must survive a restart"
+        );
+        assert_eq!(
+            placements.get("db-6"),
+            None,
+            "RemovePlacement must survive a restart"
+        );
 
         let services = Services::load(&state_dir, test_service_cidr());
-        assert!(services.get("web").is_some(), "ApplyService must survive a restart");
-        assert!(services.get("api").is_none(), "DeleteService must survive a restart");
+        assert!(
+            services.get("web").is_some(),
+            "ApplyService must survive a restart"
+        );
+        assert!(
+            services.get("api").is_none(),
+            "DeleteService must survive a restart"
+        );
     }
 
     #[test]
@@ -1226,7 +1917,16 @@ mod tests {
         // still completely idle. With tracking, node-1's just-spent
         // headroom is visible immediately, and svc-b correctly lands on
         // node-2 instead.
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
 
@@ -1244,10 +1944,16 @@ mod tests {
             actions
                 .iter()
                 .find_map(|a| match a {
-                    ReplicaAction::Schedule { replica_name: r, node_id, .. } if r == replica_name => Some(node_id.clone()),
+                    ReplicaAction::Schedule {
+                        replica_name: r,
+                        node_id,
+                        ..
+                    } if r == replica_name => Some(node_id.clone()),
                     _ => None,
                 })
-                .unwrap_or_else(|| panic!("no Schedule action found for {replica_name}, got: {actions:?}"))
+                .unwrap_or_else(|| {
+                    panic!("no Schedule action found for {replica_name}, got: {actions:?}")
+                })
         };
         let svc_a_node = node_for("svc-a-0");
         let svc_b_node = node_for("svc-b-0");
@@ -1259,7 +1965,16 @@ mod tests {
 
     #[test]
     fn reconcile_services_schedules_every_replica_of_a_brand_new_service_across_distinct_nodes() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 2);
@@ -1273,22 +1988,45 @@ mod tests {
                 ReplicaAction::TearDown { .. } => panic!("expected only Schedule actions"),
             })
             .collect();
-        assert_eq!(node_ids.len(), 2, "expected the two replicas spread across two distinct nodes, got: {actions:?}");
+        assert_eq!(
+            node_ids.len(),
+            2,
+            "expected the two replicas spread across two distinct nodes, got: {actions:?}"
+        );
     }
 
     #[test]
     fn reconcile_services_is_idempotent_once_replicas_are_recorded_placed_and_reported_healthy() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 1);
         reconcile(&commands); // computed, but not yet "recorded" as actually placed
 
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
         heartbeat_with_jails(&commands, "node-1", vec![running("web-0")]);
 
-        assert_eq!(reconcile(&commands), vec![], "a fully healthy, fully-placed service needs no further actions");
+        assert_eq!(
+            reconcile(&commands),
+            vec![],
+            "a fully healthy, fully-placed service needs no further actions"
+        );
     }
 
     #[test]
@@ -1298,13 +2036,35 @@ mod tests {
         // already retrying it locally via its Milestone-4 crash-loop
         // backoff. Rescheduling on top of that would fight the local
         // backoff and orphan the original, untracked, on its old node.
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 1);
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
-        heartbeat_with_jails(&commands, "node-1", vec![crate::wire::JailHealth { name: "web-0".to_string(), running: false }]);
+        heartbeat_with_jails(
+            &commands,
+            "node-1",
+            vec![crate::wire::JailHealth {
+                name: "web-0".to_string(),
+                running: false,
+            }],
+        );
 
         assert_eq!(
             reconcile(&commands),
@@ -1320,11 +2080,26 @@ mod tests {
         // genuinely Dead node, so this exercises the same "node itself is
         // unreachable, local backoff can't help" path without needing to
         // wait out the real Dead-node heartbeat timeout in a test.
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 1);
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-unreachable".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-unreachable".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
 
         let actions = reconcile(&commands);
@@ -1341,7 +2116,16 @@ mod tests {
         // test above: registry.resolve() fails for it exactly like a
         // genuinely Dead node, without waiting out the real heartbeat
         // timeout.
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service_with_template(&commands, "db", 1, stateful_template());
         record_placement(&commands, "db-0", "node-unreachable");
@@ -1354,8 +2138,18 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_services_stateful_scale_down_skips_a_dead_pinned_replica_until_its_node_is_alive_again() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+    fn reconcile_services_stateful_scale_down_skips_a_dead_pinned_replica_until_its_node_is_alive_again(
+    ) {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service_with_template(&commands, "db", 2, stateful_template());
         record_placement(&commands, "db-0", "node-1");
@@ -1369,7 +2163,13 @@ mod tests {
             "scale-down of a stateful replica pinned to an unreachable node must be skipped this tick, not errored"
         );
 
-        register_node(&commands, "node-unreachable", "10.0.0.9", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(
+            &commands,
+            "node-unreachable",
+            "10.0.0.9",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
         let actions = reconcile(&commands);
         assert_eq!(actions.len(), 1);
         assert!(
@@ -1380,7 +2180,16 @@ mod tests {
 
     #[test]
     fn reconcile_services_schedules_a_brand_new_stateful_service_across_distinct_nodes() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service_with_template(&commands, "db", 2, stateful_template());
@@ -1394,31 +2203,67 @@ mod tests {
                 ReplicaAction::TearDown { .. } => panic!("expected only Schedule actions"),
             })
             .collect();
-        assert_eq!(node_ids.len(), 2, "expected the two replicas spread across two distinct nodes, got: {actions:?}");
+        assert_eq!(
+            node_ids.len(),
+            2,
+            "expected the two replicas spread across two distinct nodes, got: {actions:?}"
+        );
     }
 
     #[test]
     fn reconcile_services_tears_down_from_the_highest_index_on_scale_down() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 3);
         for i in 0..3 {
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPlacement(format!("web-{i}"), "node-1".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordPlacement(
+                    format!("web-{i}"),
+                    "node-1".to_string(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
         }
-        heartbeat_with_jails(&commands, "node-1", vec![running("web-0"), running("web-1"), running("web-2")]);
+        heartbeat_with_jails(
+            &commands,
+            "node-1",
+            vec![running("web-0"), running("web-1"), running("web-2")],
+        );
 
         apply_service(&commands, "web", 1); // scale down to 1
         let actions = reconcile(&commands);
         assert_eq!(actions.len(), 2);
-        assert!(matches!(&actions[0], ReplicaAction::TearDown { replica_name, .. } if replica_name == "web-2"));
-        assert!(matches!(&actions[1], ReplicaAction::TearDown { replica_name, .. } if replica_name == "web-1"));
+        assert!(
+            matches!(&actions[0], ReplicaAction::TearDown { replica_name, .. } if replica_name == "web-2")
+        );
+        assert!(
+            matches!(&actions[1], ReplicaAction::TearDown { replica_name, .. } if replica_name == "web-1")
+        );
     }
 
     #[test]
     fn reconcile_services_never_double_assigns_an_address_within_one_pass() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 2); // only one alive node: both replicas land on it
 
@@ -1430,44 +2275,110 @@ mod tests {
                 ReplicaAction::TearDown { .. } => panic!("expected only Schedule actions"),
             })
             .collect();
-        assert_eq!(addresses.len(), 2, "expected two distinct addresses, got: {actions:?}");
+        assert_eq!(
+            addresses.len(),
+            2,
+            "expected two distinct addresses, got: {actions:?}"
+        );
     }
 
     #[test]
     fn discover_service_on_an_unknown_service_returns_unknown_service() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::DiscoverService("missing".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Err(services::UnknownService("missing".to_string())));
+        commands
+            .send(Command::DiscoverService("missing".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Err(services::UnknownService("missing".to_string()))
+        );
     }
 
     #[test]
     fn discover_service_omits_a_replica_that_is_not_reported_running() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 2);
         for i in 0..2 {
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPlacement(format!("web-{i}"), "node-1".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordPlacement(
+                    format!("web-{i}"),
+                    "node-1".to_string(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
             let (atx, arx) = mpsc::channel();
             commands
-                .send(Command::RecordReplicaAddress(format!("web-{i}"), "node-1".to_string(), format!("10.0.131.{}", 2 + i).parse().unwrap(), atx))
+                .send(Command::RecordReplicaAddress(
+                    format!("web-{i}"),
+                    "node-1".to_string(),
+                    format!("10.0.131.{}", 2 + i).parse().unwrap(),
+                    atx,
+                ))
                 .unwrap();
             arx.recv().unwrap();
         }
         // web-0 running, web-1 crash-looping.
-        heartbeat_with_jails(&commands, "node-1", vec![running("web-0"), crate::wire::JailHealth { name: "web-1".to_string(), running: false }]);
+        heartbeat_with_jails(
+            &commands,
+            "node-1",
+            vec![
+                running("web-0"),
+                crate::wire::JailHealth {
+                    name: "web-1".to_string(),
+                    running: false,
+                },
+            ],
+        );
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::DiscoverService("web".to_string(), tx)).unwrap();
+        commands
+            .send(Command::DiscoverService("web".to_string(), tx))
+            .unwrap();
         let replicas = rx.recv().unwrap().unwrap();
-        assert_eq!(replicas, vec![crate::wire::ServiceReplica { name: "web-0".to_string(), node: "node-1".to_string(), address: "10.0.131.2".to_string() }]);
+        assert_eq!(
+            replicas,
+            vec![crate::wire::ServiceReplica {
+                name: "web-0".to_string(),
+                node: "node-1".to_string(),
+                address: "10.0.131.2".to_string()
+            }]
+        );
     }
 
     #[test]
     fn list_services_returns_every_service_sorted_by_name() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         apply_service(&commands, "web", 3);
         apply_service(&commands, "api", 1);
 
@@ -1479,13 +2390,15 @@ mod tests {
                 crate::wire::ServiceSummary {
                     name: "api".to_string(),
                     desired_replicas: 1,
-                    vip: crate::subnet::derive_service_vip("api", &test_service_cidr(), 0).to_string(),
+                    vip: crate::subnet::derive_service_vip("api", &test_service_cidr(), 0)
+                        .to_string(),
                     port: 8080,
                 },
                 crate::wire::ServiceSummary {
                     name: "web".to_string(),
                     desired_replicas: 3,
-                    vip: crate::subnet::derive_service_vip("web", &test_service_cidr(), 0).to_string(),
+                    vip: crate::subnet::derive_service_vip("web", &test_service_cidr(), 0)
+                        .to_string(),
                     port: 8080,
                 },
             ]
@@ -1494,25 +2407,56 @@ mod tests {
 
     #[test]
     fn delete_service_on_an_unknown_name_returns_unknown_service() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::DeleteService("missing".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Err(services::UnknownService("missing".to_string())));
+        commands
+            .send(Command::DeleteService("missing".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Err(services::UnknownService("missing".to_string()))
+        );
     }
 
     #[test]
     fn delete_service_returns_a_teardown_action_per_current_placement_and_forgets_the_service() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 2);
         for i in 0..2 {
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RecordPlacement(format!("web-{i}"), "node-1".to_string(), tx)).unwrap();
+            commands
+                .send(Command::RecordPlacement(
+                    format!("web-{i}"),
+                    "node-1".to_string(),
+                    tx,
+                ))
+                .unwrap();
             rx.recv().unwrap();
         }
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::DeleteService("web".to_string(), tx)).unwrap();
+        commands
+            .send(Command::DeleteService("web".to_string(), tx))
+            .unwrap();
         let actions = rx.recv().unwrap().unwrap();
         assert_eq!(actions.len(), 2);
 
@@ -1524,7 +2468,9 @@ mod tests {
         // free again, since nothing at this layer does it automatically.
         for i in 0..2 {
             let (tx, rx) = mpsc::channel();
-            commands.send(Command::RemovePlacement(format!("web-{i}"), tx)).unwrap();
+            commands
+                .send(Command::RemovePlacement(format!("web-{i}"), tx))
+                .unwrap();
             rx.recv().unwrap();
         }
 
@@ -1534,28 +2480,58 @@ mod tests {
         let mut different = template();
         different.image = "base/different-image".to_string();
         let (tx2, rx2) = mpsc::channel();
-        commands.send(Command::ApplyService("web".to_string(), 1, different, 8080, tx2)).unwrap();
+        commands
+            .send(Command::ApplyService(
+                "web".to_string(),
+                1,
+                different,
+                8080,
+                tx2,
+            ))
+            .unwrap();
         assert_eq!(rx2.recv().unwrap(), Ok(()));
     }
 
     #[test]
     fn record_then_release_replica_address_round_trips() {
-        let commands = spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), fresh_state_dir()).1;
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
         let (tx, rx) = mpsc::channel();
         commands
-            .send(Command::RecordReplicaAddress("web-0".to_string(), "node-1".to_string(), "10.0.60.2".parse().unwrap(), tx))
+            .send(Command::RecordReplicaAddress(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                "10.0.60.2".parse().unwrap(),
+                tx,
+            ))
             .unwrap();
         rx.recv().unwrap();
 
         register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
         apply_service(&commands, "web", 1);
         let (rec_tx, rec_rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement("web-0".to_string(), "node-1".to_string(), rec_tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
         rec_rx.recv().unwrap();
         heartbeat_with_jails(&commands, "node-1", vec![running("web-0")]);
 
         let (dtx, drx) = mpsc::channel();
-        commands.send(Command::DiscoverService("web".to_string(), dtx)).unwrap();
+        commands
+            .send(Command::DiscoverService("web".to_string(), dtx))
+            .unwrap();
         assert_eq!(drx.recv().unwrap().unwrap()[0].address, "10.0.60.2");
 
         // A real teardown always pairs ReleaseReplicaAddress with
@@ -1565,15 +2541,25 @@ mod tests {
         // which can't actually happen against a healthy, still-placed
         // replica in the deployed system.
         let (rtx, rrx) = mpsc::channel();
-        commands.send(Command::ReleaseReplicaAddress("web-0".to_string(), rtx)).unwrap();
+        commands
+            .send(Command::ReleaseReplicaAddress("web-0".to_string(), rtx))
+            .unwrap();
         rrx.recv().unwrap();
         let (rp_tx, rp_rx) = mpsc::channel();
-        commands.send(Command::RemovePlacement("web-0".to_string(), rp_tx)).unwrap();
+        commands
+            .send(Command::RemovePlacement("web-0".to_string(), rp_tx))
+            .unwrap();
         rp_rx.recv().unwrap();
 
         let (dtx2, drx2) = mpsc::channel();
-        commands.send(Command::DiscoverService("web".to_string(), dtx2)).unwrap();
-        assert_eq!(drx2.recv().unwrap().unwrap(), vec![], "a fully torn-down replica is no longer discoverable");
+        commands
+            .send(Command::DiscoverService("web".to_string(), dtx2))
+            .unwrap();
+        assert_eq!(
+            drx2.recv().unwrap().unwrap(),
+            vec![],
+            "a fully torn-down replica is no longer discoverable"
+        );
     }
 
     #[test]
@@ -1588,17 +2574,45 @@ mod tests {
             fresh_state_dir(),
         )
         .1;
-        register_node_with_replicate_addr(&commands, "node-1", "10.0.0.1", "10.0.0.1:7622", 4.0, 8 * 1024 * 1024 * 1024);
-        register_node_with_replicate_addr(&commands, "node-2", "10.0.0.2", "10.0.0.2:7622", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node_with_replicate_addr(
+            &commands,
+            "node-1",
+            "10.0.0.1",
+            "10.0.0.1:7622",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
+        register_node_with_replicate_addr(
+            &commands,
+            "node-2",
+            "10.0.0.2",
+            "10.0.0.2:7622",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
         apply_service_with_template(&commands, "db", 1, stateful_template());
 
         let actions = reconcile(&commands);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            ReplicaAction::Schedule { node_id, standby_node_id, standby_addr, .. } => {
-                let standby = standby_node_id.as_ref().expect("expected a standby to be picked for a stateful replica");
-                assert_ne!(standby, node_id, "standby must be a different node than the primary");
-                assert_eq!(*standby_addr, Some("10.0.0.2:7622".to_string()), "expected the standby's advertised replicate_addr, not its HTTP addr");
+            ReplicaAction::Schedule {
+                node_id,
+                standby_node_id,
+                standby_addr,
+                ..
+            } => {
+                let standby = standby_node_id
+                    .as_ref()
+                    .expect("expected a standby to be picked for a stateful replica");
+                assert_ne!(
+                    standby, node_id,
+                    "standby must be a different node than the primary"
+                );
+                assert_eq!(
+                    *standby_addr,
+                    Some("10.0.0.2:7622".to_string()),
+                    "expected the standby's advertised replicate_addr, not its HTTP addr"
+                );
             }
             other => panic!("expected a Schedule action, got: {other:?}"),
         }
@@ -1622,7 +2636,11 @@ mod tests {
 
         let actions = reconcile(&commands);
         match &actions[0] {
-            ReplicaAction::Schedule { standby_node_id, standby_addr, .. } => {
+            ReplicaAction::Schedule {
+                standby_node_id,
+                standby_addr,
+                ..
+            } => {
                 assert_eq!(*standby_node_id, None);
                 assert_eq!(*standby_addr, None);
             }
@@ -1631,7 +2649,8 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_services_leaves_a_stateful_replica_without_a_standby_when_only_one_node_is_alive() {
+    fn reconcile_services_leaves_a_stateful_replica_without_a_standby_when_only_one_node_is_alive()
+    {
         let commands = spawn(
             Registry::new(test_cluster_cidr()),
             Placements::new(),
@@ -1647,17 +2666,29 @@ mod tests {
 
         let actions = reconcile(&commands);
         match &actions[0] {
-            ReplicaAction::Schedule { standby_node_id, standby_addr, .. } => {
-                assert_eq!(*standby_node_id, None, "no second node exists to serve as a standby");
+            ReplicaAction::Schedule {
+                standby_node_id,
+                standby_addr,
+                ..
+            } => {
+                assert_eq!(
+                    *standby_node_id, None,
+                    "no second node exists to serve as a standby"
+                );
                 assert_eq!(*standby_addr, None);
             }
             other => panic!("expected a Schedule action, got: {other:?}"),
         }
     }
 
-    fn prepare_force_repin(commands: &Sender<Command>, replica_name: &str) -> Result<ForceRepinPrep, ForceRepinError> {
+    fn prepare_force_repin(
+        commands: &Sender<Command>,
+        replica_name: &str,
+    ) -> Result<ForceRepinPrep, ForceRepinError> {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::PrepareForceRepin(replica_name.to_string(), tx)).unwrap();
+        commands
+            .send(Command::PrepareForceRepin(replica_name.to_string(), tx))
+            .unwrap();
         rx.recv().unwrap()
     }
 
@@ -1673,7 +2704,10 @@ mod tests {
             fresh_state_dir(),
         )
         .1;
-        assert_eq!(prepare_force_repin(&commands, "db-0"), Err(ForceRepinError::NotPlaced("db-0".to_string())));
+        assert_eq!(
+            prepare_force_repin(&commands, "db-0"),
+            Err(ForceRepinError::NotPlaced("db-0".to_string()))
+        );
     }
 
     #[test]
@@ -1692,7 +2726,10 @@ mod tests {
         apply_service(&commands, "web", 1);
         record_placement(&commands, "web-0", "node-1");
 
-        assert_eq!(prepare_force_repin(&commands, "web-0"), Err(ForceRepinError::NotStateful("web-0".to_string())));
+        assert_eq!(
+            prepare_force_repin(&commands, "web-0"),
+            Err(ForceRepinError::NotStateful("web-0".to_string()))
+        );
     }
 
     #[test]
@@ -1712,10 +2749,19 @@ mod tests {
         apply_service_with_template(&commands, "db", 1, stateful_template());
         record_placement(&commands, "db-0", "node-1");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-2".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
-        assert_eq!(prepare_force_repin(&commands, "db-0"), Err(ForceRepinError::PrimaryStillAlive("node-1".to_string())));
+        assert_eq!(
+            prepare_force_repin(&commands, "db-0"),
+            Err(ForceRepinError::PrimaryStillAlive("node-1".to_string()))
+        );
     }
 
     #[test]
@@ -1735,14 +2781,27 @@ mod tests {
         // fresh-standby pick deliberately reads registry.replicate_addr(),
         // not resolve() (Task 8b's distinction), which is None unless a node
         // has explicitly registered one.
-        register_node_with_replicate_addr(&commands, "node-3", "10.0.0.3", "10.0.0.3", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node_with_replicate_addr(
+            &commands,
+            "node-3",
+            "10.0.0.3",
+            "10.0.0.3",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
         apply_service_with_template(&commands, "db", 1, stateful_template());
         // db-0's primary ("node-unreachable") is never registered, so
         // registry.resolve() fails for it exactly like a genuinely Dead
         // node -- the same trick this file's existing pinning tests use.
         record_placement(&commands, "db-0", "node-unreachable");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-2".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         let prep = prepare_force_repin(&commands, "db-0").unwrap();
@@ -1770,9 +2829,18 @@ mod tests {
         apply_service_with_template(&commands, "db", 1, stateful_template());
         record_placement(&commands, "db-0", "node-unreachable");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-2".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
-        assert_eq!(prepare_force_repin(&commands, "db-0"), Err(ForceRepinError::NoFreshStandby));
+        assert_eq!(
+            prepare_force_repin(&commands, "db-0"),
+            Err(ForceRepinError::NoFreshStandby)
+        );
     }
 }

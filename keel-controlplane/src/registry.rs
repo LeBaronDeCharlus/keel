@@ -48,7 +48,10 @@ pub struct PodCidrCollision {
 
 impl Registry {
     pub fn new(cluster_cidr: Ipv4Net) -> Self {
-        Self { cluster_cidr, nodes: HashMap::new() }
+        Self {
+            cluster_cidr,
+            nodes: HashMap::new(),
+        }
     }
 
     pub fn register(
@@ -61,9 +64,9 @@ impl Registry {
         now: Instant,
     ) -> Result<Ipv4Net, PodCidrCollision> {
         let pod_cidr = derive_pod_cidr(&id, &self.cluster_cidr);
-        if let Some((conflicting_id, _)) =
-            self.nodes.iter().find(|(other_id, record)| other_id.as_str() != id.as_str() && record.pod_cidr == pod_cidr)
-        {
+        if let Some((conflicting_id, _)) = self.nodes.iter().find(|(other_id, record)| {
+            other_id.as_str() != id.as_str() && record.pod_cidr == pod_cidr
+        }) {
             return Err(PodCidrCollision {
                 node_id: id,
                 derived: pod_cidr.to_string(),
@@ -75,10 +78,14 @@ impl Registry {
         // this node is already running back to "100% free, nothing
         // running" -- that view is only ever corrected by this node's own
         // next heartbeat, which arrives moments later anyway.
-        let (committed_cpu, committed_memory, running_jails, ingresses) = match self.nodes.get(&id) {
-            Some(existing) => {
-                (existing.committed_cpu, existing.committed_memory, existing.running_jails.clone(), existing.ingresses.clone())
-            }
+        let (committed_cpu, committed_memory, running_jails, ingresses) = match self.nodes.get(&id)
+        {
+            Some(existing) => (
+                existing.committed_cpu,
+                existing.committed_memory,
+                existing.running_jails.clone(),
+                existing.ingresses.clone(),
+            ),
             None => (0.0, 0, HashMap::new(), Vec::new()),
         };
         self.nodes.insert(
@@ -125,7 +132,11 @@ impl Registry {
     /// running. `false` for an unknown node, an unknown jail, or a node
     /// that has never heartbeated with jail health at all.
     pub fn is_jail_running(&self, node_id: &str, jail_name: &str) -> bool {
-        self.nodes.get(node_id).and_then(|r| r.running_jails.get(jail_name)).copied().unwrap_or(false)
+        self.nodes
+            .get(node_id)
+            .and_then(|r| r.running_jails.get(jail_name))
+            .copied()
+            .unwrap_or(false)
     }
 
     /// The node's assigned `pod_cidr`, typed -- for consumers (address
@@ -139,7 +150,9 @@ impl Registry {
     /// distinct from its main HTTP `addr` -- `None` until the node has
     /// registered with a `replicate_addr` at least once.
     pub fn replicate_addr(&self, node_id: &str) -> Option<String> {
-        self.nodes.get(node_id).and_then(|r| r.replicate_addr.clone())
+        self.nodes
+            .get(node_id)
+            .and_then(|r| r.replicate_addr.clone())
     }
 
     /// The node's last-registered address, with no aliveness check --
@@ -162,7 +175,11 @@ impl Registry {
                     id: id.clone(),
                     addr: record.addr.clone(),
                     pod_cidr: record.pod_cidr.to_string(),
-                    status: if elapsed < DEAD_THRESHOLD { NodeState::Alive } else { NodeState::Dead },
+                    status: if elapsed < DEAD_THRESHOLD {
+                        NodeState::Alive
+                    } else {
+                        NodeState::Dead
+                    },
                     last_seen_secs: elapsed.as_secs(),
                     capacity_cpu: record.capacity_cpu,
                     capacity_memory: record.capacity_memory,
@@ -177,10 +194,16 @@ impl Registry {
     }
 
     pub fn resolve(&self, id: &str, now: Instant) -> Result<String, ResolveError> {
-        let record = self.nodes.get(id).ok_or_else(|| ResolveError::Unknown(id.to_string()))?;
+        let record = self
+            .nodes
+            .get(id)
+            .ok_or_else(|| ResolveError::Unknown(id.to_string()))?;
         let elapsed = now.saturating_duration_since(record.last_heartbeat);
         if elapsed >= DEAD_THRESHOLD {
-            return Err(ResolveError::Dead { id: id.to_string(), last_seen_secs: elapsed.as_secs() });
+            return Err(ResolveError::Dead {
+                id: id.to_string(),
+                last_seen_secs: elapsed.as_secs(),
+            });
         }
         Ok(record.addr.clone())
     }
@@ -202,7 +225,16 @@ mod tests {
     fn register_then_list_shows_the_node_as_alive() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "192.168.64.4".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "192.168.64.4".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
 
         let statuses = registry.list(now);
         assert_eq!(statuses.len(), 1);
@@ -215,7 +247,16 @@ mod tests {
     #[test]
     fn register_returns_the_derived_pod_cidr() {
         let mut registry = Registry::new(test_cluster_cidr());
-        let pod_cidr = registry.register("node-1".to_string(), "192.168.64.4".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, Instant::now()).unwrap();
+        let pod_cidr = registry
+            .register(
+                "node-1".to_string(),
+                "192.168.64.4".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                Instant::now(),
+            )
+            .unwrap();
         assert_eq!(pod_cidr, "10.0.131.0/24".parse::<Ipv4Net>().unwrap());
     }
 
@@ -223,7 +264,16 @@ mod tests {
     fn list_includes_pod_cidr_per_node() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "192.168.64.4".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "192.168.64.4".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
         assert_eq!(registry.list(now)[0].pod_cidr, "10.0.131.0/24");
     }
 
@@ -231,10 +281,26 @@ mod tests {
     fn a_colliding_registration_is_rejected_and_names_both_nodes() {
         let mut registry = Registry::new(small_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-4".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-4".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
 
         let err = registry
-            .register("node-8".to_string(), "10.0.0.2".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now)
+            .register(
+                "node-8".to_string(),
+                "10.0.0.2".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
             .unwrap_err();
         assert_eq!(err.node_id, "node-8");
         assert_eq!(err.conflicting_node_id, "node-4");
@@ -251,15 +317,40 @@ mod tests {
     fn reregistering_an_existing_id_refreshes_its_address_and_heartbeat() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        let first_pod_cidr = registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        let first_pod_cidr = registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         let t1 = t0 + Duration::from_secs(5);
-        let second_pod_cidr = registry.register("node-1".to_string(), "10.0.0.2".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t1).unwrap();
+        let second_pod_cidr = registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.2".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t1,
+            )
+            .unwrap();
 
-        assert_eq!(first_pod_cidr, second_pod_cidr, "re-registering the same node-id must derive the same pod_cidr");
+        assert_eq!(
+            first_pod_cidr, second_pod_cidr,
+            "re-registering the same node-id must derive the same pod_cidr"
+        );
 
         let statuses = registry.list(t1);
-        assert_eq!(statuses.len(), 1, "re-registering must not create a second entry");
+        assert_eq!(
+            statuses.len(),
+            1,
+            "re-registering must not create a second entry"
+        );
         assert_eq!(statuses[0].addr, "10.0.0.2");
         assert_eq!(statuses[0].last_seen_secs, 0);
     }
@@ -268,10 +359,21 @@ mod tests {
     fn heartbeat_on_a_known_node_updates_its_last_heartbeat() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         let t1 = t0 + Duration::from_secs(10);
-        registry.heartbeat("node-1", 0.0, 0, vec![], vec![], t1).unwrap();
+        registry
+            .heartbeat("node-1", 0.0, 0, vec![], vec![], t1)
+            .unwrap();
 
         let statuses = registry.list(t1);
         assert_eq!(statuses[0].last_seen_secs, 0);
@@ -280,7 +382,9 @@ mod tests {
     #[test]
     fn heartbeat_on_an_unknown_node_returns_unknown_node_error() {
         let mut registry = Registry::new(test_cluster_cidr());
-        let err = registry.heartbeat("missing", 0.0, 0, vec![], vec![], Instant::now()).unwrap_err();
+        let err = registry
+            .heartbeat("missing", 0.0, 0, vec![], vec![], Instant::now())
+            .unwrap_err();
         assert_eq!(err, UnknownNode("missing".to_string()));
         assert_eq!(err.to_string(), "unknown node 'missing'");
     }
@@ -289,7 +393,16 @@ mod tests {
     fn list_reports_dead_once_a_node_exceeds_the_dead_threshold() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         let just_under = t0 + Duration::from_secs(14);
         assert_eq!(registry.list(just_under)[0].status, NodeState::Alive);
@@ -302,11 +415,32 @@ mod tests {
     fn list_is_sorted_by_id() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-2".to_string(), "10.0.0.2".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-2".to_string(),
+                "10.0.0.2".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
 
         let statuses = registry.list(now);
-        assert_eq!(statuses.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["node-1", "node-2"]);
+        assert_eq!(
+            statuses.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["node-1", "node-2"]
+        );
     }
 
     #[test]
@@ -326,7 +460,16 @@ mod tests {
     fn resolve_on_an_alive_node_returns_its_address() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
         assert_eq!(registry.resolve("node-1", now), Ok("10.0.0.1".to_string()));
     }
 
@@ -334,18 +477,42 @@ mod tests {
     fn resolve_on_a_dead_node_returns_dead_error_with_elapsed_seconds() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         let at_threshold = t0 + DEAD_THRESHOLD;
         let err = registry.resolve("node-1", at_threshold).unwrap_err();
-        assert_eq!(err, ResolveError::Dead { id: "node-1".to_string(), last_seen_secs: DEAD_THRESHOLD.as_secs() });
+        assert_eq!(
+            err,
+            ResolveError::Dead {
+                id: "node-1".to_string(),
+                last_seen_secs: DEAD_THRESHOLD.as_secs()
+            }
+        );
     }
 
     #[test]
     fn register_initializes_committed_resources_to_zero() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
 
         let statuses = registry.list(now);
         assert_eq!(statuses[0].capacity_cpu, 4.0);
@@ -358,46 +525,111 @@ mod tests {
     fn re_registering_an_existing_node_preserves_its_committed_resources_and_running_jails() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         let t1 = t0 + Duration::from_secs(5);
         registry
-            .heartbeat("node-1", 2.0, 1024 * 1024 * 1024, vec![crate::wire::JailHealth { name: "web-0".to_string(), running: true }], vec![], t1)
+            .heartbeat(
+                "node-1",
+                2.0,
+                1024 * 1024 * 1024,
+                vec![crate::wire::JailHealth {
+                    name: "web-0".to_string(),
+                    running: true,
+                }],
+                vec![],
+                t1,
+            )
             .unwrap();
 
         // A routine agentd reconnect re-registers with the same id - this
         // must not reset the scheduler's view of this node back to
         // "100% free, nothing running" until the next real heartbeat.
         let t2 = t1 + Duration::from_secs(1);
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t2).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t2,
+            )
+            .unwrap();
 
         let statuses = registry.list(t2);
-        assert_eq!(statuses[0].committed_cpu, 2.0, "re-registration must not zero committed_cpu");
-        assert_eq!(statuses[0].committed_memory, 1024 * 1024 * 1024, "re-registration must not zero committed_memory");
-        assert!(registry.is_jail_running("node-1", "web-0"), "re-registration must not forget running jails");
+        assert_eq!(
+            statuses[0].committed_cpu, 2.0,
+            "re-registration must not zero committed_cpu"
+        );
+        assert_eq!(
+            statuses[0].committed_memory,
+            1024 * 1024 * 1024,
+            "re-registration must not zero committed_memory"
+        );
+        assert!(
+            registry.is_jail_running("node-1", "web-0"),
+            "re-registration must not forget running jails"
+        );
     }
 
     #[test]
     fn heartbeat_updates_committed_resources_without_changing_capacity() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         let t1 = t0 + Duration::from_secs(5);
-        registry.heartbeat("node-1", 2.0, 1024 * 1024 * 1024, vec![], vec![], t1).unwrap();
+        registry
+            .heartbeat("node-1", 2.0, 1024 * 1024 * 1024, vec![], vec![], t1)
+            .unwrap();
 
         let statuses = registry.list(t1);
         assert_eq!(statuses[0].committed_cpu, 2.0);
         assert_eq!(statuses[0].committed_memory, 1024 * 1024 * 1024);
-        assert_eq!(statuses[0].capacity_cpu, 4.0, "heartbeat must not change capacity");
-        assert_eq!(statuses[0].capacity_memory, 8 * 1024 * 1024 * 1024, "heartbeat must not change capacity");
+        assert_eq!(
+            statuses[0].capacity_cpu, 4.0,
+            "heartbeat must not change capacity"
+        );
+        assert_eq!(
+            statuses[0].capacity_memory,
+            8 * 1024 * 1024 * 1024,
+            "heartbeat must not change capacity"
+        );
     }
 
     #[test]
     fn heartbeat_records_per_jail_running_status() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
 
         registry
             .heartbeat(
@@ -405,8 +637,14 @@ mod tests {
                 0.0,
                 0,
                 vec![
-                    crate::wire::JailHealth { name: "web-0".to_string(), running: true },
-                    crate::wire::JailHealth { name: "web-1".to_string(), running: false },
+                    crate::wire::JailHealth {
+                        name: "web-0".to_string(),
+                        running: true,
+                    },
+                    crate::wire::JailHealth {
+                        name: "web-1".to_string(),
+                        running: false,
+                    },
                 ],
                 vec![],
                 now,
@@ -421,7 +659,16 @@ mod tests {
     fn heartbeat_records_ingress_health_and_list_reports_it() {
         let mut registry = Registry::new("10.0.0.0/16".parse().unwrap());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "192.168.64.4:7621".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "192.168.64.4:7621".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
         let ingress = crate::wire::IngressHealth {
             name: "blog".to_string(),
             host: "example.com".to_string(),
@@ -429,7 +676,16 @@ mod tests {
             backend_port: 8080,
             cert_expires_at_unix: Some(1_800_000_000),
         };
-        registry.heartbeat("node-1", 1.0, 512 * 1024 * 1024, vec![], vec![ingress.clone()], now).unwrap();
+        registry
+            .heartbeat(
+                "node-1",
+                1.0,
+                512 * 1024 * 1024,
+                vec![],
+                vec![ingress.clone()],
+                now,
+            )
+            .unwrap();
         let statuses = registry.list(now);
         assert_eq!(statuses[0].ingresses, vec![ingress]);
     }
@@ -438,7 +694,16 @@ mod tests {
     fn is_jail_running_on_an_unreported_jail_is_false() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
         assert!(!registry.is_jail_running("node-1", "web-0"));
     }
 
@@ -452,30 +717,59 @@ mod tests {
     fn a_later_heartbeat_replaces_the_previous_jail_health_report_wholesale() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
         registry
             .heartbeat(
                 "node-1",
                 0.0,
                 0,
-                vec![crate::wire::JailHealth { name: "web-0".to_string(), running: true }],
+                vec![crate::wire::JailHealth {
+                    name: "web-0".to_string(),
+                    running: true,
+                }],
                 vec![],
                 t0,
             )
             .unwrap();
 
         let t1 = t0 + Duration::from_secs(5);
-        registry.heartbeat("node-1", 0.0, 0, vec![], vec![], t1).unwrap();
+        registry
+            .heartbeat("node-1", 0.0, 0, vec![], vec![], t1)
+            .unwrap();
 
-        assert!(!registry.is_jail_running("node-1", "web-0"), "a heartbeat with no jails must clear the previous report");
+        assert!(
+            !registry.is_jail_running("node-1", "web-0"),
+            "a heartbeat with no jails must clear the previous report"
+        );
     }
 
     #[test]
     fn pod_cidr_returns_the_registered_nodes_block() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
-        assert_eq!(registry.pod_cidr("node-1"), Some("10.0.131.0/24".parse().unwrap()));
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            registry.pod_cidr("node-1"),
+            Some("10.0.131.0/24".parse().unwrap())
+        );
     }
 
     #[test]
@@ -489,16 +783,35 @@ mod tests {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
         registry
-            .register("node-1".to_string(), "10.0.0.1".to_string(), Some("10.0.0.1:7622".to_string()), 4.0, 8 * 1024 * 1024 * 1024, now)
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                Some("10.0.0.1:7622".to_string()),
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
             .unwrap();
-        assert_eq!(registry.replicate_addr("node-1"), Some("10.0.0.1:7622".to_string()));
+        assert_eq!(
+            registry.replicate_addr("node-1"),
+            Some("10.0.0.1:7622".to_string())
+        );
     }
 
     #[test]
     fn replicate_addr_is_none_for_a_node_that_never_advertised_one() {
         let mut registry = Registry::new(test_cluster_cidr());
         let now = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, now).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                now,
+            )
+            .unwrap();
         assert_eq!(registry.replicate_addr("node-1"), None);
     }
 
@@ -512,15 +825,30 @@ mod tests {
     fn last_known_addr_returns_the_registered_address_regardless_of_aliveness() {
         let mut registry = Registry::new(test_cluster_cidr());
         let t0 = Instant::now();
-        registry.register("node-1".to_string(), "10.0.0.1".to_string(), None, 4.0, 8 * 1024 * 1024 * 1024, t0).unwrap();
+        registry
+            .register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                t0,
+            )
+            .unwrap();
 
         // Confirm it reports Dead at this point (the whole reason
         // last_known_addr needs to bypass this check)...
         let past_threshold = t0 + DEAD_THRESHOLD;
-        assert!(matches!(registry.resolve("node-1", past_threshold), Err(ResolveError::Dead { .. })));
+        assert!(matches!(
+            registry.resolve("node-1", past_threshold),
+            Err(ResolveError::Dead { .. })
+        ));
 
         // ...yet the address is still returned.
-        assert_eq!(registry.last_known_addr("node-1"), Some("10.0.0.1".to_string()));
+        assert_eq!(
+            registry.last_known_addr("node-1"),
+            Some("10.0.0.1".to_string())
+        );
     }
 
     #[test]

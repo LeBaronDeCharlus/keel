@@ -47,7 +47,10 @@ pub fn load_client_config(
 /// Deliberately distinct from `keel_controlplane::tls::load_server_config`,
 /// which hardcodes a `WebPkiClientVerifier` for mTLS between cluster
 /// components and would reject every browser connection outright.
-pub fn load_browser_server_config(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerConfig, String> {
+pub fn load_browser_server_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<rustls::ServerConfig, String> {
     ensure_crypto_provider();
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
@@ -72,9 +75,17 @@ pub struct ReloadingBrowserTls {
 }
 
 impl ReloadingBrowserTls {
-    pub fn spawn(cert_path: PathBuf, key_path: PathBuf, reload_interval: Duration) -> Result<Arc<Self>, String> {
+    pub fn spawn(
+        cert_path: PathBuf,
+        key_path: PathBuf,
+        reload_interval: Duration,
+    ) -> Result<Arc<Self>, String> {
         let server = load_browser_server_config(&cert_path, &key_path)?;
-        let this = Arc::new(Self { cert_path, key_path, server: RwLock::new(Arc::new(server)) });
+        let this = Arc::new(Self {
+            cert_path,
+            key_path,
+            server: RwLock::new(Arc::new(server)),
+        });
         let reload_target = Arc::clone(&this);
         thread::spawn(move || loop {
             thread::sleep(reload_interval);
@@ -96,25 +107,34 @@ impl ReloadingBrowserTls {
 }
 
 pub fn server_name_from_addr(addr: &str) -> Result<ServerName<'static>, String> {
-    let host = addr.rsplit_once(':').map(|(host, _port)| host).unwrap_or(addr);
-    let ip: std::net::IpAddr =
-        host.parse().map_err(|e| format!("expected an IP address in '{addr}', got '{host}': {e}"))?;
+    let host = addr
+        .rsplit_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(addr);
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|e| format!("expected an IP address in '{addr}', got '{host}': {e}"))?;
     Ok(ServerName::IpAddress(ip.into()))
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    let file = File::open(path).map_err(|e| format!("failed to open certificate file {}: {e}", path.display()))?;
+    let file = File::open(path)
+        .map_err(|e| format!("failed to open certificate file {}: {e}", path.display()))?;
     let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(file))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to parse certificate file {}: {e}", path.display()))?;
     if certs.is_empty() {
-        return Err(format!("failed to find any PEM-encoded certificates in {}", path.display()));
+        return Err(format!(
+            "failed to find any PEM-encoded certificates in {}",
+            path.display()
+        ));
     }
     Ok(certs)
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
-    let file = File::open(path).map_err(|e| format!("failed to open key file {}: {e}", path.display()))?;
+    let file =
+        File::open(path).map_err(|e| format!("failed to open key file {}: {e}", path.display()))?;
     rustls_pemfile::private_key(&mut BufReader::new(file))
         .map_err(|e| format!("failed to parse key file {}: {e}", path.display()))?
         .ok_or_else(|| format!("no private key found in {}", path.display()))
@@ -124,18 +144,27 @@ fn load_root_store(ca_path: &Path) -> Result<RootCertStore, String> {
     let certs = load_certs(ca_path)?;
     let mut roots = RootCertStore::empty();
     for cert in certs {
-        roots.add(cert).map_err(|e| format!("failed to add CA certificate from {}: {e}", ca_path.display()))?;
+        roots.add(cert).map_err(|e| {
+            format!(
+                "failed to add CA certificate from {}: {e}",
+                ca_path.display()
+            )
+        })?;
     }
     Ok(roots)
 }
 
 fn load_crls(path: &Path) -> Result<Vec<CertificateRevocationListDer<'static>>, String> {
-    let file = File::open(path).map_err(|e| format!("failed to open CRL file {}: {e}", path.display()))?;
+    let file =
+        File::open(path).map_err(|e| format!("failed to open CRL file {}: {e}", path.display()))?;
     let crls: Vec<_> = rustls_pemfile::crls(&mut BufReader::new(file))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to parse CRL file {}: {e}", path.display()))?;
     if crls.is_empty() {
-        return Err(format!("failed to find a PEM-encoded CRL in {}", path.display()));
+        return Err(format!(
+            "failed to find a PEM-encoded CRL in {}",
+            path.display()
+        ));
     }
     Ok(crls)
 }
@@ -151,14 +180,24 @@ mod tests {
 
     #[test]
     fn load_client_config_succeeds_with_valid_fixtures() {
-        load_client_config(&fixture("fixture-client.crt"), &fixture("fixture-client.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-            .expect("expected a valid client config");
+        load_client_config(
+            &fixture("fixture-client.crt"),
+            &fixture("fixture-client.key"),
+            &fixture("ca.crt"),
+            &fixture("crl.pem"),
+        )
+        .expect("expected a valid client config");
     }
 
     #[test]
     fn load_client_config_fails_on_a_missing_cert_file() {
-        let err = load_client_config(&fixture("does-not-exist.crt"), &fixture("fixture-client.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-            .unwrap_err();
+        let err = load_client_config(
+            &fixture("does-not-exist.crt"),
+            &fixture("fixture-client.key"),
+            &fixture("ca.crt"),
+            &fixture("crl.pem"),
+        )
+        .unwrap_err();
         assert!(err.contains("does-not-exist.crt"), "got: {err}");
     }
 
@@ -170,14 +209,23 @@ mod tests {
 
     #[test]
     fn load_browser_server_config_fails_on_a_missing_key_file() {
-        let err = load_browser_server_config(&fixture("fixture-node.crt"), &fixture("does-not-exist.key")).unwrap_err();
+        let err = load_browser_server_config(
+            &fixture("fixture-node.crt"),
+            &fixture("does-not-exist.key"),
+        )
+        .unwrap_err();
         assert!(err.contains("does-not-exist.key"), "got: {err}");
     }
 
     #[test]
     fn server_name_from_addr_parses_the_host_and_drops_the_port() {
         let name = server_name_from_addr("192.168.64.4:7621").unwrap();
-        assert_eq!(name, rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(192, 168, 64, 4).into()));
+        assert_eq!(
+            name,
+            rustls::pki_types::ServerName::IpAddress(
+                std::net::Ipv4Addr::new(192, 168, 64, 4).into()
+            )
+        );
     }
 
     #[test]

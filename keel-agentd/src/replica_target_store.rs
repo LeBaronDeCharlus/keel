@@ -18,7 +18,8 @@ pub fn load_all(state_dir: &Path) -> Result<Vec<ReplicaTarget>, StoreError> {
             continue;
         }
         let content = fs::read_to_string(&path).map_err(|e| StoreError::Io(path.clone(), e))?;
-        let target: ReplicaTarget = serde_yaml::from_str(&content).map_err(|e| StoreError::Parse(path.clone(), e))?;
+        let target: ReplicaTarget =
+            serde_yaml::from_str(&content).map_err(|e| StoreError::Parse(path.clone(), e))?;
         targets.push(target);
     }
     Ok(targets)
@@ -29,7 +30,8 @@ pub fn save(state_dir: &Path, target: &ReplicaTarget) -> Result<(), StoreError> 
     fs::create_dir_all(&dir).map_err(|e| StoreError::Io(dir.clone(), e))?;
     let path = dir.join(format!("{}.yaml", target.replica_name));
     let tmp_path = dir.join(format!("{}.yaml.tmp", target.replica_name));
-    let content = serde_yaml::to_string(target).expect("ReplicaTarget serialization should not fail");
+    let content =
+        serde_yaml::to_string(target).expect("ReplicaTarget serialization should not fail");
     fs::write(&tmp_path, content).map_err(|e| StoreError::Io(tmp_path.clone(), e))?;
     fs::rename(&tmp_path, &path).map_err(|e| StoreError::Io(path.clone(), e))?;
     Ok(())
@@ -55,7 +57,8 @@ mod tests {
     use super::*;
 
     fn test_state_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("keel-agentd-replica-target-store-test-{name}"));
+        let dir =
+            std::env::temp_dir().join(format!("keel-agentd-replica-target-store-test-{name}"));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

@@ -41,7 +41,9 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -51,7 +53,8 @@ fn request(addr: std::net::SocketAddr, path: &str, user: &str, password: &str) -
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth();
-    let server_name = rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
+    let server_name =
+        rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
     let tcp = std::net::TcpStream::connect(addr).unwrap();
     let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
     let mut stream = rustls::StreamOwned::new(conn, tcp);
@@ -70,7 +73,11 @@ fn request(addr: std::net::SocketAddr, path: &str, user: &str, password: &str) -
         }
     }
     let text = String::from_utf8_lossy(&response).to_string();
-    let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
     (status, body)
 }
@@ -92,7 +99,12 @@ fn a_poll_cycle_is_reflected_in_both_the_json_api_and_the_rendered_html() {
     }]);
     client.set_jails("node-1", vec![]);
     client.set_volumes("node-1", vec![]);
-    client.set_services(vec![ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 }]);
+    client.set_services(vec![ServiceSummary {
+        name: "web".to_string(),
+        desired_replicas: 1,
+        vip: "10.0.250.7".to_string(),
+        port: 8080,
+    }]);
     client.set_service("web", Vec::<ServiceReplica>::new());
 
     let snapshot = keel_dashboard::poller::spawn(Box::new(client), Duration::from_millis(20));
@@ -107,17 +119,29 @@ fn a_poll_cycle_is_reflected_in_both_the_json_api_and_the_rendered_html() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let reloading_tls =
-        keel_dashboard::tls::ReloadingBrowserTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), Duration::from_secs(3600))
-            .unwrap();
+    let reloading_tls = keel_dashboard::tls::ReloadingBrowserTls::spawn(
+        fixture("fixture-node.crt"),
+        fixture("fixture-node.key"),
+        Duration::from_secs(3600),
+    )
+    .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
-        keel_dashboard::http::run(listener, reloading_tls, snapshot, "admin".to_string(), "hunter2".to_string())
+        keel_dashboard::http::run(
+            listener,
+            reloading_tls,
+            snapshot,
+            "admin".to_string(),
+            "hunter2".to_string(),
+        )
     });
 
     let (unauth_status, _) = request(addr, "/", "admin", "wrongpassword");
-    assert_eq!(unauth_status, 401, "wrong credentials must be rejected even after a successful poll");
+    assert_eq!(
+        unauth_status, 401,
+        "wrong credentials must be rejected even after a successful poll"
+    );
 
     let (json_status, json_body) = request(addr, "/api/snapshot", "admin", "hunter2");
     assert_eq!(json_status, 200);

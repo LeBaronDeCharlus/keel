@@ -33,7 +33,13 @@ pub trait ZfsManager {
 
     /// Streams a `zfs send` (full if `base` is `None`, incremental `-i <base>`
     /// otherwise) of `dataset@snapshot` into `out`.
-    fn send_snapshot(&self, dataset: &str, snapshot: &str, base: Option<&str>, out: &mut dyn Write) -> Result<(), ZfsError>;
+    fn send_snapshot(
+        &self,
+        dataset: &str,
+        snapshot: &str,
+        base: Option<&str>,
+        out: &mut dyn Write,
+    ) -> Result<(), ZfsError>;
 
     /// Streams `input` into `zfs receive <dataset>`, creating or advancing
     /// `dataset` from the received stream.

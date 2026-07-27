@@ -57,26 +57,52 @@ pub fn poll_once(client: &dyn ControlPlaneClient, previous: &Snapshot, now_unix:
             let jails_result = client.fetch_jails(&status.id);
             let volumes_result = client.fetch_volumes(&status.id);
             let data_stale = jails_result.is_err() || volumes_result.is_err();
-            let jails = jails_result.unwrap_or_else(|_| previous_node.map(|n| n.jails.clone()).unwrap_or_default());
-            let volumes = volumes_result.unwrap_or_else(|_| previous_node.map(|n| n.volumes.clone()).unwrap_or_default());
-            NodeSnapshot { status, jails, volumes, data_stale }
+            let jails = jails_result
+                .unwrap_or_else(|_| previous_node.map(|n| n.jails.clone()).unwrap_or_default());
+            let volumes = volumes_result
+                .unwrap_or_else(|_| previous_node.map(|n| n.volumes.clone()).unwrap_or_default());
+            NodeSnapshot {
+                status,
+                jails,
+                volumes,
+                data_stale,
+            }
         })
         .collect();
 
-    let service_summaries =
-        client.fetch_services().unwrap_or_else(|_| previous.services.iter().map(|s| s.summary.clone()).collect());
+    let service_summaries = client.fetch_services().unwrap_or_else(|_| {
+        previous
+            .services
+            .iter()
+            .map(|s| s.summary.clone())
+            .collect()
+    });
     let services: Vec<ServiceSnapshot> = service_summaries
         .into_iter()
         .map(|summary| {
-            let previous_service = previous.services.iter().find(|s| s.summary.name == summary.name);
+            let previous_service = previous
+                .services
+                .iter()
+                .find(|s| s.summary.name == summary.name);
             let detail_result = client.fetch_service(&summary.name);
             let data_stale = detail_result.is_err();
-            let detail = detail_result.ok().or_else(|| previous_service.and_then(|s| s.detail.clone()));
-            ServiceSnapshot { summary, detail, data_stale }
+            let detail = detail_result
+                .ok()
+                .or_else(|| previous_service.and_then(|s| s.detail.clone()));
+            ServiceSnapshot {
+                summary,
+                detail,
+                data_stale,
+            }
         })
         .collect();
 
-    Snapshot { nodes, services, stale: false, stale_as_of_unix: None }
+    Snapshot {
+        nodes,
+        services,
+        stale: false,
+        stale_as_of_unix: None,
+    }
 }
 
 #[cfg(test)]
@@ -85,7 +111,7 @@ mod tests {
     use crate::control_plane_client::FakeControlPlaneClient;
     use keel_agentd::{BackoffStatus, JailRecord};
     use keel_controlplane::wire::{NodeState, NodeStatus, ServiceReplica, ServiceSummary};
-    use keel_spec::{JailSpec, Metadata, NetworkSpec, RestartPolicy, ResourcesSpec, Spec};
+    use keel_spec::{JailSpec, Metadata, NetworkSpec, ResourcesSpec, RestartPolicy, Spec};
 
     fn sample_node(id: &str) -> NodeStatus {
         NodeStatus {
@@ -111,7 +137,9 @@ mod tests {
                 spec: JailSpec {
                     api_version: "keel/v1".to_string(),
                     kind: "Jail".to_string(),
-                    metadata: Metadata { name: name.to_string() },
+                    metadata: Metadata {
+                        name: name.to_string(),
+                    },
                     spec: Spec {
                         image: "base/14.2-web".to_string(),
                         command: vec!["/usr/local/bin/myapp".to_string()],
@@ -120,7 +148,10 @@ mod tests {
                             bridge: "keel0".to_string(),
                             address: "10.0.0.5/24".to_string(),
                         },
-                        resources: ResourcesSpec { cpu: "2".to_string(), memory: "512M".to_string() },
+                        resources: ResourcesSpec {
+                            cpu: "2".to_string(),
+                            memory: "512M".to_string(),
+                        },
                         restart_policy: RestartPolicy::Always,
                         volumes: vec![],
                         replicate_to: None,
@@ -139,7 +170,12 @@ mod tests {
     fn a_fully_healthy_poll_is_not_stale_anywhere() {
         let client = FakeControlPlaneClient::new();
         client.set_nodes(vec![sample_node("node-1")]);
-        client.set_services(vec![ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 }]);
+        client.set_services(vec![ServiceSummary {
+            name: "web".to_string(),
+            desired_replicas: 1,
+            vip: "10.0.250.7".to_string(),
+            port: 8080,
+        }]);
         client.set_service("web", vec![]);
 
         let snapshot = poll_once(&client, &Snapshot::default(), 1_000);
@@ -161,7 +197,10 @@ mod tests {
         let second = poll_once(&client, &first, 2_000);
         assert!(second.stale);
         assert_eq!(second.stale_as_of_unix, Some(2_000));
-        assert_eq!(second.nodes, first.nodes, "the last-good node data must be preserved unchanged");
+        assert_eq!(
+            second.nodes, first.nodes,
+            "the last-good node data must be preserved unchanged"
+        );
     }
 
     #[test]
@@ -174,7 +213,10 @@ mod tests {
 
         client.fail_jails("node-1");
         let second = poll_once(&client, &first, 2_000);
-        assert!(!second.stale, "a per-node failure must not mark the whole snapshot stale");
+        assert!(
+            !second.stale,
+            "a per-node failure must not mark the whole snapshot stale"
+        );
         assert!(second.nodes[0].data_stale);
         assert_eq!(second.nodes[0].jails, first.nodes[0].jails);
     }
@@ -182,7 +224,12 @@ mod tests {
     #[test]
     fn a_failed_service_detail_fetch_marks_only_that_service_stale() {
         let client = FakeControlPlaneClient::new();
-        client.set_services(vec![ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 }]);
+        client.set_services(vec![ServiceSummary {
+            name: "web".to_string(),
+            desired_replicas: 1,
+            vip: "10.0.250.7".to_string(),
+            port: 8080,
+        }]);
         client.set_service("web", vec![]);
         let first = poll_once(&client, &Snapshot::default(), 1_000);
         assert!(!first.services[0].data_stale);
@@ -211,8 +258,15 @@ mod tests {
         // at the *first* failure, not the most recent one.
         let third = poll_once(&client, &second, 3_000);
         assert!(third.stale);
-        assert_eq!(third.stale_as_of_unix, Some(2_000), "stale_as_of_unix must preserve the first failure time, not the latest");
-        assert_eq!(third.nodes, first.nodes, "the last-good node data must still be preserved unchanged");
+        assert_eq!(
+            third.stale_as_of_unix,
+            Some(2_000),
+            "stale_as_of_unix must preserve the first failure time, not the latest"
+        );
+        assert_eq!(
+            third.nodes, first.nodes,
+            "the last-good node data must still be preserved unchanged"
+        );
     }
 
     #[test]
@@ -234,28 +288,67 @@ mod tests {
         client.set_jails("node-2", vec![sample_jail("new-2")]);
         client.fail_jails("node-1");
         let second = poll_once(&client, &first, 2_000);
-        assert!(!second.stale, "a per-node failure must not mark the whole snapshot stale");
+        assert!(
+            !second.stale,
+            "a per-node failure must not mark the whole snapshot stale"
+        );
 
-        let node1 = second.nodes.iter().find(|n| n.status.id == "node-1").unwrap();
-        let node2 = second.nodes.iter().find(|n| n.status.id == "node-2").unwrap();
-        let previous_node1 = first.nodes.iter().find(|n| n.status.id == "node-1").unwrap();
+        let node1 = second
+            .nodes
+            .iter()
+            .find(|n| n.status.id == "node-1")
+            .unwrap();
+        let node2 = second
+            .nodes
+            .iter()
+            .find(|n| n.status.id == "node-2")
+            .unwrap();
+        let previous_node1 = first
+            .nodes
+            .iter()
+            .find(|n| n.status.id == "node-1")
+            .unwrap();
         assert!(node1.data_stale);
-        assert_eq!(node1.jails, previous_node1.jails, "node-1 must keep its own last-good jails, not node-2's");
-        assert!(!node2.data_stale, "node-2's successful fetch must not be marked stale");
-        assert_eq!(node2.jails, vec![sample_jail("new-2")], "node-2 must show the freshly fetched jails, not stale data");
+        assert_eq!(
+            node1.jails, previous_node1.jails,
+            "node-1 must keep its own last-good jails, not node-2's"
+        );
+        assert!(
+            !node2.data_stale,
+            "node-2's successful fetch must not be marked stale"
+        );
+        assert_eq!(
+            node2.jails,
+            vec![sample_jail("new-2")],
+            "node-2 must show the freshly fetched jails, not stale data"
+        );
     }
 
     #[test]
     fn a_failed_service_detail_fetch_in_a_multi_service_snapshot_only_marks_that_service_stale() {
         let client = FakeControlPlaneClient::new();
         client.set_services(vec![
-            ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 },
-            ServiceSummary { name: "api".to_string(), desired_replicas: 1, vip: "10.0.250.8".to_string(), port: 9090 },
+            ServiceSummary {
+                name: "web".to_string(),
+                desired_replicas: 1,
+                vip: "10.0.250.7".to_string(),
+                port: 8080,
+            },
+            ServiceSummary {
+                name: "api".to_string(),
+                desired_replicas: 1,
+                vip: "10.0.250.8".to_string(),
+                port: 9090,
+            },
         ]);
         client.set_service("web", vec![]);
         client.set_service(
             "api",
-            vec![ServiceReplica { name: "api-0".to_string(), node: "node-1".to_string(), address: "10.0.4.5".to_string() }],
+            vec![ServiceReplica {
+                name: "api-0".to_string(),
+                node: "node-1".to_string(),
+                address: "10.0.4.5".to_string(),
+            }],
         );
         let first = poll_once(&client, &Snapshot::default(), 1_000);
         assert!(!first.services[0].data_stale);
@@ -269,26 +362,65 @@ mod tests {
         // this reordering would make "web" pick up "api"'s stale detail
         // instead of its own.
         client.set_services(vec![
-            ServiceSummary { name: "api".to_string(), desired_replicas: 1, vip: "10.0.250.8".to_string(), port: 9090 },
-            ServiceSummary { name: "web".to_string(), desired_replicas: 1, vip: "10.0.250.7".to_string(), port: 8080 },
+            ServiceSummary {
+                name: "api".to_string(),
+                desired_replicas: 1,
+                vip: "10.0.250.8".to_string(),
+                port: 9090,
+            },
+            ServiceSummary {
+                name: "web".to_string(),
+                desired_replicas: 1,
+                vip: "10.0.250.7".to_string(),
+                port: 8080,
+            },
         ]);
         client.set_service(
             "api",
-            vec![ServiceReplica { name: "api-0".to_string(), node: "node-1".to_string(), address: "10.0.4.9".to_string() }],
+            vec![ServiceReplica {
+                name: "api-0".to_string(),
+                node: "node-1".to_string(),
+                address: "10.0.4.9".to_string(),
+            }],
         );
         client.fail_service("web");
         let second = poll_once(&client, &first, 2_000);
-        assert!(!second.stale, "a per-service failure must not mark the whole snapshot stale");
+        assert!(
+            !second.stale,
+            "a per-service failure must not mark the whole snapshot stale"
+        );
 
-        let web = second.services.iter().find(|s| s.summary.name == "web").unwrap();
-        let api = second.services.iter().find(|s| s.summary.name == "api").unwrap();
-        let previous_web = first.services.iter().find(|s| s.summary.name == "web").unwrap();
+        let web = second
+            .services
+            .iter()
+            .find(|s| s.summary.name == "web")
+            .unwrap();
+        let api = second
+            .services
+            .iter()
+            .find(|s| s.summary.name == "api")
+            .unwrap();
+        let previous_web = first
+            .services
+            .iter()
+            .find(|s| s.summary.name == "web")
+            .unwrap();
         assert!(web.data_stale);
-        assert_eq!(web.detail, previous_web.detail, "web must keep its own last-good detail, not api's");
-        assert!(!api.data_stale, "api's successful fetch must not be marked stale");
+        assert_eq!(
+            web.detail, previous_web.detail,
+            "web must keep its own last-good detail, not api's"
+        );
+        assert!(
+            !api.data_stale,
+            "api's successful fetch must not be marked stale"
+        );
         assert_eq!(
             api.detail,
-            Some(vec![ServiceReplica { name: "api-0".to_string(), node: "node-1".to_string(), address: "10.0.4.9".to_string() }]),
+            Some(vec![ServiceReplica {
+                name: "api-0".to_string(),
+                node: "node-1".to_string(),
+                address: "10.0.4.9".to_string()
+            }]),
             "api must show the freshly fetched detail, not stale data"
         );
     }

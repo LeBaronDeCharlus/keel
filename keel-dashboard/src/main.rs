@@ -42,7 +42,9 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
     let mut config = Config::default();
     let mut args = args;
     while let Some(flag) = args.next() {
-        let value = args.next().unwrap_or_else(|| panic!("missing value for {flag}"));
+        let value = args
+            .next()
+            .unwrap_or_else(|| panic!("missing value for {flag}"));
         match flag.as_str() {
             "--control-plane-addr" => config.control_plane_addr = Some(value),
             "--tls-ca-file" => config.tls_ca_file = Some(PathBuf::from(value)),
@@ -50,13 +52,20 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
             "--tls-key-file" => config.tls_key_file = Some(PathBuf::from(value)),
             "--tls-crl-file" => config.tls_crl_file = Some(PathBuf::from(value)),
             "--listen-addr" => config.listen_addr = value,
-            "--dashboard-tls-cert-file" => config.dashboard_tls_cert_file = Some(PathBuf::from(value)),
-            "--dashboard-tls-key-file" => config.dashboard_tls_key_file = Some(PathBuf::from(value)),
+            "--dashboard-tls-cert-file" => {
+                config.dashboard_tls_cert_file = Some(PathBuf::from(value))
+            }
+            "--dashboard-tls-key-file" => {
+                config.dashboard_tls_key_file = Some(PathBuf::from(value))
+            }
             "--basic-auth-user" => config.basic_auth_user = Some(value),
-            "--basic-auth-password-file" => config.basic_auth_password_file = Some(PathBuf::from(value)),
+            "--basic-auth-password-file" => {
+                config.basic_auth_password_file = Some(PathBuf::from(value))
+            }
             "--poll-interval-secs" => {
-                config.poll_interval_secs =
-                    value.parse().unwrap_or_else(|e| panic!("invalid --poll-interval-secs '{value}': {e}"))
+                config.poll_interval_secs = value
+                    .parse()
+                    .unwrap_or_else(|e| panic!("invalid --poll-interval-secs '{value}': {e}"))
             }
             other => panic!("unknown flag: {other}"),
         }
@@ -80,27 +89,55 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
 
 fn main() {
     let config = parse_args();
-    let control_plane_addr = config.control_plane_addr.expect("validated as required in parse_args_from");
-    let tls_ca_file = config.tls_ca_file.expect("validated as required in parse_args_from");
-    let tls_cert_file = config.tls_cert_file.expect("validated as required in parse_args_from");
-    let tls_key_file = config.tls_key_file.expect("validated as required in parse_args_from");
-    let tls_crl_file = config.tls_crl_file.expect("validated as required in parse_args_from");
-    let dashboard_tls_cert_file = config.dashboard_tls_cert_file.expect("validated as required in parse_args_from");
-    let dashboard_tls_key_file = config.dashboard_tls_key_file.expect("validated as required in parse_args_from");
-    let basic_auth_user = config.basic_auth_user.expect("validated as required in parse_args_from");
-    let basic_auth_password_file = config.basic_auth_password_file.expect("validated as required in parse_args_from");
+    let control_plane_addr = config
+        .control_plane_addr
+        .expect("validated as required in parse_args_from");
+    let tls_ca_file = config
+        .tls_ca_file
+        .expect("validated as required in parse_args_from");
+    let tls_cert_file = config
+        .tls_cert_file
+        .expect("validated as required in parse_args_from");
+    let tls_key_file = config
+        .tls_key_file
+        .expect("validated as required in parse_args_from");
+    let tls_crl_file = config
+        .tls_crl_file
+        .expect("validated as required in parse_args_from");
+    let dashboard_tls_cert_file = config
+        .dashboard_tls_cert_file
+        .expect("validated as required in parse_args_from");
+    let dashboard_tls_key_file = config
+        .dashboard_tls_key_file
+        .expect("validated as required in parse_args_from");
+    let basic_auth_user = config
+        .basic_auth_user
+        .expect("validated as required in parse_args_from");
+    let basic_auth_password_file = config
+        .basic_auth_password_file
+        .expect("validated as required in parse_args_from");
     let basic_auth_password = std::fs::read_to_string(&basic_auth_password_file)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", basic_auth_password_file.display()))
         .trim()
         .to_string();
 
     let client_config = Arc::new(
-        keel_dashboard::tls::load_client_config(&tls_cert_file, &tls_key_file, &tls_ca_file, &tls_crl_file)
-            .unwrap_or_else(|e| panic!("failed to load control-plane TLS client config: {e}")),
+        keel_dashboard::tls::load_client_config(
+            &tls_cert_file,
+            &tls_key_file,
+            &tls_ca_file,
+            &tls_crl_file,
+        )
+        .unwrap_or_else(|e| panic!("failed to load control-plane TLS client config: {e}")),
     );
-    let client: Box<dyn keel_dashboard::control_plane_client::ControlPlaneClient> =
-        Box::new(keel_dashboard::control_plane_client::TlsControlPlaneClient::new(control_plane_addr, client_config));
-    let snapshot = keel_dashboard::poller::spawn(client, Duration::from_secs(config.poll_interval_secs));
+    let client: Box<dyn keel_dashboard::control_plane_client::ControlPlaneClient> = Box::new(
+        keel_dashboard::control_plane_client::TlsControlPlaneClient::new(
+            control_plane_addr,
+            client_config,
+        ),
+    );
+    let snapshot =
+        keel_dashboard::poller::spawn(client, Duration::from_secs(config.poll_interval_secs));
 
     let reloading_tls = keel_dashboard::tls::ReloadingBrowserTls::spawn(
         dashboard_tls_cert_file,
@@ -109,9 +146,19 @@ fn main() {
     )
     .unwrap_or_else(|e| panic!("failed to load dashboard TLS server config: {e}"));
 
-    eprintln!("keel-dashboard: starting (listen_addr={})", config.listen_addr);
-    let listener = std::net::TcpListener::bind(&config.listen_addr).expect("failed to bind TCP listener");
-    keel_dashboard::http::run(listener, reloading_tls, snapshot, basic_auth_user, basic_auth_password);
+    eprintln!(
+        "keel-dashboard: starting (listen_addr={})",
+        config.listen_addr
+    );
+    let listener =
+        std::net::TcpListener::bind(&config.listen_addr).expect("failed to bind TCP listener");
+    keel_dashboard::http::run(
+        listener,
+        reloading_tls,
+        snapshot,
+        basic_auth_user,
+        basic_auth_password,
+    );
 }
 
 #[cfg(test)]
@@ -119,20 +166,32 @@ mod tests {
     use super::*;
 
     fn args(strs: &[&str]) -> impl Iterator<Item = String> {
-        strs.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
+        strs.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     fn full_args() -> Vec<&'static str> {
         vec![
-            "--control-plane-addr", "10.0.0.1:7620",
-            "--tls-ca-file", "/etc/keel/ca.crt",
-            "--tls-cert-file", "/etc/keel/dashboard.crt",
-            "--tls-key-file", "/etc/keel/dashboard.key",
-            "--tls-crl-file", "/etc/keel/crl.pem",
-            "--dashboard-tls-cert-file", "/etc/keel/dashboard-browser.crt",
-            "--dashboard-tls-key-file", "/etc/keel/dashboard-browser.key",
-            "--basic-auth-user", "admin",
-            "--basic-auth-password-file", "/etc/keel/dashboard-password",
+            "--control-plane-addr",
+            "10.0.0.1:7620",
+            "--tls-ca-file",
+            "/etc/keel/ca.crt",
+            "--tls-cert-file",
+            "/etc/keel/dashboard.crt",
+            "--tls-key-file",
+            "/etc/keel/dashboard.key",
+            "--tls-crl-file",
+            "/etc/keel/crl.pem",
+            "--dashboard-tls-cert-file",
+            "/etc/keel/dashboard-browser.crt",
+            "--dashboard-tls-key-file",
+            "/etc/keel/dashboard-browser.key",
+            "--basic-auth-user",
+            "admin",
+            "--basic-auth-password-file",
+            "/etc/keel/dashboard-password",
         ]
     }
 
@@ -153,16 +212,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "--control-plane-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required")]
+    #[should_panic(
+        expected = "--control-plane-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required"
+    )]
     fn missing_control_plane_tls_flag_panics() {
         parse_args_from(args(&["--tls-ca-file", "/etc/keel/ca.crt"]));
     }
 
     #[test]
-    #[should_panic(expected = "--dashboard-tls-cert-file and --dashboard-tls-key-file are required")]
+    #[should_panic(
+        expected = "--dashboard-tls-cert-file and --dashboard-tls-key-file are required"
+    )]
     fn missing_dashboard_tls_flag_panics() {
         let mut partial: Vec<&str> = full_args().into_iter().take(10).collect();
-        partial.retain(|f| *f != "--dashboard-tls-cert-file" && *f != "/etc/keel/dashboard-browser.crt");
+        partial.retain(|f| {
+            *f != "--dashboard-tls-cert-file" && *f != "/etc/keel/dashboard-browser.crt"
+        });
         parse_args_from(args(&partial));
     }
 
@@ -170,8 +235,10 @@ mod tests {
     #[should_panic(expected = "--basic-auth-user and --basic-auth-password-file are required")]
     fn missing_basic_auth_flag_panics() {
         let full = full_args();
-        let without_auth: Vec<&str> =
-            full.into_iter().take_while(|f| *f != "--basic-auth-user").collect();
+        let without_auth: Vec<&str> = full
+            .into_iter()
+            .take_while(|f| *f != "--basic-auth-user")
+            .collect();
         parse_args_from(args(&without_auth));
     }
 }

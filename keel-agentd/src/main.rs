@@ -60,8 +60,10 @@ struct OvhConfig {
 }
 
 fn load_ovh_config(path: &std::path::Path) -> OvhConfig {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read OVH config at {}: {e}", path.display()));
-    toml::from_str(&content).unwrap_or_else(|e| panic!("failed to parse OVH config at {}: {e}", path.display()))
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("failed to read OVH config at {}: {e}", path.display()));
+    toml::from_str(&content)
+        .unwrap_or_else(|e| panic!("failed to parse OVH config at {}: {e}", path.display()))
 }
 
 fn parse_args() -> Config {
@@ -72,7 +74,9 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Config {
     let mut config = Config::default();
     let mut args = args;
     while let Some(flag) = args.next() {
-        let value = args.next().unwrap_or_else(|| panic!("missing value for {flag}"));
+        let value = args
+            .next()
+            .unwrap_or_else(|| panic!("missing value for {flag}"));
         match flag.as_str() {
             "--pool" => config.pool = value,
             "--state-dir" => config.state_dir = PathBuf::from(value),
@@ -139,7 +143,9 @@ fn main() {
         config.state_dir.clone(),
         acme,
         dns,
-        Box::new(keel_agentd::nginx::JexecNginxController::new(config.pool.clone())),
+        Box::new(keel_agentd::nginx::JexecNginxController::new(
+            config.pool.clone(),
+        )),
         service_vips.clone(),
     )
     .expect("failed to initialize reconciler from on-disk state");
@@ -164,18 +170,31 @@ fn main() {
         config.tls_crl_file.clone(),
     ) {
         (Some(cert_file), Some(key_file), Some(ca_file), Some(crl_file)) => Some(
-            keel_agentd::tls::ReloadingTls::spawn(cert_file, key_file, ca_file, crl_file, Duration::from_secs(30))
-                .unwrap_or_else(|e| panic!("failed to load TLS configuration: {e}")),
+            keel_agentd::tls::ReloadingTls::spawn(
+                cert_file,
+                key_file,
+                ca_file,
+                crl_file,
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|e| panic!("failed to load TLS configuration: {e}")),
         ),
         _ => None,
     };
 
-    let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), config.pool.clone(), reloading_tls.clone());
+    let (_worker_handle, commands) = worker::spawn(
+        reconciler,
+        zfs.clone(),
+        config.pool.clone(),
+        reloading_tls.clone(),
+    );
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     commands
         .send(Command::ResumeReplicationLoops(resume_tx))
         .expect("worker command channel closed before startup completed");
-    resume_rx.recv().expect("worker dropped without replying to ResumeReplicationLoops");
+    resume_rx
+        .recv()
+        .expect("worker dropped without replying to ResumeReplicationLoops");
     let pod_cidr_slot = keel_agentd::PodCidrSlot::new();
     let replica_targets = keel_agentd::ReplicaTargetRegistry::load(config.state_dir.clone())
         .expect("failed to load replica-target state");
@@ -188,8 +207,8 @@ fn main() {
     ) {
         let (capacity_cpu, capacity_memory) = keel_agentd::capacity::detect()
             .unwrap_or_else(|e| panic!("failed to detect node capacity via sysctl: {e}"));
-        let reloading_tls =
-            reloading_tls.expect("validated in parse_args_from: control_plane_addr requires the TLS flags too");
+        let reloading_tls = reloading_tls
+            .expect("validated in parse_args_from: control_plane_addr requires the TLS flags too");
         eprintln!(
             "keel-agentd: registering with control plane at {control_plane_addr} as node '{node_id}' ({advertise_addr}), capacity {capacity_cpu} cores / {capacity_memory} bytes"
         );
@@ -209,25 +228,40 @@ fn main() {
         );
 
         eprintln!("keel-agentd: serving jails API over TLS on {advertise_addr}");
-        let tcp_listener = TcpListener::bind(&advertise_addr)
-            .unwrap_or_else(|e| panic!("failed to bind jails-API TCP listener on {advertise_addr}: {e}"));
+        let tcp_listener = TcpListener::bind(&advertise_addr).unwrap_or_else(|e| {
+            panic!("failed to bind jails-API TCP listener on {advertise_addr}: {e}")
+        });
         let tcp_commands = commands.clone();
         let tcp_pod_cidr_slot = pod_cidr_slot.clone();
         let tcp_service_vips = service_vips.clone();
         let tcp_replica_targets = replica_targets.clone();
         let tcp_reloading_tls = std::sync::Arc::clone(&reloading_tls);
         thread::spawn(move || {
-            keel_agentd::http::run_tls(tcp_listener, tcp_commands, tcp_reloading_tls, tcp_pod_cidr_slot, tcp_service_vips, tcp_replica_targets)
+            keel_agentd::http::run_tls(
+                tcp_listener,
+                tcp_commands,
+                tcp_reloading_tls,
+                tcp_pod_cidr_slot,
+                tcp_service_vips,
+                tcp_replica_targets,
+            )
         });
 
         eprintln!("keel-agentd: serving replication listener on {replicate_addr}");
-        let replicate_listener = TcpListener::bind(&replicate_addr)
-            .unwrap_or_else(|e| panic!("failed to bind replication TCP listener on {replicate_addr}: {e}"));
+        let replicate_listener = TcpListener::bind(&replicate_addr).unwrap_or_else(|e| {
+            panic!("failed to bind replication TCP listener on {replicate_addr}: {e}")
+        });
         let replicate_zfs = zfs.clone();
         let replicate_pool = config.pool.clone();
         let replicate_targets = replica_targets.clone();
         thread::spawn(move || {
-            keel_agentd::replication::run(replicate_listener, replicate_zfs, replicate_pool, replicate_targets, reloading_tls)
+            keel_agentd::replication::run(
+                replicate_listener,
+                replicate_zfs,
+                replicate_pool,
+                replicate_targets,
+                reloading_tls,
+            )
         });
     }
 
@@ -252,7 +286,10 @@ fn main() {
                 let now = std::time::Instant::now();
                 if backoff.can_retry(now) {
                     backoff.record_attempt(now);
-                    if let Err(e) = pf.ensure_redirect_rules(&public_iface, keel_agentd::record::INGRESS_JAIL_BRIDGE_ADDR) {
+                    if let Err(e) = pf.ensure_redirect_rules(
+                        &public_iface,
+                        keel_agentd::record::INGRESS_JAIL_BRIDGE_ADDR,
+                    ) {
                         eprintln!("keel-agentd: failed to apply pf ingress redirect rules: {e}");
                     }
                 }
@@ -268,7 +305,13 @@ fn main() {
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))
         .expect("failed to set socket permissions");
 
-    keel_agentd::http::run(listener, commands, pod_cidr_slot, service_vips, replica_targets);
+    keel_agentd::http::run(
+        listener,
+        commands,
+        pod_cidr_slot,
+        service_vips,
+        replica_targets,
+    );
 }
 
 #[cfg(test)]
@@ -292,7 +335,10 @@ mod tests {
     use super::*;
 
     fn args(strs: &[&str]) -> impl Iterator<Item = String> {
-        strs.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
+        strs.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     #[test]
@@ -321,88 +367,154 @@ mod tests {
     #[test]
     fn parses_acme_and_dns_flags() {
         let config = parse_args_from(args(&[
-            "--dns-ovh-config", "/usr/local/etc/keel/dns-ovh.toml",
-            "--acme-directory-url", "https://acme.example.com/directory",
-            "--acme-account-key-file", "/var/db/keel/acme-account.key",
+            "--dns-ovh-config",
+            "/usr/local/etc/keel/dns-ovh.toml",
+            "--acme-directory-url",
+            "https://acme.example.com/directory",
+            "--acme-account-key-file",
+            "/var/db/keel/acme-account.key",
         ]));
-        assert_eq!(config.dns_ovh_config, Some(PathBuf::from("/usr/local/etc/keel/dns-ovh.toml")));
-        assert_eq!(config.acme_directory_url, Some("https://acme.example.com/directory".to_string()));
-        assert_eq!(config.acme_account_key_file, Some(PathBuf::from("/var/db/keel/acme-account.key")));
+        assert_eq!(
+            config.dns_ovh_config,
+            Some(PathBuf::from("/usr/local/etc/keel/dns-ovh.toml"))
+        );
+        assert_eq!(
+            config.acme_directory_url,
+            Some("https://acme.example.com/directory".to_string())
+        );
+        assert_eq!(
+            config.acme_account_key_file,
+            Some(PathBuf::from("/var/db/keel/acme-account.key"))
+        );
     }
 
     #[test]
     fn parses_all_eight_control_plane_flags() {
         let config = parse_args_from(args(&[
-            "--node-id", "node-2",
-            "--control-plane-addr", "192.168.64.2:7620",
-            "--advertise-addr", "192.168.64.2",
-            "--replicate-addr", "192.168.64.2:7622",
-            "--tls-ca-file", "/etc/keel/ca.crt",
-            "--tls-cert-file", "/etc/keel/node-2.crt",
-            "--tls-key-file", "/etc/keel/node-2.key",
-            "--tls-crl-file", "/etc/keel/crl.pem",
+            "--node-id",
+            "node-2",
+            "--control-plane-addr",
+            "192.168.64.2:7620",
+            "--advertise-addr",
+            "192.168.64.2",
+            "--replicate-addr",
+            "192.168.64.2:7622",
+            "--tls-ca-file",
+            "/etc/keel/ca.crt",
+            "--tls-cert-file",
+            "/etc/keel/node-2.crt",
+            "--tls-key-file",
+            "/etc/keel/node-2.key",
+            "--tls-crl-file",
+            "/etc/keel/crl.pem",
         ]));
         assert_eq!(config.node_id, Some("node-2".to_string()));
-        assert_eq!(config.control_plane_addr, Some("192.168.64.2:7620".to_string()));
+        assert_eq!(
+            config.control_plane_addr,
+            Some("192.168.64.2:7620".to_string())
+        );
         assert_eq!(config.advertise_addr, Some("192.168.64.2".to_string()));
         assert_eq!(config.replicate_addr, Some("192.168.64.2:7622".to_string()));
         assert_eq!(config.tls_ca_file, Some(PathBuf::from("/etc/keel/ca.crt")));
-        assert_eq!(config.tls_cert_file, Some(PathBuf::from("/etc/keel/node-2.crt")));
-        assert_eq!(config.tls_key_file, Some(PathBuf::from("/etc/keel/node-2.key")));
-        assert_eq!(config.tls_crl_file, Some(PathBuf::from("/etc/keel/crl.pem")));
+        assert_eq!(
+            config.tls_cert_file,
+            Some(PathBuf::from("/etc/keel/node-2.crt"))
+        );
+        assert_eq!(
+            config.tls_key_file,
+            Some(PathBuf::from("/etc/keel/node-2.key"))
+        );
+        assert_eq!(
+            config.tls_crl_file,
+            Some(PathBuf::from("/etc/keel/crl.pem"))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set")]
+    #[should_panic(
+        expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set"
+    )]
     fn control_plane_addr_without_node_id_panics() {
         parse_args_from(args(&[
-            "--control-plane-addr", "192.168.64.2:7620",
-            "--advertise-addr", "192.168.64.2",
-            "--tls-ca-file", "/etc/keel/ca.crt",
-            "--tls-cert-file", "/etc/keel/node-2.crt",
-            "--tls-key-file", "/etc/keel/node-2.key",
-            "--tls-crl-file", "/etc/keel/crl.pem",
+            "--control-plane-addr",
+            "192.168.64.2:7620",
+            "--advertise-addr",
+            "192.168.64.2",
+            "--tls-ca-file",
+            "/etc/keel/ca.crt",
+            "--tls-cert-file",
+            "/etc/keel/node-2.crt",
+            "--tls-key-file",
+            "/etc/keel/node-2.key",
+            "--tls-crl-file",
+            "/etc/keel/crl.pem",
         ]));
     }
 
     #[test]
-    #[should_panic(expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set")]
+    #[should_panic(
+        expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set"
+    )]
     fn control_plane_addr_without_advertise_addr_panics() {
         parse_args_from(args(&[
-            "--control-plane-addr", "192.168.64.2:7620",
-            "--node-id", "node-2",
-            "--tls-ca-file", "/etc/keel/ca.crt",
-            "--tls-cert-file", "/etc/keel/node-2.crt",
-            "--tls-key-file", "/etc/keel/node-2.key",
-            "--tls-crl-file", "/etc/keel/crl.pem",
+            "--control-plane-addr",
+            "192.168.64.2:7620",
+            "--node-id",
+            "node-2",
+            "--tls-ca-file",
+            "/etc/keel/ca.crt",
+            "--tls-cert-file",
+            "/etc/keel/node-2.crt",
+            "--tls-key-file",
+            "/etc/keel/node-2.key",
+            "--tls-crl-file",
+            "/etc/keel/crl.pem",
         ]));
     }
 
     #[test]
-    #[should_panic(expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set")]
+    #[should_panic(
+        expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set"
+    )]
     fn control_plane_addr_without_replicate_addr_panics() {
         parse_args_from(args(&[
-            "--control-plane-addr", "192.168.64.2:7620",
-            "--node-id", "node-2",
-            "--advertise-addr", "192.168.64.2",
-            "--tls-ca-file", "/etc/keel/ca.crt",
-            "--tls-cert-file", "/etc/keel/node-2.crt",
-            "--tls-key-file", "/etc/keel/node-2.key",
-            "--tls-crl-file", "/etc/keel/crl.pem",
+            "--control-plane-addr",
+            "192.168.64.2:7620",
+            "--node-id",
+            "node-2",
+            "--advertise-addr",
+            "192.168.64.2",
+            "--tls-ca-file",
+            "/etc/keel/ca.crt",
+            "--tls-cert-file",
+            "/etc/keel/node-2.crt",
+            "--tls-key-file",
+            "/etc/keel/node-2.key",
+            "--tls-crl-file",
+            "/etc/keel/crl.pem",
         ]));
     }
 
     #[test]
-    #[should_panic(expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set")]
+    #[should_panic(
+        expected = "--node-id, --advertise-addr, --replicate-addr, --tls-ca-file, --tls-cert-file, --tls-key-file, and --tls-crl-file are all required when --control-plane-addr is set"
+    )]
     fn control_plane_addr_without_tls_crl_file_panics() {
         parse_args_from(args(&[
-            "--control-plane-addr", "192.168.64.2:7620",
-            "--node-id", "node-2",
-            "--advertise-addr", "192.168.64.2",
-            "--replicate-addr", "192.168.64.2:7622",
-            "--tls-ca-file", "/etc/keel/ca.crt",
-            "--tls-cert-file", "/etc/keel/node-2.crt",
-            "--tls-key-file", "/etc/keel/node-2.key",
+            "--control-plane-addr",
+            "192.168.64.2:7620",
+            "--node-id",
+            "node-2",
+            "--advertise-addr",
+            "192.168.64.2",
+            "--replicate-addr",
+            "192.168.64.2:7622",
+            "--tls-ca-file",
+            "/etc/keel/ca.crt",
+            "--tls-cert-file",
+            "/etc/keel/node-2.crt",
+            "--tls-key-file",
+            "/etc/keel/node-2.key",
         ]));
     }
 }

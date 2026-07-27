@@ -24,7 +24,11 @@ fn apply_read_timeout(stream: &TcpStream) {
 
 type TlsStream = StreamOwned<ServerConnection, TcpStream>;
 
-pub fn run(listener: TcpListener, commands: Sender<Command>, reloading_tls: Arc<tls::ReloadingTls>) {
+pub fn run(
+    listener: TcpListener,
+    commands: Sender<Command>,
+    reloading_tls: Arc<tls::ReloadingTls>,
+) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         apply_read_timeout(&stream);
@@ -32,10 +36,14 @@ pub fn run(listener: TcpListener, commands: Sender<Command>, reloading_tls: Arc<
         let tls_config = reloading_tls.server_config();
         let client_config = reloading_tls.client_config();
         thread::spawn(move || {
-            let Ok(conn) = ServerConnection::new(tls_config) else { return };
+            let Ok(conn) = ServerConnection::new(tls_config) else {
+                return;
+            };
             let mut tls_stream = TlsStream::new(conn, stream);
             if handle_connection(&mut tls_stream, &commands, &client_config).is_err() {
-                eprintln!("keel-controlplane: TLS handshake or request handling failed for a connection");
+                eprintln!(
+                    "keel-controlplane: TLS handshake or request handling failed for a connection"
+                );
             }
         });
     }
@@ -138,41 +146,79 @@ fn route(
     commands: &Sender<Command>,
     client_config: &Arc<rustls::ClientConfig>,
 ) -> (u16, Vec<u8>) {
-    let segments: Vec<&str> =
-        request.path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = request
+        .path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     match (request.method.as_str(), segments.as_slice()) {
         ("POST", ["nodes", "register"]) => handle_register(&request.body, commands),
-        ("POST", ["nodes", id, "heartbeat"]) => handle_heartbeat(id, &request.body, commands, client_config),
+        ("POST", ["nodes", id, "heartbeat"]) => {
+            handle_heartbeat(id, &request.body, commands, client_config)
+        }
         ("GET", ["nodes"]) => handle_list(commands),
         ("PUT", ["nodes", id, "jails", name]) => {
             if let Some(response) = reject_if_service_owned(name, commands) {
                 return response;
             }
-            let (status, body) =
-                handle_forward(id, "PUT", &format!("/jails/{name}"), &request.body, commands, client_config);
+            let (status, body) = handle_forward(
+                id,
+                "PUT",
+                &format!("/jails/{name}"),
+                &request.body,
+                commands,
+                client_config,
+            );
             if (200..300).contains(&status) {
                 send_record_placement(name, id, commands);
             }
             (status, body)
         }
-        ("GET", ["nodes", id, "jails"]) => handle_forward(id, "GET", "/jails", &[], commands, client_config),
-        ("GET", ["nodes", id, "jails", name]) => {
-            handle_forward(id, "GET", &format!("/jails/{name}"), &[], commands, client_config)
+        ("GET", ["nodes", id, "jails"]) => {
+            handle_forward(id, "GET", "/jails", &[], commands, client_config)
         }
+        ("GET", ["nodes", id, "jails", name]) => handle_forward(
+            id,
+            "GET",
+            &format!("/jails/{name}"),
+            &[],
+            commands,
+            client_config,
+        ),
         ("DELETE", ["nodes", id, "jails", name]) => {
-            let (status, body) = handle_forward(id, "DELETE", &format!("/jails/{name}"), &[], commands, client_config);
+            let (status, body) = handle_forward(
+                id,
+                "DELETE",
+                &format!("/jails/{name}"),
+                &[],
+                commands,
+                client_config,
+            );
             if (200..300).contains(&status) {
                 send_remove_placement(name, commands);
             }
             (status, body)
         }
-        ("GET", ["nodes", id, "volumes"]) => handle_forward(id, "GET", "/volumes", &[], commands, client_config),
-        ("GET", ["nodes", id, "volumes", name]) => {
-            handle_forward(id, "GET", &format!("/volumes/{name}"), &[], commands, client_config)
+        ("GET", ["nodes", id, "volumes"]) => {
+            handle_forward(id, "GET", "/volumes", &[], commands, client_config)
         }
-        ("DELETE", ["nodes", id, "volumes", name]) => {
-            handle_forward(id, "DELETE", &format!("/volumes/{name}"), &[], commands, client_config)
-        }
+        ("GET", ["nodes", id, "volumes", name]) => handle_forward(
+            id,
+            "GET",
+            &format!("/volumes/{name}"),
+            &[],
+            commands,
+            client_config,
+        ),
+        ("DELETE", ["nodes", id, "volumes", name]) => handle_forward(
+            id,
+            "DELETE",
+            &format!("/volumes/{name}"),
+            &[],
+            commands,
+            client_config,
+        ),
         ("PUT", ["jails", name]) => {
             if let Some(response) = reject_if_service_owned(name, commands) {
                 return response;
@@ -181,12 +227,19 @@ fn route(
         }
         ("GET", ["jails", name]) => handle_scheduled_read(name, commands, client_config),
         ("DELETE", ["jails", name]) => handle_scheduled_delete(name, commands, client_config),
-        ("PUT", ["services", name]) => handle_apply_service(name, &request.body, commands, client_config),
+        ("PUT", ["services", name]) => {
+            handle_apply_service(name, &request.body, commands, client_config)
+        }
         ("GET", ["services", name]) => handle_get_service(name, commands),
         ("DELETE", ["services", name]) => handle_delete_service(name, commands, client_config),
         ("GET", ["services"]) => handle_list_services(commands),
-        ("POST", ["replicas", name, "force-repin"]) => handle_force_repin(name, commands, client_config),
-        _ => error_response(404, format!("no route for {} {}", request.method, request.path)),
+        ("POST", ["replicas", name, "force-repin"]) => {
+            handle_force_repin(name, commands, client_config)
+        }
+        _ => error_response(
+            404,
+            format!("no route for {} {}", request.method, request.path),
+        ),
     }
 }
 
@@ -197,7 +250,10 @@ fn handle_scheduled_apply(
     client_config: &Arc<rustls::ClientConfig>,
 ) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::ResolveOrSchedule(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::ResolveOrSchedule(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "control plane worker is not running".to_string());
     }
     let (node_id, addr) = match reply_rx.recv() {
@@ -213,7 +269,10 @@ fn handle_scheduled_apply(
             }
             (status, response_body)
         }
-        Err(e) => error_response(500, format!("failed to reach node '{node_id}' at {addr}: {e}")),
+        Err(e) => error_response(
+            500,
+            format!("failed to reach node '{node_id}' at {addr}: {e}"),
+        ),
     }
 }
 
@@ -228,7 +287,10 @@ fn handle_scheduled_read(
     };
     match forward(&addr, "GET", &format!("/jails/{name}"), &[], client_config) {
         Ok((status, response_body)) => (status, response_body),
-        Err(e) => error_response(500, format!("failed to reach node '{node_id}' at {addr}: {e}")),
+        Err(e) => error_response(
+            500,
+            format!("failed to reach node '{node_id}' at {addr}: {e}"),
+        ),
     }
 }
 
@@ -241,43 +303,84 @@ fn handle_scheduled_delete(
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    match forward(&addr, "DELETE", &format!("/jails/{name}"), &[], client_config) {
+    match forward(
+        &addr,
+        "DELETE",
+        &format!("/jails/{name}"),
+        &[],
+        client_config,
+    ) {
         Ok((status, response_body)) => {
             if (200..300).contains(&status) {
                 send_remove_placement(name, commands);
             }
             (status, response_body)
         }
-        Err(e) => error_response(500, format!("failed to reach node '{node_id}' at {addr}: {e}")),
+        Err(e) => error_response(
+            500,
+            format!("failed to reach node '{node_id}' at {addr}: {e}"),
+        ),
     }
 }
 
-fn handle_force_repin(name: &str, commands: &Sender<Command>, client_config: &Arc<rustls::ClientConfig>) -> (u16, Vec<u8>) {
+fn handle_force_repin(
+    name: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::PrepareForceRepin(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::PrepareForceRepin(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "control plane worker is not running".to_string());
     }
     let prep = match reply_rx.recv() {
         Ok(Ok(prep)) => prep,
         Ok(Err(e @ ForceRepinError::NotPlaced(_))) => return error_response(404, e.to_string()),
         Ok(Err(e @ ForceRepinError::NotStateful(_))) => return error_response(400, e.to_string()),
-        Ok(Err(e @ ForceRepinError::PrimaryStillAlive(_))) => return error_response(409, e.to_string()),
+        Ok(Err(e @ ForceRepinError::PrimaryStillAlive(_))) => {
+            return error_response(409, e.to_string())
+        }
         Ok(Err(e)) => return error_response(503, e.to_string()),
         Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
     };
 
-    match forward(&prep.standby_addr, "GET", &format!("/replica-targets/{name}"), &[], client_config) {
+    match forward(
+        &prep.standby_addr,
+        "GET",
+        &format!("/replica-targets/{name}"),
+        &[],
+        client_config,
+    ) {
         Ok((status, _)) if (200..300).contains(&status) => {}
         Ok((404, _)) | Ok((409, _)) => {
             return error_response(
                 409,
-                format!("standby node '{}' has not completed a first full replication for '{name}'", prep.standby_node_id),
+                format!(
+                    "standby node '{}' has not completed a first full replication for '{name}'",
+                    prep.standby_node_id
+                ),
             );
         }
         Ok((status, body)) => {
-            return error_response(500, format!("unexpected response checking standby readiness: status {status}, body {:?}", String::from_utf8_lossy(&body)))
+            return error_response(
+                500,
+                format!(
+                    "unexpected response checking standby readiness: status {status}, body {:?}",
+                    String::from_utf8_lossy(&body)
+                ),
+            )
         }
-        Err(e) => return error_response(500, format!("failed to reach standby node '{}' at {}: {e}", prep.standby_node_id, prep.standby_addr)),
+        Err(e) => {
+            return error_response(
+                500,
+                format!(
+                    "failed to reach standby node '{}' at {}: {e}",
+                    prep.standby_node_id, prep.standby_addr
+                ),
+            )
+        }
     }
 
     let cidr = format!("{}/{}", prep.address, prep.prefix_len);
@@ -286,7 +389,13 @@ fn handle_force_repin(name: &str, commands: &Sender<Command>, client_config: &Ar
     spec.spec.generation = prep.next_generation;
     let body = serde_yaml::to_string(&spec).expect("JailSpec serialization should not fail");
 
-    match forward(&prep.standby_addr, "PUT", &format!("/jails/{name}"), body.as_bytes(), client_config) {
+    match forward(
+        &prep.standby_addr,
+        "PUT",
+        &format!("/jails/{name}"),
+        body.as_bytes(),
+        client_config,
+    ) {
         Ok((status, resp_body)) if (200..300).contains(&status) => {
             send_record_placement(name, &prep.standby_node_id, commands);
             send_record_replica_address(name, &prep.standby_node_id, prep.address, commands);
@@ -298,8 +407,16 @@ fn handle_force_repin(name: &str, commands: &Sender<Command>, client_config: &Ar
             // that node's next heartbeat if this attempt fails or no
             // last-known address is on file at all).
             if let Some(old_addr) = &prep.old_node_last_known_addr {
-                match forward(old_addr, "DELETE", &format!("/jails/{name}"), &[], client_config) {
-                    Ok((del_status, _)) if (200..300).contains(&del_status) || del_status == 404 => {
+                match forward(
+                    old_addr,
+                    "DELETE",
+                    &format!("/jails/{name}"),
+                    &[],
+                    client_config,
+                ) {
+                    Ok((del_status, _))
+                        if (200..300).contains(&del_status) || del_status == 404 =>
+                    {
                         send_remove_pending_fence(name, commands);
                     }
                     _ => {}
@@ -307,55 +424,102 @@ fn handle_force_repin(name: &str, commands: &Sender<Command>, client_config: &Ar
             }
             (200, resp_body)
         }
-        Ok((status, resp_body)) => error_response(status, String::from_utf8_lossy(&resp_body).to_string()),
-        Err(e) => error_response(500, format!("failed to reach node '{}' at {}: {e}", prep.standby_node_id, prep.standby_addr)),
+        Ok((status, resp_body)) => {
+            error_response(status, String::from_utf8_lossy(&resp_body).to_string())
+        }
+        Err(e) => error_response(
+            500,
+            format!(
+                "failed to reach node '{}' at {}: {e}",
+                prep.standby_node_id, prep.standby_addr
+            ),
+        ),
     }
 }
 
 fn send_record_pending_fence(replica_name: &str, old_node_id: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RecordPendingFence(replica_name.to_string(), old_node_id.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::RecordPendingFence(
+            replica_name.to_string(),
+            old_node_id.to_string(),
+            reply_tx,
+        ))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
-fn resolve_placement(name: &str, commands: &Sender<Command>) -> Result<(String, String), (u16, Vec<u8>)> {
+fn resolve_placement(
+    name: &str,
+    commands: &Sender<Command>,
+) -> Result<(String, String), (u16, Vec<u8>)> {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::ResolvePlacement(name.to_string(), reply_tx)).is_err() {
-        return Err(error_response(500, "control plane worker is not running".to_string()));
+    if commands
+        .send(Command::ResolvePlacement(name.to_string(), reply_tx))
+        .is_err()
+    {
+        return Err(error_response(
+            500,
+            "control plane worker is not running".to_string(),
+        ));
     }
     match reply_rx.recv() {
         Ok(Ok(pair)) => Ok(pair),
         Ok(Err(e)) => Err(error_response(404, e.to_string())),
-        Err(_) => Err(error_response(500, "control plane worker did not respond".to_string())),
+        Err(_) => Err(error_response(
+            500,
+            "control plane worker did not respond".to_string(),
+        )),
     }
 }
 
 fn send_record_placement(name: &str, node_id: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RecordPlacement(name.to_string(), node_id.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::RecordPlacement(
+            name.to_string(),
+            node_id.to_string(),
+            reply_tx,
+        ))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
 fn send_remove_placement(name: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RemovePlacement(name.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::RemovePlacement(name.to_string(), reply_tx))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
 fn reject_if_service_owned(name: &str, commands: &Sender<Command>) -> Option<(u16, Vec<u8>)> {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::OwnerOf(name.to_string(), reply_tx)).is_err() {
-        return Some(error_response(500, "control plane worker is not running".to_string()));
+    if commands
+        .send(Command::OwnerOf(name.to_string(), reply_tx))
+        .is_err()
+    {
+        return Some(error_response(
+            500,
+            "control plane worker is not running".to_string(),
+        ));
     }
     match reply_rx.recv() {
-        Ok(Some(crate::services::Owner::Service(owner))) => {
-            Some(error_response(400, format!("name '{name}' is already in use by service '{owner}'")))
-        }
+        Ok(Some(crate::services::Owner::Service(owner))) => Some(error_response(
+            400,
+            format!("name '{name}' is already in use by service '{owner}'"),
+        )),
         Ok(_) => None,
-        Err(_) => Some(error_response(500, "control plane worker did not respond".to_string())),
+        Err(_) => Some(error_response(
+            500,
+            "control plane worker did not respond".to_string(),
+        )),
     }
 }
 
@@ -365,17 +529,30 @@ fn handle_apply_service(
     commands: &Sender<Command>,
     client_config: &Arc<rustls::ClientConfig>,
 ) -> (u16, Vec<u8>) {
-    let spec: keel_spec::ServiceSpec = match keel_spec::parse_and_validate_service(&String::from_utf8_lossy(body)) {
-        Ok(s) => s,
-        Err(e) => return error_response(400, format!("invalid spec: {e}")),
-    };
+    let spec: keel_spec::ServiceSpec =
+        match keel_spec::parse_and_validate_service(&String::from_utf8_lossy(body)) {
+            Ok(s) => s,
+            Err(e) => return error_response(400, format!("invalid spec: {e}")),
+        };
     if spec.metadata.name != name {
-        return error_response(400, format!("path name '{name}' does not match spec.metadata.name '{}'", spec.metadata.name));
+        return error_response(
+            400,
+            format!(
+                "path name '{name}' does not match spec.metadata.name '{}'",
+                spec.metadata.name
+            ),
+        );
     }
 
     let (reply_tx, reply_rx) = mpsc::channel();
     if commands
-        .send(Command::ApplyService(name.to_string(), spec.spec.replicas, spec.spec.template, spec.spec.port, reply_tx))
+        .send(Command::ApplyService(
+            name.to_string(),
+            spec.spec.replicas,
+            spec.spec.template,
+            spec.spec.port,
+            reply_tx,
+        ))
         .is_err()
     {
         return error_response(500, "control plane worker is not running".to_string());
@@ -385,17 +562,28 @@ fn handle_apply_service(
             reconcile_and_execute(commands, client_config);
             (200, Vec::new())
         }
-        Ok(Err(e @ crate::services::ApplyServiceError::TemplateChanged(_))) => error_response(409, e.to_string()),
-        Ok(Err(e @ crate::services::ApplyServiceError::PortChanged(_))) => error_response(409, e.to_string()),
-        Ok(Err(e @ crate::services::ApplyServiceError::NameConflict { .. })) => error_response(400, e.to_string()),
-        Ok(Err(e @ crate::services::ApplyServiceError::VipPoolExhausted(_))) => error_response(503, e.to_string()),
+        Ok(Err(e @ crate::services::ApplyServiceError::TemplateChanged(_))) => {
+            error_response(409, e.to_string())
+        }
+        Ok(Err(e @ crate::services::ApplyServiceError::PortChanged(_))) => {
+            error_response(409, e.to_string())
+        }
+        Ok(Err(e @ crate::services::ApplyServiceError::NameConflict { .. })) => {
+            error_response(400, e.to_string())
+        }
+        Ok(Err(e @ crate::services::ApplyServiceError::VipPoolExhausted(_))) => {
+            error_response(503, e.to_string())
+        }
         Err(_) => error_response(500, "control plane worker did not respond".to_string()),
     }
 }
 
 fn handle_get_service(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::DiscoverService(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::DiscoverService(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "control plane worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -422,7 +610,10 @@ fn handle_delete_service(
     client_config: &Arc<rustls::ClientConfig>,
 ) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::DeleteService(name.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::DeleteService(name.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "control plane worker is not running".to_string());
     }
     match reply_rx.recv() {
@@ -467,20 +658,34 @@ fn reconcile_and_execute(commands: &Sender<Command>, client_config: &Arc<rustls:
 /// (which has no node context and also runs from the service-apply path),
 /// this needs the specific heartbeating node's id, so it's called directly
 /// from `handle_heartbeat` rather than folded into that shared function.
-fn check_and_execute_fencing(node_id: &str, commands: &Sender<Command>, client_config: &Arc<rustls::ClientConfig>) {
+fn check_and_execute_fencing(
+    node_id: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::PendingFencesForNode(node_id.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::PendingFencesForNode(node_id.to_string(), reply_tx))
+        .is_err()
+    {
         return;
     }
-    let Ok(replica_names) = reply_rx.recv() else { return };
+    let Ok(replica_names) = reply_rx.recv() else {
+        return;
+    };
     if replica_names.is_empty() {
         return;
     }
     let (resolve_tx, resolve_rx) = mpsc::channel();
-    if commands.send(Command::Resolve(node_id.to_string(), resolve_tx)).is_err() {
+    if commands
+        .send(Command::Resolve(node_id.to_string(), resolve_tx))
+        .is_err()
+    {
         return;
     }
-    let Ok(Ok(addr)) = resolve_rx.recv() else { return };
+    let Ok(Ok(addr)) = resolve_rx.recv() else {
+        return;
+    };
     for replica_name in replica_names {
         match forward(&addr, "DELETE", &format!("/jails/{replica_name}"), &[], client_config) {
             Ok((status, _)) if (200..300).contains(&status) || status == 404 => {
@@ -497,20 +702,41 @@ fn check_and_execute_fencing(node_id: &str, commands: &Sender<Command>, client_c
 
 fn send_remove_pending_fence(replica_name: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RemovePendingFence(replica_name.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::RemovePendingFence(
+            replica_name.to_string(),
+            reply_tx,
+        ))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
-fn execute_replica_actions(actions: Vec<ReplicaAction>, commands: &Sender<Command>, client_config: &Arc<rustls::ClientConfig>) {
+fn execute_replica_actions(
+    actions: Vec<ReplicaAction>,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) {
     for action in actions {
         match action {
-            ReplicaAction::Schedule { replica_name, node_id, node_addr, template, address, prefix_len, standby_node_id, standby_addr, generation } => {
+            ReplicaAction::Schedule {
+                replica_name,
+                node_id,
+                node_addr,
+                template,
+                address,
+                prefix_len,
+                standby_node_id,
+                standby_addr,
+                generation,
+            } => {
                 let cidr = format!("{address}/{prefix_len}");
                 let mut spec = template.to_jail_spec(&replica_name, &cidr);
                 spec.spec.replicate_to = standby_addr.clone();
                 spec.spec.generation = generation;
-                let body = serde_yaml::to_string(&spec).expect("JailSpec serialization should not fail");
+                let body =
+                    serde_yaml::to_string(&spec).expect("JailSpec serialization should not fail");
                 match forward(&node_addr, "PUT", &format!("/jails/{replica_name}"), body.as_bytes(), client_config) {
                     Ok((status, _)) if (200..300).contains(&status) => {
                         send_record_placement(&replica_name, &node_id, commands);
@@ -528,7 +754,11 @@ fn execute_replica_actions(actions: Vec<ReplicaAction>, commands: &Sender<Comman
                     ),
                 }
             }
-            ReplicaAction::TearDown { replica_name, node_id, node_addr } => {
+            ReplicaAction::TearDown {
+                replica_name,
+                node_id,
+                node_addr,
+            } => {
                 match forward(&node_addr, "DELETE", &format!("/jails/{replica_name}"), &[], client_config) {
                     Ok((status, _)) if (200..300).contains(&status) => {
                         send_remove_placement(&replica_name, commands);
@@ -554,30 +784,56 @@ fn execute_replica_actions(actions: Vec<ReplicaAction>, commands: &Sender<Comman
     }
 }
 
-fn send_record_replica_address(name: &str, node_id: &str, address: std::net::Ipv4Addr, commands: &Sender<Command>) {
+fn send_record_replica_address(
+    name: &str,
+    node_id: &str,
+    address: std::net::Ipv4Addr,
+    commands: &Sender<Command>,
+) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RecordReplicaAddress(name.to_string(), node_id.to_string(), address, reply_tx)).is_ok() {
+    if commands
+        .send(Command::RecordReplicaAddress(
+            name.to_string(),
+            node_id.to_string(),
+            address,
+            reply_tx,
+        ))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
 fn send_record_standby(replica_name: &str, standby_node_id: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RecordStandby(replica_name.to_string(), standby_node_id.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::RecordStandby(
+            replica_name.to_string(),
+            standby_node_id.to_string(),
+            reply_tx,
+        ))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
 fn send_remove_standby(replica_name: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::RemoveStandby(replica_name.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::RemoveStandby(replica_name.to_string(), reply_tx))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
 
 fn send_release_replica_address(name: &str, commands: &Sender<Command>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::ReleaseReplicaAddress(name.to_string(), reply_tx)).is_ok() {
+    if commands
+        .send(Command::ReleaseReplicaAddress(name.to_string(), reply_tx))
+        .is_ok()
+    {
         let _ = reply_rx.recv();
     }
 }
@@ -602,20 +858,37 @@ fn handle_register(body: &[u8], commands: &Sender<Command>) -> (u16, Vec<u8>) {
         return error_response(500, "control plane worker is not running".to_string());
     }
     match reply_rx.recv() {
-        Ok(Ok(pod_cidr)) => yaml_response(200, &RegisterResponse { pod_cidr: pod_cidr.to_string() }),
+        Ok(Ok(pod_cidr)) => yaml_response(
+            200,
+            &RegisterResponse {
+                pod_cidr: pod_cidr.to_string(),
+            },
+        ),
         Ok(Err(e)) => error_response(409, e.to_string()),
         Err(_) => error_response(500, "control plane worker did not respond".to_string()),
     }
 }
 
-fn handle_heartbeat(id: &str, body: &[u8], commands: &Sender<Command>, client_config: &Arc<rustls::ClientConfig>) -> (u16, Vec<u8>) {
+fn handle_heartbeat(
+    id: &str,
+    body: &[u8],
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
     let heartbeat: Heartbeat = match serde_yaml::from_slice(body) {
         Ok(h) => h,
         Err(e) => return error_response(400, format!("invalid YAML: {e}")),
     };
     let (reply_tx, reply_rx) = mpsc::channel();
     if commands
-        .send(Command::Heartbeat(id.to_string(), heartbeat.committed_cpu, heartbeat.committed_memory, heartbeat.jails, heartbeat.ingresses, reply_tx))
+        .send(Command::Heartbeat(
+            id.to_string(),
+            heartbeat.committed_cpu,
+            heartbeat.committed_memory,
+            heartbeat.jails,
+            heartbeat.ingresses,
+            reply_tx,
+        ))
         .is_err()
     {
         return error_response(500, "control plane worker is not running".to_string());
@@ -625,7 +898,10 @@ fn handle_heartbeat(id: &str, body: &[u8], commands: &Sender<Command>, client_co
             reconcile_and_execute(commands, client_config);
             check_and_execute_fencing(id, commands, client_config);
             let (entries_tx, entries_rx) = mpsc::channel();
-            if commands.send(Command::ListServiceProxyEntries(entries_tx)).is_err() {
+            if commands
+                .send(Command::ListServiceProxyEntries(entries_tx))
+                .is_err()
+            {
                 return error_response(500, "control plane worker is not running".to_string());
             }
             match entries_rx.recv() {
@@ -661,7 +937,10 @@ fn handle_forward(
     client_config: &Arc<rustls::ClientConfig>,
 ) -> (u16, Vec<u8>) {
     let (reply_tx, reply_rx) = mpsc::channel();
-    if commands.send(Command::Resolve(id.to_string(), reply_tx)).is_err() {
+    if commands
+        .send(Command::Resolve(id.to_string(), reply_tx))
+        .is_err()
+    {
         return error_response(500, "control plane worker is not running".to_string());
     }
     let addr = match reply_rx.recv() {
@@ -687,15 +966,21 @@ fn forward(
         .map_err(|e| e.to_string())?
         .next()
         .ok_or_else(|| "could not resolve address".to_string())?;
-    let tcp_stream =
-        TcpStream::connect_timeout(&socket_addr, FORWARD_CONNECT_TIMEOUT).map_err(|e| e.to_string())?;
+    let tcp_stream = TcpStream::connect_timeout(&socket_addr, FORWARD_CONNECT_TIMEOUT)
+        .map_err(|e| e.to_string())?;
     tcp_stream.set_read_timeout(Some(FORWARD_READ_TIMEOUT)).ok();
     let server_name = tls::server_name_from_addr(addr)?;
-    let conn = rustls::ClientConnection::new(Arc::clone(client_config), server_name).map_err(|e| e.to_string())?;
+    let conn = rustls::ClientConnection::new(Arc::clone(client_config), server_name)
+        .map_err(|e| e.to_string())?;
     let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
 
-    let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n", body.len());
-    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(body).map_err(|e| e.to_string())?;
     stream.sock.shutdown(std::net::Shutdown::Write).ok();
 
@@ -714,7 +999,9 @@ fn forward(
             Ok(n) => {
                 response.extend_from_slice(&chunk[..n]);
                 if response.len() > MAX_MESSAGE_BYTES {
-                    return Err(format!("response from node exceeded the {MAX_MESSAGE_BYTES}-byte limit"));
+                    return Err(format!(
+                        "response from node exceeded the {MAX_MESSAGE_BYTES}-byte limit"
+                    ));
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
@@ -728,7 +1015,9 @@ fn forward(
         httparse::Status::Complete(len) => len,
         httparse::Status::Partial => return Err("incomplete response".to_string()),
     };
-    let status = parsed.code.ok_or_else(|| "missing status code".to_string())?;
+    let status = parsed
+        .code
+        .ok_or_else(|| "missing status code".to_string())?;
     let content_length = parsed
         .headers
         .iter()
@@ -738,7 +1027,9 @@ fn forward(
         .ok_or_else(|| "response missing Content-Length header".to_string())?;
     let actual = response.len() - header_len;
     if actual != content_length {
-        return Err(format!("truncated response: expected {content_length} bytes, got {actual}"));
+        return Err(format!(
+            "truncated response: expected {content_length} bytes, got {actual}"
+        ));
     }
     Ok((status, response[header_len..].to_vec()))
 }
@@ -757,7 +1048,10 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("keel-controlplane-http-test-{}-{id}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-http-test-{}-{id}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -769,7 +1063,10 @@ mod tests {
         let _client = TcpStream::connect(addr).unwrap();
         let (server_stream, _) = listener.accept().unwrap();
         apply_read_timeout(&server_stream);
-        assert_eq!(server_stream.read_timeout().unwrap(), Some(INBOUND_READ_TIMEOUT));
+        assert_eq!(
+            server_stream.read_timeout().unwrap(),
+            Some(INBOUND_READ_TIMEOUT)
+        );
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -814,8 +1111,13 @@ mod tests {
 
     fn wrong_ca_tls_config() -> Arc<rustls::ClientConfig> {
         Arc::new(
-            tls::load_client_config(&fixture("wrong-ca-node.crt"), &fixture("wrong-ca-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_client_config(
+                &fixture("wrong-ca-node.crt"),
+                &fixture("wrong-ca-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         )
     }
 
@@ -861,14 +1163,20 @@ mod tests {
         // server requires one, so the handshake itself must fail.
         let roots = {
             let mut roots = rustls::RootCertStore::empty();
-            let cert = rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(fixture("ca.crt")).unwrap()))
-                .next()
-                .unwrap()
-                .unwrap();
+            let cert = rustls_pemfile::certs(&mut std::io::BufReader::new(
+                std::fs::File::open(fixture("ca.crt")).unwrap(),
+            ))
+            .next()
+            .unwrap()
+            .unwrap();
             roots.add(cert).unwrap();
             roots
         };
-        let bare_config = Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+        let bare_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
         let server_name = tls::server_name_from_addr(&addr).unwrap();
         let conn = rustls::ClientConnection::new(bare_config, server_name).unwrap();
         let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
@@ -878,7 +1186,8 @@ mod tests {
         // acknowledgement before considering itself done. So the failure
         // must be observed across the full write+read round trip, not the
         // write alone.
-        let write_result = stream.write_all(b"GET /nodes HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        let write_result = stream
+            .write_all(b"GET /nodes HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
         let mut response = Vec::new();
         let read_result = stream.read_to_end(&mut response);
         assert!(
@@ -890,8 +1199,13 @@ mod tests {
     #[test]
     fn a_client_with_a_wrong_ca_certificate_cannot_complete_the_handshake() {
         let addr = start_test_server();
-        let result = std::panic::catch_unwind(|| send_request_with(&addr, "GET", "/nodes", "", &wrong_ca_tls_config()));
-        assert!(result.is_err() || result.unwrap().0 != 200, "expected the handshake to fail for a wrong-CA client certificate");
+        let result = std::panic::catch_unwind(|| {
+            send_request_with(&addr, "GET", "/nodes", "", &wrong_ca_tls_config())
+        });
+        assert!(
+            result.is_err() || result.unwrap().0 != 200,
+            "expected the handshake to fail for a wrong-CA client certificate"
+        );
     }
 
     #[test]
@@ -908,7 +1222,10 @@ mod tests {
         let (status, body) = send_request(&addr, "GET", "/nodes", "");
         assert_eq!(status, 200);
         assert!(body.contains("node-1"), "expected node-1 in body: {body}");
-        assert!(body.contains("Alive"), "expected Alive status in body: {body}");
+        assert!(
+            body.contains("Alive"),
+            "expected Alive status in body: {body}"
+        );
     }
 
     #[test]
@@ -928,8 +1245,15 @@ mod tests {
         );
 
         let (_, body) = send_request(&addr, "GET", "/nodes", "");
-        assert_eq!(body.matches("node-1").count(), 1, "expected exactly one node-1 entry, got body: {body}");
-        assert!(body.contains("10.0.0.2"), "expected refreshed address in body: {body}");
+        assert_eq!(
+            body.matches("node-1").count(),
+            1,
+            "expected exactly one node-1 entry, got body: {body}"
+        );
+        assert!(
+            body.contains("10.0.0.2"),
+            "expected refreshed address in body: {body}"
+        );
     }
 
     #[test]
@@ -995,7 +1319,12 @@ mod tests {
     #[test]
     fn register_with_invalid_yaml_returns_400() {
         let addr = start_test_server();
-        let (status, _) = send_request(&addr, "POST", "/nodes/register", "not: valid: yaml: at: all: -");
+        let (status, _) = send_request(
+            &addr,
+            "POST",
+            "/nodes/register",
+            "not: valid: yaml: at: all: -",
+        );
         assert_eq!(status, 400);
     }
 
@@ -1026,7 +1355,12 @@ mod tests {
             "id: node-1\naddr: 10.0.0.1\ncapacity_cpu: 4\ncapacity_memory: 8589934592\n",
         );
 
-        let (status, _) = send_request(&addr, "POST", "/nodes/node-1/heartbeat", "not: valid: yaml: at: all: -");
+        let (status, _) = send_request(
+            &addr,
+            "POST",
+            "/nodes/node-1/heartbeat",
+            "not: valid: yaml: at: all: -",
+        );
         assert_eq!(status, 400);
     }
 
@@ -1034,13 +1368,20 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server_config = Arc::new(
-            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 // Drain the whole request (forward() sends it as two
                 // separate write_all calls, headers then body, followed by
@@ -1068,19 +1409,28 @@ mod tests {
         addr
     }
 
-    fn start_fake_remote_tls_agentd_recording_deletes(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+    fn start_fake_remote_tls_agentd_recording_deletes(
+        status: u16,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server_config = Arc::new(
-            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         let deletes = Arc::new(Mutex::new(Vec::new()));
         let thread_deletes = Arc::clone(&deletes);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -1094,12 +1444,19 @@ mod tests {
                 if let Some(first_line) = request_text.lines().next() {
                     let mut parts = first_line.split_whitespace();
                     if parts.next() == Some("DELETE") {
-                        if let Some(replica_name) = parts.next().and_then(|path| path.strip_prefix("/jails/")) {
-                            thread_deletes.lock().unwrap().push(replica_name.to_string());
+                        if let Some(replica_name) =
+                            parts.next().and_then(|path| path.strip_prefix("/jails/"))
+                        {
+                            thread_deletes
+                                .lock()
+                                .unwrap()
+                                .push(replica_name.to_string());
                         }
                     }
                 }
-                let response = format!("HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
                 let _ = tls_stream.write_all(response.as_bytes());
                 let _ = tls_stream.flush();
             }
@@ -1111,19 +1468,28 @@ mod tests {
     /// every `PUT /jails/<name>` request's raw body instead of `DELETE`
     /// paths, so a test can inspect the exact `JailSpec` YAML the control
     /// plane actually sent when scheduling a replica.
-    fn start_fake_remote_tls_agentd_recording_put_bodies(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+    fn start_fake_remote_tls_agentd_recording_put_bodies(
+        status: u16,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server_config = Arc::new(
-            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let thread_bodies = Arc::clone(&bodies);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -1134,13 +1500,19 @@ mod tests {
                     }
                 }
                 let request_text = String::from_utf8_lossy(&request);
-                let is_put = request_text.lines().next().map(|line| line.starts_with("PUT ")).unwrap_or(false);
+                let is_put = request_text
+                    .lines()
+                    .next()
+                    .map(|line| line.starts_with("PUT "))
+                    .unwrap_or(false);
                 if is_put {
                     if let Some(body) = request_text.split("\r\n\r\n").nth(1) {
                         thread_bodies.lock().unwrap().push(body.to_string());
                     }
                 }
-                let response = format!("HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
                 let _ = tls_stream.write_all(response.as_bytes());
                 let _ = tls_stream.flush();
             }
@@ -1153,17 +1525,28 @@ mod tests {
     /// connection is then dropped without a clean TLS shutdown (no
     /// `close_notify`) — simulating an on-path RST or a node that crashes
     /// mid-write.
-    fn start_fake_remote_tls_agentd_with_truncated_body(status: u16, claimed_body: &'static str, actual_body: &'static str) -> String {
+    fn start_fake_remote_tls_agentd_with_truncated_body(
+        status: u16,
+        claimed_body: &'static str,
+        actual_body: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server_config = Arc::new(
-            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut buf = [0u8; 4096];
                 loop {
@@ -1195,13 +1578,20 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server_config = Arc::new(
-            tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut buf = [0u8; 4096];
                 loop {
@@ -1232,7 +1622,10 @@ mod tests {
         register_node(&cp_addr, "node-1", &node_addr);
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
-        assert_eq!(status, 500, "expected an oversized response to be rejected, got {status} with body: {body}");
+        assert_eq!(
+            status, 500,
+            "expected an oversized response to be rejected, got {status} with body: {body}"
+        );
     }
 
     fn register_node(cp_addr: &str, id: &str, node_addr: &str) {
@@ -1240,7 +1633,9 @@ mod tests {
             cp_addr,
             "POST",
             "/nodes/register",
-            &format!("id: {id}\naddr: {node_addr}\ncapacity_cpu: 4.0\ncapacity_memory: 8589934592\n"),
+            &format!(
+                "id: {id}\naddr: {node_addr}\ncapacity_cpu: 4.0\ncapacity_memory: 8589934592\n"
+            ),
         );
     }
 
@@ -1250,9 +1645,17 @@ mod tests {
         let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
         register_node(&cp_addr, "node-1", &node_addr);
 
-        let (status, body) = send_request(&cp_addr, "PUT", "/nodes/node-1/jails/web-1", "apiVersion: keel/v1\n");
+        let (status, body) = send_request(
+            &cp_addr,
+            "PUT",
+            "/nodes/node-1/jails/web-1",
+            "apiVersion: keel/v1\n",
+        );
         assert_eq!(status, 200);
-        assert!(body.contains("running: true"), "expected relayed body, got: {body}");
+        assert!(
+            body.contains("running: true"),
+            "expected relayed body, got: {body}"
+        );
     }
 
     #[test]
@@ -1263,13 +1666,21 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let node_addr = listener.local_addr().unwrap().to_string();
         let wrong_server_config = Arc::new(
-            tls::load_server_config(&fixture("wrong-ca-node.crt"), &fixture("wrong-ca-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            tls::load_server_config(
+                &fixture("wrong-ca-node.crt"),
+                &fixture("wrong-ca-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&wrong_server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&wrong_server_config))
+                else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut buf = [0u8; 4096];
                 let _ = tls_stream.read(&mut buf);
@@ -1279,7 +1690,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
         assert_eq!(status, 500);
-        assert!(body.contains("failed to reach node"), "expected a forwarding failure, got: {body}");
+        assert!(
+            body.contains("failed to reach node"),
+            "expected a forwarding failure, got: {body}"
+        );
     }
 
     #[test]
@@ -1290,7 +1704,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
         assert_eq!(status, 200);
-        assert!(body.contains("fake-list"), "expected relayed body, got: {body}");
+        assert!(
+            body.contains("fake-list"),
+            "expected relayed body, got: {body}"
+        );
     }
 
     #[test]
@@ -1308,7 +1725,10 @@ mod tests {
         let cp_addr = start_test_server();
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/missing/jails", "");
         assert_eq!(status, 404);
-        assert!(body.contains("unknown node"), "expected 'unknown node' in body: {body}");
+        assert!(
+            body.contains("unknown node"),
+            "expected 'unknown node' in body: {body}"
+        );
     }
 
     #[test]
@@ -1319,7 +1739,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/volumes/web-data", "");
         assert_eq!(status, 200);
-        assert!(body.contains("web-data"), "expected relayed body, got: {body}");
+        assert!(
+            body.contains("web-data"),
+            "expected relayed body, got: {body}"
+        );
     }
 
     #[test]
@@ -1330,7 +1753,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/volumes", "");
         assert_eq!(status, 200);
-        assert!(body.contains("web-data"), "expected relayed body, got: {body}");
+        assert!(
+            body.contains("web-data"),
+            "expected relayed body, got: {body}"
+        );
     }
 
     #[test]
@@ -1357,7 +1783,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
         assert_eq!(status, 500);
-        assert!(body.contains("failed to reach node"), "expected forwarding failure in body: {body}");
+        assert!(
+            body.contains("failed to reach node"),
+            "expected forwarding failure in body: {body}"
+        );
     }
 
     #[test]
@@ -1373,7 +1802,10 @@ mod tests {
         register_node(&cp_addr, "node-1", &node_addr);
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
-        assert_eq!(status, 500, "expected a forwarding failure, got status {status} with body: {body}");
+        assert_eq!(
+            status, 500,
+            "expected a forwarding failure, got status {status} with body: {body}"
+        );
         assert!(
             !body.contains("running: t"),
             "truncated upstream body must not be relayed to the caller, got: {body}"
@@ -1390,7 +1822,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "PUT", "/jails/web-1", "apiVersion: keel/v1\n");
         assert_eq!(status, 200);
-        assert!(body.contains("node-a"), "expected the lower id (node-a) to win the tie, got: {body}");
+        assert!(
+            body.contains("node-a"),
+            "expected the lower id (node-a) to win the tie, got: {body}"
+        );
     }
 
     #[test]
@@ -1411,7 +1846,10 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "PUT", "/jails/web-1", "apiVersion: keel/v1\n");
         assert_eq!(status, 200);
-        assert!(body.contains("node-a"), "expected sticky placement on node-a, got: {body}");
+        assert!(
+            body.contains("node-a"),
+            "expected sticky placement on node-a, got: {body}"
+        );
     }
 
     #[test]
@@ -1456,11 +1894,19 @@ mod tests {
         let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
         register_node(&cp_addr, "node-1", &node_addr);
 
-        let (status, _) = send_request(&cp_addr, "PUT", "/nodes/node-1/jails/web-1", "apiVersion: keel/v1\n");
+        let (status, _) = send_request(
+            &cp_addr,
+            "PUT",
+            "/nodes/node-1/jails/web-1",
+            "apiVersion: keel/v1\n",
+        );
         assert_eq!(status, 200);
 
         let (status, body) = send_request(&cp_addr, "GET", "/jails/web-1", "");
-        assert_eq!(status, 200, "expected the scheduled GET to find the placement recorded by the named-node PUT");
+        assert_eq!(
+            status, 200,
+            "expected the scheduled GET to find the placement recorded by the named-node PUT"
+        );
         assert!(body.contains("running: true"), "got: {body}");
     }
 
@@ -1476,7 +1922,9 @@ mod tests {
             )
             .unwrap(),
         );
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| send_request_with(&addr, "GET", "/nodes", "", &revoked_config)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            send_request_with(&addr, "GET", "/nodes", "", &revoked_config)
+        }));
         assert!(
             result.is_err() || result.unwrap().0 != 200,
             "expected the handshake to fail for a revoked client certificate"
@@ -1500,7 +1948,10 @@ mod tests {
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&revoked_server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&revoked_server_config))
+                else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut buf = [0u8; 4096];
                 let _ = tls_stream.read(&mut buf);
@@ -1510,13 +1961,18 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes/node-1/jails", "");
         assert_eq!(status, 500);
-        assert!(body.contains("failed to reach node"), "expected a forwarding failure, got: {body}");
+        assert!(
+            body.contains("failed to reach node"),
+            "expected a forwarding failure, got: {body}"
+        );
     }
 
     #[test]
     fn reloading_tls_server_config_picks_up_a_replaced_certificate_without_restart() {
-        let cert_dir = std::env::temp_dir()
-            .join(format!("keel-controlplane-reload-test-{}", std::process::id()));
+        let cert_dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-reload-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&cert_dir).unwrap();
         let cert_path = cert_dir.join("node.crt");
         let key_path = cert_dir.join("node.key");
@@ -1546,7 +2002,10 @@ mod tests {
         thread::spawn(move || run(listener, commands, reloading));
 
         let (status, _) = send_request(&addr, "GET", "/nodes", "");
-        assert_eq!(status, 200, "expected the initial fixture-node certificate to be served");
+        assert_eq!(
+            status, 200,
+            "expected the initial fixture-node certificate to be served"
+        );
 
         // wrong-ca-node.crt is signed by a different, untrusted CA, so once
         // the server starts presenting it, any client trusting only the real
@@ -1601,12 +2060,20 @@ mod tests {
         register_node(&cp_addr, "node-a", &node_a);
         register_node(&cp_addr, "node-b", &node_b);
 
-        let (status, _) = send_request(&cp_addr, "PUT", "/services/db", &stateful_service_yaml("db", 1));
+        let (status, _) = send_request(
+            &cp_addr,
+            "PUT",
+            "/services/db",
+            &stateful_service_yaml("db", 1),
+        );
         assert_eq!(status, 200);
 
         let (status, body) = send_request(&cp_addr, "GET", "/nodes", "");
         assert_eq!(status, 200);
-        assert!(body.contains("node-a") && body.contains("node-b"), "got: {body}");
+        assert!(
+            body.contains("node-a") && body.contains("node-b"),
+            "got: {body}"
+        );
         // The fake remote agentd just echoes a fixed body ("running: true"),
         // so asserting the forwarded replicateTo requires inspecting what
         // was actually sent -- covered precisely by
@@ -1618,7 +2085,10 @@ mod tests {
         // integration test, which depends on a real standby having been
         // recorded).
         let (status, _) = send_request(&cp_addr, "GET", "/jails/db-0", "");
-        assert_eq!(status, 200, "expected db-0 to have been scheduled onto one of the two registered nodes");
+        assert_eq!(
+            status, 200,
+            "expected db-0 to have been scheduled onto one of the two registered nodes"
+        );
     }
 
     #[test]
@@ -1642,11 +2112,20 @@ mod tests {
         let cp_addr = start_test_server();
         let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
         register_node(&cp_addr, "node-a", &node_addr);
-        send_request(&cp_addr, "PUT", "/nodes/node-a/jails/web-0", "apiVersion: keel/v1\n");
+        send_request(
+            &cp_addr,
+            "PUT",
+            "/nodes/node-a/jails/web-0",
+            "apiVersion: keel/v1\n",
+        );
 
-        let (status, body) = send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
+        let (status, body) =
+            send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
         assert_eq!(status, 400);
-        assert!(body.contains("web-0"), "expected the conflicting name in the error, got: {body}");
+        assert!(
+            body.contains("web-0"),
+            "expected the conflicting name in the error, got: {body}"
+        );
     }
 
     #[test]
@@ -1656,9 +2135,17 @@ mod tests {
         register_node(&cp_addr, "node-a", &node_addr);
         send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
 
-        let (status, body) = send_request(&cp_addr, "PUT", "/nodes/node-a/jails/web-0", "apiVersion: keel/v1\n");
+        let (status, body) = send_request(
+            &cp_addr,
+            "PUT",
+            "/nodes/node-a/jails/web-0",
+            "apiVersion: keel/v1\n",
+        );
         assert_eq!(status, 400);
-        assert!(body.contains("service 'web'"), "expected the owning service named in the error, got: {body}");
+        assert!(
+            body.contains("service 'web'"),
+            "expected the owning service named in the error, got: {body}"
+        );
     }
 
     #[test]
@@ -1668,11 +2155,19 @@ mod tests {
         register_node(&cp_addr, "node-a", &node_addr);
         send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
 
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n",
+        );
 
         let (status, body) = send_request(&cp_addr, "GET", "/services/web", "");
         assert_eq!(status, 200);
-        assert!(body.contains("web-0"), "expected the healthy replica listed, got: {body}");
+        assert!(
+            body.contains("web-0"),
+            "expected the healthy replica listed, got: {body}"
+        );
         assert!(body.contains("node-a"), "got: {body}");
     }
 
@@ -1683,11 +2178,20 @@ mod tests {
         register_node(&cp_addr, "node-a", &node_addr);
         send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
 
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: false\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: false\n",
+        );
 
         let (status, body) = send_request(&cp_addr, "GET", "/services/web", "");
         assert_eq!(status, 200);
-        assert_eq!(body.trim(), "[]", "expected no replicas listed while crash-looping, got: {body}");
+        assert_eq!(
+            body.trim(),
+            "[]",
+            "expected no replicas listed while crash-looping, got: {body}"
+        );
     }
 
     #[test]
@@ -1713,12 +2217,20 @@ mod tests {
     #[test]
     fn get_services_reports_the_applied_services_vip_and_port() {
         let cp_addr = start_test_server();
-        send_request(&cp_addr, "PUT", "/services/web", &service_yaml_with_port("web", 1, 8080));
+        send_request(
+            &cp_addr,
+            "PUT",
+            "/services/web",
+            &service_yaml_with_port("web", 1, 8080),
+        );
 
         let (status, body) = send_request(&cp_addr, "GET", "/services", "");
         assert_eq!(status, 200);
         assert!(body.contains("port: 8080"), "expected port in body: {body}");
-        assert!(body.contains("vip:"), "expected a vip field in body: {body}");
+        assert!(
+            body.contains("vip:"),
+            "expected a vip field in body: {body}"
+        );
     }
 
     #[test]
@@ -1731,7 +2243,12 @@ mod tests {
             "id: node-1\naddr: 10.0.0.1:7621\ncapacity_cpu: 4\ncapacity_memory: 8589934592\n",
         );
         assert_eq!(reg_status, 200);
-        send_request(&cp_addr, "PUT", "/services/web", &service_yaml_with_port("web", 1, 8080));
+        send_request(
+            &cp_addr,
+            "PUT",
+            "/services/web",
+            &service_yaml_with_port("web", 1, 8080),
+        );
 
         let (status, body) = send_request(
             &cp_addr,
@@ -1740,8 +2257,14 @@ mod tests {
             "committed_cpu: 0\ncommitted_memory: 0\njails: []\n",
         );
         assert_eq!(status, 200);
-        assert!(body.contains("name: web"), "expected the service table in the heartbeat response: {body}");
-        assert!(body.contains("port: 8080"), "expected port in heartbeat response: {body}");
+        assert!(
+            body.contains("name: web"),
+            "expected the service table in the heartbeat response: {body}"
+        );
+        assert!(
+            body.contains("port: 8080"),
+            "expected port in heartbeat response: {body}"
+        );
     }
 
     #[test]
@@ -1750,13 +2273,21 @@ mod tests {
         let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
         register_node(&cp_addr, "node-a", &node_addr);
         send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n",
+        );
 
         let (status, _) = send_request(&cp_addr, "DELETE", "/services/web", "");
         assert_eq!(status, 200);
 
         let (status, _) = send_request(&cp_addr, "GET", "/services/web", "");
-        assert_eq!(status, 404, "expected the service itself to be forgotten after delete");
+        assert_eq!(
+            status, 404,
+            "expected the service itself to be forgotten after delete"
+        );
     }
 
     #[test]
@@ -1770,7 +2301,12 @@ mod tests {
         let (cp_addr, commands, state_dir) = start_test_server_with_commands_and_state_dir();
         let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
         register_node(&cp_addr, "node-a", &node_addr);
-        send_request(&cp_addr, "PUT", "/services/db", &stateful_service_yaml("db", 1));
+        send_request(
+            &cp_addr,
+            "PUT",
+            "/services/db",
+            &stateful_service_yaml("db", 1),
+        );
         send_request(
             &cp_addr,
             "POST",
@@ -1779,21 +2315,44 @@ mod tests {
         );
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-b".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordPendingFence("db-0".to_string(), "node-a".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordPendingFence(
+                "db-0".to_string(),
+                "node-a".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         let (status, _) = send_request(&cp_addr, "DELETE", "/services/db", "");
         assert_eq!(status, 200);
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::PendingFencesForNode("node-a".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Vec::<String>::new(), "pending fence for the torn-down replica must be gone");
+        commands
+            .send(Command::PendingFencesForNode("node-a".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Vec::<String>::new(),
+            "pending fence for the torn-down replica must be gone"
+        );
 
-        let standbys: crate::standbys::Standbys = crate::store::load_or_default(&state_dir.join("standbys.yaml"));
-        assert_eq!(standbys.get("db-0"), None, "standby for the torn-down replica must be gone");
+        let standbys: crate::standbys::Standbys =
+            crate::store::load_or_default(&state_dir.join("standbys.yaml"));
+        assert_eq!(
+            standbys.get("db-0"),
+            None,
+            "standby for the torn-down replica must be gone"
+        );
     }
 
     #[test]
@@ -1817,8 +2376,18 @@ mod tests {
         // Once a node registers and heartbeats, the very next heartbeat's
         // piggybacked reconciliation should place the missing replica.
         register_node(&cp_addr, "node-a", &node_addr);
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\n");
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\n",
+        );
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n",
+        );
 
         let (status, body) = send_request(&cp_addr, "GET", "/services/web", "");
         assert_eq!(status, 200);
@@ -1837,18 +2406,38 @@ mod tests {
         let (node_addr, bodies) = start_fake_remote_tls_agentd_recording_put_bodies(200);
         register_node(&cp_addr, "node-a", &node_addr);
         send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\n");
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\n",
+        );
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\njails:\n  - name: web-0\n    running: true\n",
+        );
 
         let recorded = bodies.lock().unwrap();
-        assert_eq!(recorded.len(), 1, "expected exactly one PUT /jails/web-0, got: {recorded:?}");
-        assert!(recorded[0].contains("generation: 1"), "expected the first placement to carry generation 1, got body: {}", recorded[0]);
+        assert_eq!(
+            recorded.len(),
+            1,
+            "expected exactly one PUT /jails/web-0, got: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("generation: 1"),
+            "expected the first placement to carry generation 1, got body: {}",
+            recorded[0]
+        );
     }
 
     #[test]
     fn reloading_tls_keeps_serving_the_last_good_config_if_the_replacement_is_malformed() {
-        let cert_dir = std::env::temp_dir()
-            .join(format!("keel-controlplane-reload-bad-test-{}", std::process::id()));
+        let cert_dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-reload-bad-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&cert_dir).unwrap();
         let cert_path = cert_dir.join("node.crt");
         let key_path = cert_dir.join("node.key");
@@ -1917,7 +2506,13 @@ mod tests {
 
     fn record_pending_fence(commands: &Sender<Command>, replica_name: &str, node_id: &str) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordPendingFence(replica_name.to_string(), node_id.to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordPendingFence(
+                replica_name.to_string(),
+                node_id.to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
     }
 
@@ -1928,7 +2523,12 @@ mod tests {
         register_node(&cp_addr, "node-a", &node_addr);
         record_pending_fence(&commands, "db-0", "node-a");
 
-        let (status, _) = send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\n");
+        let (status, _) = send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\n",
+        );
         assert_eq!(status, 200);
 
         // The forced DELETE is fire-and-forget from the heartbeat response's
@@ -1938,8 +2538,14 @@ mod tests {
         // should come back empty on the next check).
         std::thread::sleep(Duration::from_millis(100));
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::PendingFencesForNode("node-a".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), Vec::<String>::new(), "expected the fence to have been cleared after a successful forced delete");
+        commands
+            .send(Command::PendingFencesForNode("node-a".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            Vec::<String>::new(),
+            "expected the fence to have been cleared after a successful forced delete"
+        );
     }
 
     #[test]
@@ -1951,12 +2557,23 @@ mod tests {
         register_node(&cp_addr, "node-b", &node_b);
         record_pending_fence(&commands, "db-0", "node-a");
 
-        send_request(&cp_addr, "POST", "/nodes/node-b/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-b/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\n",
+        );
 
         std::thread::sleep(Duration::from_millis(100));
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::PendingFencesForNode("node-a".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), vec!["db-0".to_string()], "expected node-a's fence to remain, untouched by node-b's heartbeat");
+        commands
+            .send(Command::PendingFencesForNode("node-a".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            vec!["db-0".to_string()],
+            "expected node-a's fence to remain, untouched by node-b's heartbeat"
+        );
     }
 
     #[test]
@@ -1967,17 +2584,34 @@ mod tests {
         register_node(&cp_addr, "node-a", &node_addr);
         record_pending_fence(&commands, "db-0", "node-a");
 
-        send_request(&cp_addr, "POST", "/nodes/node-a/heartbeat", "committed_cpu: 0\ncommitted_memory: 0\n");
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-a/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\n",
+        );
 
         std::thread::sleep(Duration::from_millis(100));
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::PendingFencesForNode("node-a".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), vec!["db-0".to_string()], "expected the fence to remain after a failed forced delete");
+        commands
+            .send(Command::PendingFencesForNode("node-a".to_string(), tx))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            vec!["db-0".to_string()],
+            "expected the fence to remain after a failed forced delete"
+        );
     }
 
     fn record_placement(commands: &Sender<Command>, jail_name: &str, node_id: &str) {
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordPlacement(jail_name.to_string(), node_id.to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordPlacement(
+                jail_name.to_string(),
+                node_id.to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
     }
 
@@ -2010,7 +2644,13 @@ mod tests {
         register_node(&cp_addr, "node-b", &node_b);
         record_placement(&commands, "db-0", "node-a");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-b".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         let (status, body) = send_request(&cp_addr, "POST", "/replicas/db-0/force-repin", "");
@@ -2039,12 +2679,21 @@ mod tests {
         apply_service_with_template_via_http(&cp_addr, "db", 1);
         record_placement(&commands, "db-0", "node-unreachable");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-b".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         let (status, body) = send_request(&cp_addr, "POST", "/replicas/db-0/force-repin", "");
         assert_eq!(status, 409);
-        assert!(body.contains("has not completed a first full replication"), "got: {body}");
+        assert!(
+            body.contains("has not completed a first full replication"),
+            "got: {body}"
+        );
     }
 
     #[test]
@@ -2066,7 +2715,13 @@ mod tests {
         apply_service_with_template_via_http(&cp_addr, "db", 1);
         record_placement(&commands, "db-0", "node-unreachable");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-b".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         // Simulate node-b already having a fully-replicated ReplicaTarget by
@@ -2082,11 +2737,23 @@ mod tests {
         assert_eq!(status, 200);
 
         let (status, body) = send_request(&cp_addr, "GET", "/jails/db-0", "");
-        assert_eq!(status, 200, "expected db-0's placement to now resolve to the promoted node, got: {body}");
+        assert_eq!(
+            status, 200,
+            "expected db-0's placement to now resolve to the promoted node, got: {body}"
+        );
 
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::PendingFencesForNode("node-unreachable".to_string(), tx)).unwrap();
-        assert_eq!(rx.recv().unwrap(), vec!["db-0".to_string()], "expected the old primary to be fenced");
+        commands
+            .send(Command::PendingFencesForNode(
+                "node-unreachable".to_string(),
+                tx,
+            ))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            vec!["db-0".to_string()],
+            "expected the old primary to be fenced"
+        );
     }
 
     #[test]
@@ -2109,14 +2776,24 @@ mod tests {
         // bumps on every call, including the first).
         record_placement(&commands, "db-0", "node-unreachable");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-b".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         let (status, _) = send_request(&cp_addr, "POST", "/replicas/db-0/force-repin", "");
         assert_eq!(status, 200);
 
         let recorded = node_b_bodies.lock().unwrap();
-        assert_eq!(recorded.len(), 1, "expected exactly one PUT /jails/db-0 to the promoted node, got: {recorded:?}");
+        assert_eq!(
+            recorded.len(),
+            1,
+            "expected exactly one PUT /jails/db-0 to the promoted node, got: {recorded:?}"
+        );
         assert!(
             recorded[0].contains("generation: 2"),
             "expected the promoted primary's generation (2) to be strictly higher than the old primary's (1), got body: {}",
@@ -2125,14 +2802,16 @@ mod tests {
     }
 
     #[test]
-    fn force_repin_immediately_pushes_a_delete_to_the_old_primary_without_waiting_for_its_heartbeat() {
+    fn force_repin_immediately_pushes_a_delete_to_the_old_primary_without_waiting_for_its_heartbeat(
+    ) {
         let (cp_addr, commands) = start_test_server_with_commands();
 
         // Registered now, then aged past DEAD_THRESHOLD below -- unlike the
         // other force-repin tests' "node-unreachable" (never registered at
         // all, which resolve()-fails identically but leaves no address on
         // file), this one needs a real address for last_known_addr to find.
-        let (old_primary_addr, old_primary_deletes) = start_fake_remote_tls_agentd_recording_deletes(200);
+        let (old_primary_addr, old_primary_deletes) =
+            start_fake_remote_tls_agentd_recording_deletes(200);
         register_node(&cp_addr, "old-primary", &old_primary_addr);
 
         std::thread::sleep(std::time::Duration::from_secs(16));
@@ -2151,7 +2830,13 @@ mod tests {
         apply_service_with_template_via_http(&cp_addr, "db", 1);
         record_placement(&commands, "db-0", "old-primary");
         let (tx, rx) = mpsc::channel();
-        commands.send(Command::RecordStandby("db-0".to_string(), "node-b".to_string(), tx)).unwrap();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-b".to_string(),
+                tx,
+            ))
+            .unwrap();
         rx.recv().unwrap();
 
         let (status, body) = send_request(&cp_addr, "POST", "/replicas/db-0/force-repin", "");
@@ -2165,6 +2850,11 @@ mod tests {
     }
 
     fn apply_service_with_template_via_http(cp_addr: &str, name: &str, replicas: u32) {
-        send_request(cp_addr, "PUT", &format!("/services/{name}"), &stateful_service_yaml(name, replicas));
+        send_request(
+            cp_addr,
+            "PUT",
+            &format!("/services/{name}"),
+            &stateful_service_yaml(name, replicas),
+        );
     }
 }

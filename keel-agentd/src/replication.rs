@@ -65,14 +65,23 @@ fn read_len_prefixed(stream: &mut dyn Read) -> io::Result<String> {
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame length {len} exceeds max of {MAX_FRAME_BYTES}")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame length {len} exceeds max of {MAX_FRAME_BYTES}"),
+        ));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-pub fn write_header(stream: &mut dyn Write, replica_name: &str, snapshot_id: &str, base_snapshot_id: Option<&str>, generation: u64) -> io::Result<()> {
+pub fn write_header(
+    stream: &mut dyn Write,
+    replica_name: &str,
+    snapshot_id: &str,
+    base_snapshot_id: Option<&str>,
+    generation: u64,
+) -> io::Result<()> {
     write_len_prefixed(stream, replica_name)?;
     write_len_prefixed(stream, snapshot_id)?;
     match base_snapshot_id {
@@ -97,7 +106,12 @@ pub fn read_header(stream: &mut dyn Read) -> io::Result<Header> {
     let mut generation_buf = [0u8; 8];
     stream.read_exact(&mut generation_buf)?;
     let generation = u64::from_be_bytes(generation_buf);
-    Ok(Header { replica_name, snapshot_id, base_snapshot_id, generation })
+    Ok(Header {
+        replica_name,
+        snapshot_id,
+        base_snapshot_id,
+        generation,
+    })
 }
 
 #[derive(Clone)]
@@ -109,8 +123,14 @@ pub struct ReplicaTargetRegistry {
 impl ReplicaTargetRegistry {
     pub fn load(state_dir: PathBuf) -> Result<Self, crate::store::StoreError> {
         let loaded = replica_target_store::load_all(&state_dir)?;
-        let by_name = loaded.into_iter().map(|t| (t.replica_name.clone(), t)).collect();
-        Ok(Self { state_dir, by_name: Arc::new(Mutex::new(by_name)) })
+        let by_name = loaded
+            .into_iter()
+            .map(|t| (t.replica_name.clone(), t))
+            .collect();
+        Ok(Self {
+            state_dir,
+            by_name: Arc::new(Mutex::new(by_name)),
+        })
     }
 
     pub fn get(&self, replica_name: &str) -> Option<ReplicaTarget> {
@@ -126,23 +146,32 @@ impl ReplicaTargetRegistry {
     pub fn remove(&self, replica_name: &str) {
         self.by_name.lock().unwrap().remove(replica_name);
         if let Err(e) = replica_target_store::remove(&self.state_dir, replica_name) {
-            eprintln!("keel-agentd: failed to remove persisted replica target '{replica_name}': {e}");
+            eprintln!(
+                "keel-agentd: failed to remove persisted replica target '{replica_name}': {e}"
+            );
         }
     }
 
     /// Creates the target on first contact (`volume_dataset`/`source_node_addr`
     /// as given, `last_snapshot: None`) or refreshes `source_node_addr` on an
     /// existing one, without touching its `last_snapshot`. Persists to disk.
-    fn ensure(&self, replica_name: &str, volume_dataset: &str, source_node_addr: &str) -> Result<ReplicaTarget, crate::store::StoreError> {
+    fn ensure(
+        &self,
+        replica_name: &str,
+        volume_dataset: &str,
+        source_node_addr: &str,
+    ) -> Result<ReplicaTarget, crate::store::StoreError> {
         let target = {
             let mut guard = self.by_name.lock().unwrap();
-            let target = guard.entry(replica_name.to_string()).or_insert_with(|| ReplicaTarget {
-                replica_name: replica_name.to_string(),
-                volume_dataset: volume_dataset.to_string(),
-                source_node_addr: source_node_addr.to_string(),
-                last_snapshot: None,
-                highest_generation_seen: 0,
-            });
+            let target = guard
+                .entry(replica_name.to_string())
+                .or_insert_with(|| ReplicaTarget {
+                    replica_name: replica_name.to_string(),
+                    volume_dataset: volume_dataset.to_string(),
+                    source_node_addr: source_node_addr.to_string(),
+                    last_snapshot: None,
+                    highest_generation_seen: 0,
+                });
             target.source_node_addr = source_node_addr.to_string();
             target.clone()
         };
@@ -161,7 +190,9 @@ impl ReplicaTargetRegistry {
     fn accept_generation(&self, replica_name: &str, generation: u64) -> bool {
         let target = {
             let mut guard = self.by_name.lock().unwrap();
-            let Some(target) = guard.get_mut(replica_name) else { return false };
+            let Some(target) = guard.get_mut(replica_name) else {
+                return false;
+            };
             if generation < target.highest_generation_seen {
                 return false;
             }
@@ -179,7 +210,11 @@ impl ReplicaTargetRegistry {
         true
     }
 
-    fn record_snapshot(&self, replica_name: &str, snapshot_id: &str) -> Result<(), crate::store::StoreError> {
+    fn record_snapshot(
+        &self,
+        replica_name: &str,
+        snapshot_id: &str,
+    ) -> Result<(), crate::store::StoreError> {
         let target = {
             let mut guard = self.by_name.lock().unwrap();
             match guard.get_mut(replica_name) {
@@ -198,8 +233,14 @@ impl ReplicaTargetRegistry {
 
     /// Test helper: seed a `ReplicaTarget` directly, bypassing the network
     /// handshake in `handle_connection`.
-    pub fn ensure_for_test(&self, replica_name: &str, volume_dataset: &str, source_node_addr: &str) {
-        self.ensure(replica_name, volume_dataset, source_node_addr).unwrap();
+    pub fn ensure_for_test(
+        &self,
+        replica_name: &str,
+        volume_dataset: &str,
+        source_node_addr: &str,
+    ) {
+        self.ensure(replica_name, volume_dataset, source_node_addr)
+            .unwrap();
     }
 
     /// Test helper: mark a `ReplicaTarget` as having completed a snapshot,
@@ -227,14 +268,23 @@ impl ReplicaTargetRegistry {
 /// directly. The volume/dataset name is reconstructed from it here using
 /// the "one volume named `data` per stateful replica" convention already
 /// hardcoded in `worker.rs`'s `Command::Apply` handler.
-fn handle_connection<Z: ZfsManager>(stream: &mut TlsStream, zfs: &Z, pool: &str, targets: &ReplicaTargetRegistry) -> io::Result<()> {
+fn handle_connection<Z: ZfsManager>(
+    stream: &mut TlsStream,
+    zfs: &Z,
+    pool: &str,
+    targets: &ReplicaTargetRegistry,
+) -> io::Result<()> {
     let header = read_header(stream)?;
     let volume_name = format!("{}-data", header.replica_name);
     let dataset = crate::record::volume_dataset_path(pool, &volume_name);
-    let peer_addr = stream.sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    let peer_addr = stream
+        .sock
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     let target = targets
         .ensure(&header.replica_name, &dataset, &peer_addr)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     if !targets.accept_generation(&header.replica_name, header.generation) {
         stream.write_all(&[ACK_STALE_GENERATION])?;
@@ -256,10 +306,11 @@ fn handle_connection<Z: ZfsManager>(stream: &mut TlsStream, zfs: &Z, pool: &str,
     // completion, real or fake) sees the same clean end-of-stream a raw,
     // non-TLS socket would have given it.
     let mut reader = EofTolerantRead(stream);
-    zfs.receive_snapshot(&dataset, &mut reader).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    zfs.receive_snapshot(&dataset, &mut reader)
+        .map_err(|e| io::Error::other(e.to_string()))?;
     targets
         .record_snapshot(&header.replica_name, &header.snapshot_id)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 struct EofTolerantRead<'a, R: Read>(&'a mut R);
@@ -289,7 +340,9 @@ pub fn run<Z: ZfsManager + Clone + Send + 'static>(
         let targets = targets.clone();
         let tls_config = reloading_tls.server_config();
         thread::spawn(move || {
-            let Ok(conn) = ServerConnection::new(tls_config) else { return };
+            let Ok(conn) = ServerConnection::new(tls_config) else {
+                return;
+            };
             let mut tls_stream = TlsStream::new(conn, stream);
             if let Err(e) = handle_connection(&mut tls_stream, &zfs, &pool, &targets) {
                 eprintln!("keel-agentd: replication connection failed: {e}");
@@ -315,8 +368,14 @@ mod tests {
     }
 
     fn test_reloading_tls() -> Arc<ReloadingTls> {
-        ReloadingTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), fixture("ca.crt"), fixture("crl.pem"), Duration::from_secs(3600))
-            .unwrap()
+        ReloadingTls::spawn(
+            fixture("fixture-node.crt"),
+            fixture("fixture-node.key"),
+            fixture("ca.crt"),
+            fixture("crl.pem"),
+            Duration::from_secs(3600),
+        )
+        .unwrap()
     }
 
     type ClientTlsStream = StreamOwned<rustls::ClientConnection, TcpStream>;
@@ -325,8 +384,13 @@ mod tests {
     /// listener, standing in for another node's own replication sender.
     fn connect_tls(addr: std::net::SocketAddr) -> ClientTlsStream {
         let client_config = Arc::new(
-            crate::tls::load_client_config(&fixture("fixture-client.crt"), &fixture("fixture-client.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            crate::tls::load_client_config(
+                &fixture("fixture-client.crt"),
+                &fixture("fixture-client.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         let server_name = crate::tls::server_name_from_addr(&addr.to_string()).unwrap();
         let tcp_stream = TcpStream::connect(addr).unwrap();
@@ -341,14 +405,20 @@ mod tests {
         let _client = TcpStream::connect(addr).unwrap();
         let (server_stream, _) = listener.accept().unwrap();
         apply_read_timeout(&server_stream);
-        assert_eq!(server_stream.read_timeout().unwrap(), Some(CONNECTION_READ_TIMEOUT));
+        assert_eq!(
+            server_stream.read_timeout().unwrap(),
+            Some(CONNECTION_READ_TIMEOUT)
+        );
     }
 
     #[test]
     fn read_len_prefixed_rejects_a_length_prefix_beyond_the_max_frame_size() {
         let len_buf = (MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
         let result = read_len_prefixed(&mut len_buf.as_slice());
-        assert!(result.is_err(), "an oversized length prefix must be rejected before allocating");
+        assert!(
+            result.is_err(),
+            "an oversized length prefix must be rejected before allocating"
+        );
     }
 
     #[test]
@@ -366,7 +436,12 @@ mod tests {
         let header = read_header(&mut buf.as_slice()).unwrap();
         assert_eq!(
             header,
-            Header { replica_name: "db-0".to_string(), snapshot_id: "keel-repl-1".to_string(), base_snapshot_id: None, generation: 0 }
+            Header {
+                replica_name: "db-0".to_string(),
+                snapshot_id: "keel-repl-1".to_string(),
+                base_snapshot_id: None,
+                generation: 0
+            }
         );
     }
 
@@ -403,10 +478,16 @@ mod tests {
 
         targets.remove("db-0");
 
-        assert!(targets.get("db-0").is_none(), "expected the target gone from the in-memory registry");
+        assert!(
+            targets.get("db-0").is_none(),
+            "expected the target gone from the in-memory registry"
+        );
         // A fresh load from the same state_dir must not resurrect it either.
         let reloaded = ReplicaTargetRegistry::load(dir).unwrap();
-        assert!(reloaded.get("db-0").is_none(), "expected the target gone from disk too");
+        assert!(
+            reloaded.get("db-0").is_none(),
+            "expected the target gone from disk too"
+        );
     }
 
     #[test]
@@ -423,7 +504,9 @@ mod tests {
         let targets = ReplicaTargetRegistry::load(dir).unwrap();
         let sender_zfs = FakeZfsManager::new();
         sender_zfs.seed_dataset("zroot/keel/volumes/db-0-data");
-        sender_zfs.snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1").unwrap();
+        sender_zfs
+            .snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1")
+            .unwrap();
         let receiver_zfs = FakeZfsManager::new();
 
         let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
@@ -432,7 +515,15 @@ mod tests {
         let targets_clone = targets.clone();
         let receiver_zfs_clone = receiver_zfs.clone();
         let reloading_tls = test_reloading_tls();
-        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
+        thread::spawn(move || {
+            run(
+                listener,
+                receiver_zfs_clone,
+                pool,
+                targets_clone,
+                reloading_tls,
+            )
+        });
 
         let mut stream = connect_tls(addr);
         write_header(&mut stream, "db-0", "keel-repl-1", None, 0).unwrap();
@@ -440,12 +531,23 @@ mod tests {
         stream.read_exact(&mut ack).unwrap();
         assert_eq!(ack[0], ACK_PROCEED);
 
-        sender_zfs.send_snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1", None, &mut stream).unwrap();
+        sender_zfs
+            .send_snapshot(
+                "zroot/keel/volumes/db-0-data",
+                "keel-repl-1",
+                None,
+                &mut stream,
+            )
+            .unwrap();
         stream.sock.shutdown(std::net::Shutdown::Write).unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(receiver_zfs.dataset_exists("zroot/keel/volumes/db-0-data").unwrap());
-        let target = targets.get("db-0").expect("expected a ReplicaTarget to have been created on first contact");
+        assert!(receiver_zfs
+            .dataset_exists("zroot/keel/volumes/db-0-data")
+            .unwrap());
+        let target = targets
+            .get("db-0")
+            .expect("expected a ReplicaTarget to have been created on first contact");
         assert_eq!(target.last_snapshot, Some("keel-repl-1".to_string()));
     }
 
@@ -461,7 +563,15 @@ mod tests {
         let targets_clone = targets.clone();
         let receiver_zfs_clone = receiver_zfs.clone();
         let reloading_tls = test_reloading_tls();
-        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
+        thread::spawn(move || {
+            run(
+                listener,
+                receiver_zfs_clone,
+                pool,
+                targets_clone,
+                reloading_tls,
+            )
+        });
 
         let mut stream = connect_tls(addr);
         // This node has no ReplicaTarget yet (last_snapshot is None), so
@@ -472,12 +582,16 @@ mod tests {
         assert_eq!(ack[0], ACK_NEED_FULL);
 
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(!receiver_zfs.dataset_exists("zroot/keel/volumes/db-0-data").unwrap());
+        assert!(!receiver_zfs
+            .dataset_exists("zroot/keel/volumes/db-0-data")
+            .unwrap());
     }
 
     #[test]
     fn a_plain_tcp_connection_with_no_tls_handshake_never_reaches_the_protocol() {
-        let dir = test_state_dir("a_plain_tcp_connection_with_no_tls_handshake_never_reaches_the_protocol");
+        let dir = test_state_dir(
+            "a_plain_tcp_connection_with_no_tls_handshake_never_reaches_the_protocol",
+        );
         let targets = ReplicaTargetRegistry::load(dir).unwrap();
         let receiver_zfs = FakeZfsManager::new();
 
@@ -487,7 +601,15 @@ mod tests {
         let targets_clone = targets.clone();
         let receiver_zfs_clone = receiver_zfs.clone();
         let reloading_tls = test_reloading_tls();
-        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
+        thread::spawn(move || {
+            run(
+                listener,
+                receiver_zfs_clone,
+                pool,
+                targets_clone,
+                reloading_tls,
+            )
+        });
 
         // A bare TCP client that skips the TLS handshake entirely and just
         // writes the wire header as plaintext -- what any of the previous
@@ -503,12 +625,17 @@ mod tests {
         write_header(&mut stream, "db-0", "keel-repl-1", None, 0).unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(targets.get("db-0").is_none(), "a non-TLS connection must never reach the replica-target bookkeeping");
+        assert!(
+            targets.get("db-0").is_none(),
+            "a non-TLS connection must never reach the replica-target bookkeeping"
+        );
     }
 
     #[test]
     fn a_stale_generation_is_rejected_without_reading_a_payload_or_touching_last_snapshot() {
-        let dir = test_state_dir("a_stale_generation_is_rejected_without_reading_a_payload_or_touching_last_snapshot");
+        let dir = test_state_dir(
+            "a_stale_generation_is_rejected_without_reading_a_payload_or_touching_last_snapshot",
+        );
         let targets = ReplicaTargetRegistry::load(dir).unwrap();
         let receiver_zfs = FakeZfsManager::new();
 
@@ -518,20 +645,37 @@ mod tests {
         let targets_clone = targets.clone();
         let receiver_zfs_clone = receiver_zfs.clone();
         let reloading_tls = test_reloading_tls();
-        thread::spawn(move || run(listener, receiver_zfs_clone, pool, targets_clone, reloading_tls));
+        thread::spawn(move || {
+            run(
+                listener,
+                receiver_zfs_clone,
+                pool,
+                targets_clone,
+                reloading_tls,
+            )
+        });
 
         // A real primary at generation 2 completes a full send first (the
         // standby now has both a `last_snapshot` and a known-highest
         // generation of 2).
         let sender_zfs = FakeZfsManager::new();
         sender_zfs.seed_dataset("zroot/keel/volumes/db-0-data");
-        sender_zfs.snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1").unwrap();
+        sender_zfs
+            .snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1")
+            .unwrap();
         let mut stream = connect_tls(addr);
         write_header(&mut stream, "db-0", "keel-repl-1", None, 2).unwrap();
         let mut ack = [0u8; 1];
         stream.read_exact(&mut ack).unwrap();
         assert_eq!(ack[0], ACK_PROCEED);
-        sender_zfs.send_snapshot("zroot/keel/volumes/db-0-data", "keel-repl-1", None, &mut stream).unwrap();
+        sender_zfs
+            .send_snapshot(
+                "zroot/keel/volumes/db-0-data",
+                "keel-repl-1",
+                None,
+                &mut stream,
+            )
+            .unwrap();
         stream.sock.shutdown(std::net::Shutdown::Write).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -546,7 +690,14 @@ mod tests {
         assert_eq!(stale_ack[0], ACK_STALE_GENERATION);
 
         let target = targets.get("db-0").unwrap();
-        assert_eq!(target.last_snapshot, Some("keel-repl-1".to_string()), "the stale sender's rejected attempt must not touch last_snapshot");
-        assert_eq!(target.highest_generation_seen, 2, "the stale sender's generation must not overwrite the real one");
+        assert_eq!(
+            target.last_snapshot,
+            Some("keel-repl-1".to_string()),
+            "the stale sender's rejected attempt must not touch last_snapshot"
+        );
+        assert_eq!(
+            target.highest_generation_seen, 2,
+            "the stale sender's generation must not overwrite the real one"
+        );
     }
 }

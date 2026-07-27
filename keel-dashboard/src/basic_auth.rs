@@ -8,10 +8,18 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 /// wrong.
 pub fn check(header: Option<&str>, expected_user: &str, expected_password: &str) -> bool {
     let Some(header) = header else { return false };
-    let Some(encoded) = header.strip_prefix("Basic ") else { return false };
-    let Ok(decoded_bytes) = STANDARD.decode(encoded) else { return false };
-    let Ok(decoded) = String::from_utf8(decoded_bytes) else { return false };
-    let Some((user, password)) = decoded.split_once(':') else { return false };
+    let Some(encoded) = header.strip_prefix("Basic ") else {
+        return false;
+    };
+    let Ok(decoded_bytes) = STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Ok(decoded) = String::from_utf8(decoded_bytes) else {
+        return false;
+    };
+    let Some((user, password)) = decoded.split_once(':') else {
+        return false;
+    };
     user == expected_user && password == expected_password
 }
 
@@ -25,17 +33,29 @@ mod tests {
 
     #[test]
     fn correct_credentials_pass() {
-        assert!(check(Some(&header_for("admin", "hunter2")), "admin", "hunter2"));
+        assert!(check(
+            Some(&header_for("admin", "hunter2")),
+            "admin",
+            "hunter2"
+        ));
     }
 
     #[test]
     fn wrong_password_fails() {
-        assert!(!check(Some(&header_for("admin", "wrong")), "admin", "hunter2"));
+        assert!(!check(
+            Some(&header_for("admin", "wrong")),
+            "admin",
+            "hunter2"
+        ));
     }
 
     #[test]
     fn wrong_user_fails() {
-        assert!(!check(Some(&header_for("someone-else", "hunter2")), "admin", "hunter2"));
+        assert!(!check(
+            Some(&header_for("someone-else", "hunter2")),
+            "admin",
+            "hunter2"
+        ));
     }
 
     #[test]
@@ -55,7 +75,11 @@ mod tests {
 
     #[test]
     fn missing_colon_separator_fails() {
-        assert!(!check(Some(&format!("Basic {}", STANDARD.encode("no-colon-here"))), "admin", "hunter2"));
+        assert!(!check(
+            Some(&format!("Basic {}", STANDARD.encode("no-colon-here"))),
+            "admin",
+            "hunter2"
+        ));
     }
 
     #[test]

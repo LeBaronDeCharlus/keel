@@ -8,12 +8,12 @@ pub use error::SpecError;
 pub use resources::{cores_to_pcpu_percent, parse_cpu_cores, parse_memory_bytes};
 pub use types::{
     IngressBackend, IngressSpec, IngressSpecBody, IngressTls, JailSpec, JailTemplate, Metadata,
-    NetworkSpec, RestartPolicy, ResourcesSpec, ServiceSpec, ServiceSpecBody, Spec,
+    NetworkSpec, ResourcesSpec, RestartPolicy, ServiceSpec, ServiceSpecBody, Spec,
     TemplateNetworkSpec, VolumeMount,
 };
 pub use validate::{
-    validate_address, validate_bridge, validate_email, validate_host, validate_image, validate_mount_path,
-    validate_name, validate_transition, validate_volumes,
+    validate_address, validate_bridge, validate_email, validate_host, validate_image,
+    validate_mount_path, validate_name, validate_transition, validate_volumes,
 };
 pub use wire::{error_response, yaml_response, ErrorBody};
 
@@ -30,7 +30,8 @@ pub fn parse_and_validate(yaml: &str) -> Result<JailSpec, SpecError> {
 }
 
 pub fn parse_and_validate_service(yaml: &str) -> Result<ServiceSpec, SpecError> {
-    let spec: ServiceSpec = serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
+    let spec: ServiceSpec =
+        serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
     validate::validate_name(&spec.metadata.name)?;
     validate::validate_image(&spec.spec.template.image)?;
     validate::validate_bridge(&spec.spec.template.network.bridge)?;
@@ -44,7 +45,8 @@ pub fn parse_and_validate_service(yaml: &str) -> Result<ServiceSpec, SpecError> 
 }
 
 pub fn parse_and_validate_ingress(yaml: &str) -> Result<types::IngressSpec, SpecError> {
-    let spec: types::IngressSpec = serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
+    let spec: types::IngressSpec =
+        serde_yaml::from_str(yaml).map_err(|e| SpecError::Yaml(e.to_string()))?;
     validate::validate_name(&spec.metadata.name)?;
     validate::validate_host(&spec.spec.host)?;
     validate::validate_email(&spec.spec.tls.email)?;
@@ -100,13 +102,19 @@ spec:
     #[test]
     fn parse_and_validate_service_rejects_an_invalid_name() {
         let yaml = VALID_SERVICE_YAML.replace("name: web", "name: Invalid_Name");
-        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidName(_))));
+        assert!(matches!(
+            parse_and_validate_service(&yaml),
+            Err(SpecError::InvalidName(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_service_rejects_invalid_resources() {
         let yaml = VALID_SERVICE_YAML.replace("cpu: \"1\"", "cpu: \"0\"");
-        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidCpu(_))));
+        assert!(matches!(
+            parse_and_validate_service(&yaml),
+            Err(SpecError::InvalidCpu(_))
+        ));
     }
 
     #[test]
@@ -118,7 +126,10 @@ spec:
     #[test]
     fn parse_and_validate_service_rejects_port_zero() {
         let yaml = VALID_SERVICE_YAML.replace("port: 8080", "port: 0");
-        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidPort(0))));
+        assert!(matches!(
+            parse_and_validate_service(&yaml),
+            Err(SpecError::InvalidPort(0))
+        ));
     }
 
     #[test]
@@ -143,7 +154,10 @@ spec:
             "    restartPolicy: Always\n",
             "    restartPolicy: Always\n    volumes:\n      - name: Invalid_Name\n        mountPath: /data\n        size: 1G\n",
         );
-        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidName(_))));
+        assert!(matches!(
+            parse_and_validate_service(&yaml),
+            Err(SpecError::InvalidName(_))
+        ));
     }
 
     const VALID_INGRESS_YAML: &str = r#"
@@ -173,31 +187,46 @@ spec:
     #[test]
     fn parse_and_validate_ingress_rejects_an_invalid_name() {
         let yaml = VALID_INGRESS_YAML.replace("name: blog", "name: Invalid_Name");
-        assert!(matches!(parse_and_validate_ingress(&yaml), Err(SpecError::InvalidName(_))));
+        assert!(matches!(
+            parse_and_validate_ingress(&yaml),
+            Err(SpecError::InvalidName(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_ingress_rejects_a_malformed_host() {
         let yaml = VALID_INGRESS_YAML.replace("host: example.com", "host: not a host!");
-        assert!(matches!(parse_and_validate_ingress(&yaml), Err(SpecError::InvalidHost(_))));
+        assert!(matches!(
+            parse_and_validate_ingress(&yaml),
+            Err(SpecError::InvalidHost(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_ingress_rejects_a_host_with_no_dot() {
         let yaml = VALID_INGRESS_YAML.replace("host: example.com", "host: localhost");
-        assert!(matches!(parse_and_validate_ingress(&yaml), Err(SpecError::InvalidHost(_))));
+        assert!(matches!(
+            parse_and_validate_ingress(&yaml),
+            Err(SpecError::InvalidHost(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_ingress_rejects_port_zero() {
         let yaml = VALID_INGRESS_YAML.replace("port: 8080", "port: 0");
-        assert!(matches!(parse_and_validate_ingress(&yaml), Err(SpecError::InvalidPort(0))));
+        assert!(matches!(
+            parse_and_validate_ingress(&yaml),
+            Err(SpecError::InvalidPort(0))
+        ));
     }
 
     #[test]
     fn parse_and_validate_ingress_rejects_a_malformed_email() {
         let yaml = VALID_INGRESS_YAML.replace("email: admin@example.com", "email: not-an-email");
-        assert!(matches!(parse_and_validate_ingress(&yaml), Err(SpecError::InvalidEmail(_))));
+        assert!(matches!(
+            parse_and_validate_ingress(&yaml),
+            Err(SpecError::InvalidEmail(_))
+        ));
     }
 
     #[test]
@@ -231,24 +260,36 @@ spec:
     #[test]
     fn parse_and_validate_rejects_an_image_outside_the_base_namespace() {
         let yaml = VALID_JAIL_YAML.replace("image: base/14.2-web", "image: jails/other-jail");
-        assert!(matches!(parse_and_validate(&yaml), Err(SpecError::InvalidImage(_))));
+        assert!(matches!(
+            parse_and_validate(&yaml),
+            Err(SpecError::InvalidImage(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_rejects_a_bridge_outside_the_keel_naming_convention() {
         let yaml = VALID_JAIL_YAML.replace("bridge: keel0", "bridge: lo0");
-        assert!(matches!(parse_and_validate(&yaml), Err(SpecError::InvalidBridge(_))));
+        assert!(matches!(
+            parse_and_validate(&yaml),
+            Err(SpecError::InvalidBridge(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_service_rejects_an_image_outside_the_base_namespace() {
         let yaml = VALID_SERVICE_YAML.replace("image: base/14.2-web", "image: volumes/web-data");
-        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidImage(_))));
+        assert!(matches!(
+            parse_and_validate_service(&yaml),
+            Err(SpecError::InvalidImage(_))
+        ));
     }
 
     #[test]
     fn parse_and_validate_service_rejects_a_bridge_outside_the_keel_naming_convention() {
         let yaml = VALID_SERVICE_YAML.replace("bridge: keel0", "bridge: em0");
-        assert!(matches!(parse_and_validate_service(&yaml), Err(SpecError::InvalidBridge(_))));
+        assert!(matches!(
+            parse_and_validate_service(&yaml),
+            Err(SpecError::InvalidBridge(_))
+        ));
     }
 }

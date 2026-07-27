@@ -19,12 +19,17 @@ impl UsedAddresses {
     }
 
     pub fn is_used(&self, node_id: &str, addr: Ipv4Addr) -> bool {
-        self.used_by_node.get(node_id).is_some_and(|set| set.contains(&addr))
+        self.used_by_node
+            .get(node_id)
+            .is_some_and(|set| set.contains(&addr))
     }
 
     pub fn record(&mut self, jail_name: String, node_id: String, addr: Ipv4Addr) {
         self.release(&jail_name);
-        self.used_by_node.entry(node_id.clone()).or_default().insert(addr);
+        self.used_by_node
+            .entry(node_id.clone())
+            .or_default()
+            .insert(addr);
         self.by_jail.insert(jail_name, (node_id, addr));
     }
 
@@ -46,8 +51,15 @@ impl UsedAddresses {
 /// broadcast addresses; the first host address (network-plus-1) is further
 /// skipped here because `keel-net`'s `bridge_gateway` (Milestone 14)
 /// permanently reserves it as the node's `keel0` bridge gateway.
-pub fn first_free_address(pod_cidr: Ipv4Net, node_id: &str, used: &UsedAddresses) -> Option<Ipv4Addr> {
-    pod_cidr.hosts().skip(1).find(|addr| !used.is_used(node_id, *addr))
+pub fn first_free_address(
+    pod_cidr: Ipv4Net,
+    node_id: &str,
+    used: &UsedAddresses,
+) -> Option<Ipv4Addr> {
+    pod_cidr
+        .hosts()
+        .skip(1)
+        .find(|addr| !used.is_used(node_id, *addr))
 }
 
 #[cfg(test)]
@@ -65,21 +77,30 @@ mod tests {
     #[test]
     fn first_free_address_skips_network_and_network_plus_one() {
         let used = UsedAddresses::new();
-        assert_eq!(first_free_address(cidr("10.0.60.0/24"), "node-1", &used), Some(addr("10.0.60.2")));
+        assert_eq!(
+            first_free_address(cidr("10.0.60.0/24"), "node-1", &used),
+            Some(addr("10.0.60.2"))
+        );
     }
 
     #[test]
     fn first_free_address_skips_addresses_already_recorded_used_on_that_node() {
         let mut used = UsedAddresses::new();
         used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
-        assert_eq!(first_free_address(cidr("10.0.60.0/24"), "node-1", &used), Some(addr("10.0.60.3")));
+        assert_eq!(
+            first_free_address(cidr("10.0.60.0/24"), "node-1", &used),
+            Some(addr("10.0.60.3"))
+        );
     }
 
     #[test]
     fn first_free_address_on_a_different_node_is_unaffected_by_another_nodes_usage() {
         let mut used = UsedAddresses::new();
         used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
-        assert_eq!(first_free_address(cidr("10.0.60.0/24"), "node-2", &used), Some(addr("10.0.60.2")));
+        assert_eq!(
+            first_free_address(cidr("10.0.60.0/24"), "node-2", &used),
+            Some(addr("10.0.60.2"))
+        );
     }
 
     #[test]
@@ -87,7 +108,10 @@ mod tests {
         let mut used = UsedAddresses::new();
         used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
         used.release("web-0");
-        assert_eq!(first_free_address(cidr("10.0.60.0/24"), "node-1", &used), Some(addr("10.0.60.2")));
+        assert_eq!(
+            first_free_address(cidr("10.0.60.0/24"), "node-1", &used),
+            Some(addr("10.0.60.2"))
+        );
     }
 
     #[test]
@@ -97,7 +121,10 @@ mod tests {
         used.record("web-0".to_string(), "node-2".to_string(), addr("10.0.60.5"));
 
         // The old (node-1, 10.0.60.2) pair must no longer be considered used.
-        assert_eq!(first_free_address(cidr("10.0.60.0/24"), "node-1", &used), Some(addr("10.0.60.2")));
+        assert_eq!(
+            first_free_address(cidr("10.0.60.0/24"), "node-1", &used),
+            Some(addr("10.0.60.2"))
+        );
         // The jail now resolves to its new node/address.
         assert_eq!(used.address_of("web-0"), Some(addr("10.0.60.5")));
     }
@@ -129,14 +156,20 @@ mod tests {
         // used, nothing remains.
         let mut used = UsedAddresses::new();
         used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
-        assert_eq!(first_free_address(cidr("10.0.60.0/30"), "node-1", &used), None);
+        assert_eq!(
+            first_free_address(cidr("10.0.60.0/30"), "node-1", &used),
+            None
+        );
     }
 
     #[test]
     fn used_addresses_round_trips_through_yaml() {
         let mut used = UsedAddresses::new();
         used.record("web-0".to_string(), "node-1".to_string(), addr("10.0.60.2"));
-        let path = std::env::temp_dir().join(format!("keel-controlplane-used-addresses-test-{}.yaml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "keel-controlplane-used-addresses-test-{}.yaml",
+            std::process::id()
+        ));
         crate::store::save(&path, &used).unwrap();
         let loaded: UsedAddresses = crate::store::load_or_default(&path);
         assert_eq!(loaded.address_of("web-0"), Some(addr("10.0.60.2")));

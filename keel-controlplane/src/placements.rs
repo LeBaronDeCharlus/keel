@@ -103,7 +103,11 @@ mod tests {
         placements.set("web-1".to_string(), "node-2".to_string());
         placements.remove("web-1");
         placements.set("web-1".to_string(), "node-3".to_string());
-        assert_eq!(placements.generation("web-1"), 3, "generation must keep counting up across a remove, never restart from zero");
+        assert_eq!(
+            placements.generation("web-1"),
+            3,
+            "generation must keep counting up across a remove, never restart from zero"
+        );
     }
 
     #[test]
@@ -121,7 +125,10 @@ mod tests {
         let mut placements = Placements::new();
         placements.set("web-0".to_string(), "node-1".to_string());
         placements.set("web-1".to_string(), "node-2".to_string());
-        let path = std::env::temp_dir().join(format!("keel-controlplane-placements-test-{}.yaml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "keel-controlplane-placements-test-{}.yaml",
+            std::process::id()
+        ));
         crate::store::save(&path, &placements).unwrap();
         let loaded: Placements = crate::store::load_or_default(&path);
         assert_eq!(loaded.get("web-0"), Some("node-1"));

@@ -15,7 +15,9 @@ impl Cert {
     pub fn expires_at_unix(&self) -> Result<i64, AcmeError> {
         let (_, pem) = x509_parser::pem::parse_x509_pem(self.cert_pem.as_bytes())
             .map_err(|e| AcmeError::Request(format!("failed to parse certificate PEM: {e}")))?;
-        let cert = pem.parse_x509().map_err(|e| AcmeError::Request(format!("failed to parse certificate: {e}")))?;
+        let cert = pem
+            .parse_x509()
+            .map_err(|e| AcmeError::Request(format!("failed to parse certificate: {e}")))?;
         Ok(cert.validity().not_after.timestamp())
     }
 }
@@ -36,7 +38,12 @@ pub enum AcmeError {
 }
 
 pub trait AcmeClient {
-    fn request_certificate(&self, domain: &str, contact_email: &str, dns: &dyn DnsProvider) -> Result<Cert, AcmeError>;
+    fn request_certificate(
+        &self,
+        domain: &str,
+        contact_email: &str,
+        dns: &dyn DnsProvider,
+    ) -> Result<Cert, AcmeError>;
 }
 
 /// The synthetic clock `FakeAcmeClient` issues certificates against.
@@ -70,9 +77,16 @@ impl FakeAcmeClient {
 }
 
 impl AcmeClient for FakeAcmeClient {
-    fn request_certificate(&self, domain: &str, _contact_email: &str, dns: &dyn DnsProvider) -> Result<Cert, AcmeError> {
+    fn request_certificate(
+        &self,
+        domain: &str,
+        _contact_email: &str,
+        dns: &dyn DnsProvider,
+    ) -> Result<Cert, AcmeError> {
         if *self.fail.lock().unwrap() {
-            return Err(AcmeError::Request(format!("simulated ACME failure for '{domain}'")));
+            return Err(AcmeError::Request(format!(
+                "simulated ACME failure for '{domain}'"
+            )));
         }
         let challenge_name = format!("_acme-challenge.{domain}");
         dns.create_txt_record(&challenge_name, "fake-token")?;
@@ -85,14 +99,24 @@ impl AcmeClient for FakeAcmeClient {
         // a typical Let's Encrypt issuance; each successive issuance is
         // pinned a full day later than the last on the synthetic clock
         // above, so consecutive fake issuances are always distinguishable.
-        let n = self.issuance_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let not_before = time::OffsetDateTime::from_unix_timestamp(FAKE_ISSUANCE_EPOCH_UNIX).unwrap() + time::Duration::days(n);
+        let n = self
+            .issuance_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let not_before = time::OffsetDateTime::from_unix_timestamp(FAKE_ISSUANCE_EPOCH_UNIX)
+            .unwrap()
+            + time::Duration::days(n);
         let key_pair = rcgen::KeyPair::generate().expect("key generation should not fail");
-        let mut params = rcgen::CertificateParams::new(vec![domain.to_string()]).expect("valid SAN should not fail");
+        let mut params = rcgen::CertificateParams::new(vec![domain.to_string()])
+            .expect("valid SAN should not fail");
         params.not_before = not_before;
         params.not_after = not_before + time::Duration::days(90);
-        let cert = params.self_signed(&key_pair).expect("self-signing should not fail");
-        Ok(Cert { cert_pem: cert.pem(), key_pem: key_pair.serialize_pem() })
+        let cert = params
+            .self_signed(&key_pair)
+            .expect("self-signing should not fail");
+        Ok(Cert {
+            cert_pem: cert.pem(),
+            key_pem: key_pair.serialize_pem(),
+        })
     }
 }
 
@@ -116,13 +140,19 @@ mod tests {
     #[test]
     fn expires_at_unix_parses_the_real_certificates_not_after() {
         let not_after = 1_900_000_000;
-        let cert = Cert { cert_pem: cert_with_expiry(1_800_000_000, not_after), key_pem: String::new() };
+        let cert = Cert {
+            cert_pem: cert_with_expiry(1_800_000_000, not_after),
+            key_pem: String::new(),
+        };
         assert_eq!(cert.expires_at_unix().unwrap(), not_after);
     }
 
     #[test]
     fn expires_at_unix_on_unparseable_pem_returns_an_error() {
-        let cert = Cert { cert_pem: "not a real certificate".to_string(), key_pem: String::new() };
+        let cert = Cert {
+            cert_pem: "not a real certificate".to_string(),
+            key_pem: String::new(),
+        };
         assert!(cert.expires_at_unix().is_err());
     }
 
@@ -130,16 +160,22 @@ mod tests {
     fn request_certificate_succeeds_and_drives_the_dns_challenge() {
         let dns = FakeDnsProvider::new();
         let acme = FakeAcmeClient::new();
-        let cert = acme.request_certificate("example.com", "admin@example.com", &dns).unwrap();
+        let cert = acme
+            .request_certificate("example.com", "admin@example.com", &dns)
+            .unwrap();
         // A real, parseable certificate now, not a placeholder string -- a
         // literal substring match against the domain name isn't meaningful
         // against real base64-encoded DER, so assert on real properties
         // instead: it parses, and its notAfter is 90 days past the fake
         // client's synthetic first-issuance instant.
-        let expires_at = cert.expires_at_unix().expect("expected a real, parseable certificate");
+        let expires_at = cert
+            .expires_at_unix()
+            .expect("expected a real, parseable certificate");
         assert_eq!(expires_at, FAKE_ISSUANCE_EPOCH_UNIX + 90 * 24 * 60 * 60);
         // The challenge record must be cleaned up by the time the cert comes back.
-        assert!(dns.wait_for_propagation("_acme-challenge.example.com", "fake-token").is_err());
+        assert!(dns
+            .wait_for_propagation("_acme-challenge.example.com", "fake-token")
+            .is_err());
     }
 
     #[test]
@@ -147,7 +183,9 @@ mod tests {
         let dns = FakeDnsProvider::new();
         let acme = FakeAcmeClient::new();
         acme.set_fail(true);
-        assert!(acme.request_certificate("example.com", "admin@example.com", &dns).is_err());
+        assert!(acme
+            .request_certificate("example.com", "admin@example.com", &dns)
+            .is_err());
     }
 
     #[test]

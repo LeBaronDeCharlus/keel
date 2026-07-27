@@ -59,7 +59,13 @@ impl NetManager for ProcessNetManager {
         Self::run_checked("ifconfig", &[bridge, "up"])
     }
 
-    fn attach_jail(&self, jail_name: &str, bridge: &str, epair_base: &str, address: &str) -> Result<(), NetError> {
+    fn attach_jail(
+        &self,
+        jail_name: &str,
+        bridge: &str,
+        epair_base: &str,
+        address: &str,
+    ) -> Result<(), NetError> {
         let bridge_check = Self::run("ifconfig", &[bridge])?;
         if !bridge_check.status.success() {
             return Err(NetError::NotFound(bridge.to_string()));
@@ -126,11 +132,20 @@ impl NetManager for ProcessNetManager {
             }
         }
 
-        Self::run_checked("jexec", &[jail_name, "/sbin/ifconfig", &epair_b, "inet", address])?;
+        Self::run_checked(
+            "jexec",
+            &[jail_name, "/sbin/ifconfig", &epair_b, "inet", address],
+        )?;
         Self::run_checked("jexec", &[jail_name, "/sbin/ifconfig", &epair_b, "up"])?;
 
-        let gateway_ip = gateway.split('/').next().expect("gateway string always contains '/'");
-        let route_add = Self::run("jexec", &[jail_name, "/sbin/route", "add", "default", gateway_ip])?;
+        let gateway_ip = gateway
+            .split('/')
+            .next()
+            .expect("gateway string always contains '/'");
+        let route_add = Self::run(
+            "jexec",
+            &[jail_name, "/sbin/route", "add", "default", gateway_ip],
+        )?;
         if route_add.status.success() || Self::stderr_contains(&route_add, "File exists") {
             Ok(())
         } else {
@@ -176,7 +191,10 @@ impl NetManager for ProcessNetManager {
         // real FreeBSD VPS during Milestone 21 verification. Checking for
         // both keeps this tolerant of whichever wording an older FreeBSD
         // release this project might still run against uses.
-        if output.status.success() || Self::stderr_contains(&output, "not in table") || Self::stderr_contains(&output, "has not been found") {
+        if output.status.success()
+            || Self::stderr_contains(&output, "not in table")
+            || Self::stderr_contains(&output, "has not been found")
+        {
             Ok(())
         } else {
             Err(NetError::CommandFailed(
@@ -210,7 +228,9 @@ impl NetManager for ProcessNetManager {
 
     fn remove_alias(&self, bridge: &str, address: &str) -> Result<(), NetError> {
         let output = Self::run("ifconfig", &[bridge, "-alias", address])?;
-        if output.status.success() || Self::stderr_contains(&output, "Can't assign requested address") {
+        if output.status.success()
+            || Self::stderr_contains(&output, "Can't assign requested address")
+        {
             Ok(())
         } else {
             Err(NetError::CommandFailed(

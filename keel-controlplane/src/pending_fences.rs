@@ -35,7 +35,10 @@ mod tests {
 
     #[test]
     fn for_node_on_an_empty_table_is_empty() {
-        assert_eq!(PendingFences::new().for_node("node-1"), Vec::<String>::new());
+        assert_eq!(
+            PendingFences::new().for_node("node-1"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -65,7 +68,10 @@ mod tests {
     fn pending_fences_round_trips_through_yaml() {
         let mut fences = PendingFences::new();
         fences.set("db-0".to_string(), "node-1".to_string());
-        let path = std::env::temp_dir().join(format!("keel-controlplane-pending-fences-test-{}.yaml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "keel-controlplane-pending-fences-test-{}.yaml",
+            std::process::id()
+        ));
         crate::store::save(&path, &fences).unwrap();
         let loaded: PendingFences = crate::store::load_or_default(&path);
         assert_eq!(loaded.for_node("node-1"), vec!["db-0".to_string()]);

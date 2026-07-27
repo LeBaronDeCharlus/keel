@@ -23,11 +23,21 @@ fn create_destroy_and_is_running_lifecycle() {
 
     let _ = runtime.destroy(name);
 
-    runtime.create(name, rootfs, false).expect("create should succeed");
-    assert_eq!(runtime.is_running(name).unwrap(), false, "no command started yet");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
+    assert_eq!(
+        runtime.is_running(name).unwrap(),
+        false,
+        "no command started yet"
+    );
 
     runtime.destroy(name).expect("destroy should succeed");
-    assert_eq!(runtime.is_running(name).unwrap(), false, "destroyed jail is not running");
+    assert_eq!(
+        runtime.is_running(name).unwrap(),
+        false,
+        "destroyed jail is not running"
+    );
 }
 
 #[test]
@@ -38,18 +48,32 @@ fn start_command_makes_is_running_true() {
     let bin_dir = rootfs.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::copy("/rescue/sh", bin_dir.join("sh")).expect("copy /rescue/sh into test rootfs");
-    std::fs::copy("/rescue/sleep", bin_dir.join("sleep")).expect("copy /rescue/sleep into test rootfs");
+    std::fs::copy("/rescue/sleep", bin_dir.join("sleep"))
+        .expect("copy /rescue/sleep into test rootfs");
 
     let _ = runtime.destroy(name);
-    runtime.create(name, rootfs, false).expect("create should succeed");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
 
     runtime
-        .start_command(name, &["/bin/sh".to_string(), "-c".to_string(), "sleep 30".to_string()])
+        .start_command(
+            name,
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+        )
         .expect("start_command should succeed");
 
     // Give jexec a moment to actually fork/exec before checking.
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(runtime.is_running(name).unwrap(), true, "sleep 30 should still be running");
+    assert_eq!(
+        runtime.is_running(name).unwrap(),
+        true,
+        "sleep 30 should still be running"
+    );
 
     runtime.destroy(name).expect("destroy should succeed");
 }
@@ -63,24 +87,39 @@ fn set_and_remove_resource_limits() {
 
     let _ = runtime.remove_resource_limits(name);
     let _ = runtime.destroy(name);
-    runtime.create(name, rootfs, false).expect("create should succeed");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
 
-    runtime.set_resource_limits(name, 200, 512 * 1024 * 1024).expect("set_resource_limits should succeed");
+    runtime
+        .set_resource_limits(name, 200, 512 * 1024 * 1024)
+        .expect("set_resource_limits should succeed");
 
     let output = std::process::Command::new("rctl")
         .arg(format!("jail:{name}"))
         .output()
         .expect("rctl should run");
     let rules = String::from_utf8_lossy(&output.stdout);
-    assert!(rules.contains("pcpu:deny=200"), "expected pcpu rule in: {rules}");
-    assert!(rules.contains("vmemoryuse:deny=536870912"), "expected vmemoryuse rule in: {rules}");
+    assert!(
+        rules.contains("pcpu:deny=200"),
+        "expected pcpu rule in: {rules}"
+    );
+    assert!(
+        rules.contains("vmemoryuse:deny=536870912"),
+        "expected vmemoryuse rule in: {rules}"
+    );
 
-    runtime.remove_resource_limits(name).expect("remove_resource_limits should succeed");
+    runtime
+        .remove_resource_limits(name)
+        .expect("remove_resource_limits should succeed");
     let output = std::process::Command::new("rctl")
         .arg(format!("jail:{name}"))
         .output()
         .expect("rctl should run");
-    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty(), "rules should be gone after removal");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "rules should be gone after removal"
+    );
 
     runtime.destroy(name).expect("destroy should succeed");
 }
@@ -93,9 +132,13 @@ fn remove_resource_limits_on_jail_with_no_limits_set_is_a_no_op_success() {
     std::fs::create_dir_all(rootfs).unwrap();
 
     let _ = runtime.destroy(name);
-    runtime.create(name, rootfs, false).expect("create should succeed");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
 
-    runtime.remove_resource_limits(name).expect("removing limits that were never set should succeed, not error");
+    runtime
+        .remove_resource_limits(name)
+        .expect("removing limits that were never set should succeed, not error");
 
     runtime.destroy(name).expect("destroy should succeed");
 }
@@ -136,13 +179,20 @@ fn create_mounts_devfs_so_dev_null_exists_inside_the_jail_and_destroy_unmounts_i
     std::fs::create_dir_all(rootfs.join("dev")).unwrap();
 
     let _ = runtime.destroy(name);
-    runtime.create(name, rootfs, false).expect("create should succeed");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
 
-    assert!(rootfs.join("dev/null").exists(), "expected /dev/null to exist inside the jail's rootfs after create");
+    assert!(
+        rootfs.join("dev/null").exists(),
+        "expected /dev/null to exist inside the jail's rootfs after create"
+    );
 
     runtime.destroy(name).expect("destroy should succeed");
 
-    let mount_output = std::process::Command::new("mount").output().expect("mount should run");
+    let mount_output = std::process::Command::new("mount")
+        .output()
+        .expect("mount should run");
     let mount_table = String::from_utf8_lossy(&mount_output.stdout);
     assert!(
         !mount_table.contains(&*rootfs.join("dev").to_string_lossy()),
@@ -158,13 +208,27 @@ fn jail_exists_distinguishes_created_from_never_existed() {
     std::fs::create_dir_all(rootfs).unwrap();
 
     let _ = runtime.destroy(name);
-    assert_eq!(runtime.jail_exists(name).unwrap(), false, "should not exist before create");
+    assert_eq!(
+        runtime.jail_exists(name).unwrap(),
+        false,
+        "should not exist before create"
+    );
 
-    runtime.create(name, rootfs, false).expect("create should succeed");
-    assert_eq!(runtime.jail_exists(name).unwrap(), true, "should exist after create");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
+    assert_eq!(
+        runtime.jail_exists(name).unwrap(),
+        true,
+        "should exist after create"
+    );
 
     runtime.destroy(name).expect("destroy should succeed");
-    assert_eq!(runtime.jail_exists(name).unwrap(), false, "should not exist after destroy");
+    assert_eq!(
+        runtime.jail_exists(name).unwrap(),
+        false,
+        "should not exist after destroy"
+    );
 }
 
 #[test]
@@ -184,23 +248,38 @@ fn destroy_reaps_the_spawned_command_so_its_dataset_can_be_destroyed_immediately
     let _ = jails.destroy(name);
     let _ = zfs.destroy_dataset(dataset);
 
-    zfs.clone_from_base("zroot/keel/base/test", dataset).expect("clone_from_base should succeed");
+    zfs.clone_from_base("zroot/keel/base/test", dataset)
+        .expect("clone_from_base should succeed");
     let rootfs = Path::new("/").join(dataset);
-    jails.create(name, &rootfs, false).expect("create should succeed");
+    jails
+        .create(name, &rootfs, false)
+        .expect("create should succeed");
     // `:` is a shell builtin (no-op) so this only needs `/bin/sh` inside
     // the test base image, not any other binary.
     jails
-        .start_command(name, &["/bin/sh".to_string(), "-c".to_string(), "while true; do :; done".to_string()])
+        .start_command(
+            name,
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "while true; do :; done".to_string(),
+            ],
+        )
         .expect("start_command should succeed");
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(jails.is_running(name).unwrap(), true, "the spawned command should be running");
+    assert_eq!(
+        jails.is_running(name).unwrap(),
+        true,
+        "the spawned command should be running"
+    );
 
     jails.destroy(name).expect("destroy should succeed");
 
     // No sleep/retry here: this must work on the very next call, since
     // that's exactly how `Reconciler::delete` chains `jails.destroy` then
     // `zfs.destroy_dataset` with nothing in between.
-    zfs.destroy_dataset(dataset).expect("dataset should be destroyable immediately after destroy reaps its child");
+    zfs.destroy_dataset(dataset)
+        .expect("dataset should be destroyable immediately after destroy reaps its child");
 }
 
 #[test]
@@ -221,32 +300,57 @@ fn start_command_does_not_leak_stdio_into_the_jailed_process() {
     std::fs::copy("/rescue/sh", bin_dir.join("sh")).expect("copy /rescue/sh into test rootfs");
 
     let _ = runtime.destroy(name);
-    runtime.create(name, rootfs, false).expect("create should succeed");
+    runtime
+        .create(name, rootfs, false)
+        .expect("create should succeed");
 
     // `:` is a shell builtin (no-op), needing no binary beyond `/bin/sh`
     // itself — same pattern as `destroy_reaps_the_spawned_command...`
     // above, avoiding any dependence on which other utilities happen to be
     // reachable inside the jail's minimal rootfs.
     runtime
-        .start_command(name, &["/bin/sh".to_string(), "-c".to_string(), "while true; do :; done".to_string()])
+        .start_command(
+            name,
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "while true; do :; done".to_string(),
+            ],
+        )
         .expect("start_command should succeed");
     thread::sleep(Duration::from_millis(200));
 
-    let jid_output = std::process::Command::new("jls").args(["-j", name, "jid"]).output().expect("jls should run");
-    let jid = String::from_utf8_lossy(&jid_output.stdout).trim().to_string();
+    let jid_output = std::process::Command::new("jls")
+        .args(["-j", name, "jid"])
+        .output()
+        .expect("jls should run");
+    let jid = String::from_utf8_lossy(&jid_output.stdout)
+        .trim()
+        .to_string();
     assert!(!jid.is_empty(), "expected the jail to have a jid");
 
-    let pid_output =
-        std::process::Command::new("ps").args(["-J", &jid, "-o", "pid="]).output().expect("ps should run");
-    let pid = String::from_utf8_lossy(&pid_output.stdout).trim().to_string();
-    assert!(!pid.is_empty(), "expected to find a process running inside the jail");
+    let pid_output = std::process::Command::new("ps")
+        .args(["-J", &jid, "-o", "pid="])
+        .output()
+        .expect("ps should run");
+    let pid = String::from_utf8_lossy(&pid_output.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        !pid.is_empty(),
+        "expected to find a process running inside the jail"
+    );
 
-    let procstat_output =
-        std::process::Command::new("procstat").args(["-f", &pid]).output().expect("procstat should run");
+    let procstat_output = std::process::Command::new("procstat")
+        .args(["-f", &pid])
+        .output()
+        .expect("procstat should run");
     let procstat_text = String::from_utf8_lossy(&procstat_output.stdout);
     for line in procstat_text.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let (Some(fd), Some(kind)) = (fields.get(2), fields.get(3)) else { continue };
+        let (Some(fd), Some(kind)) = (fields.get(2), fields.get(3)) else {
+            continue;
+        };
         if matches!(*fd, "0" | "1" | "2") {
             assert_ne!(
                 *kind, "p",

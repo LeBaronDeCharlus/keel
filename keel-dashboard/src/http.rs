@@ -36,9 +36,16 @@ pub fn run(
         let basic_auth_user = basic_auth_user.clone();
         let basic_auth_password = basic_auth_password.clone();
         thread::spawn(move || {
-            let Ok(conn) = ServerConnection::new(tls_config) else { return };
+            let Ok(conn) = ServerConnection::new(tls_config) else {
+                return;
+            };
             let mut tls_stream = TlsStream::new(conn, stream);
-            let _ = handle_connection(&mut tls_stream, &snapshot, &basic_auth_user, &basic_auth_password);
+            let _ = handle_connection(
+                &mut tls_stream,
+                &snapshot,
+                &basic_auth_user,
+                &basic_auth_password,
+            );
         });
     }
 }
@@ -59,7 +66,11 @@ fn handle_connection(
         Some(r) => r,
         None => return Ok(()),
     };
-    if !crate::basic_auth::check(request.authorization.as_deref(), basic_auth_user, basic_auth_password) {
+    if !crate::basic_auth::check(
+        request.authorization.as_deref(),
+        basic_auth_user,
+        basic_auth_password,
+    ) {
         return write_response(stream, 401, "text/plain", b"unauthorized");
     }
     let (status, content_type, body) = route(&request, snapshot);
@@ -81,7 +92,11 @@ fn read_request(stream: &mut TlsStream) -> io::Result<Option<ParsedRequest>> {
                     .iter()
                     .find(|h| h.name.eq_ignore_ascii_case("authorization"))
                     .map(|h| String::from_utf8_lossy(h.value).to_string());
-                return Ok(Some(ParsedRequest { method, path, authorization }));
+                return Ok(Some(ParsedRequest {
+                    method,
+                    path,
+                    authorization,
+                }));
             }
             Ok(httparse::Status::Partial) => {
                 if buf.len() >= MAX_MESSAGE_BYTES {
@@ -98,7 +113,12 @@ fn read_request(stream: &mut TlsStream) -> io::Result<Option<ParsedRequest>> {
     }
 }
 
-fn write_response(stream: &mut TlsStream, status: u16, content_type: &str, body: &[u8]) -> io::Result<()> {
+fn write_response(
+    stream: &mut TlsStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> io::Result<()> {
     let header = format!(
         "HTTP/1.1 {status} {}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
         reason_phrase(status),
@@ -119,13 +139,22 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-fn route(request: &ParsedRequest, snapshot: &Arc<RwLock<Snapshot>>) -> (u16, &'static str, Vec<u8>) {
+fn route(
+    request: &ParsedRequest,
+    snapshot: &Arc<RwLock<Snapshot>>,
+) -> (u16, &'static str, Vec<u8>) {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
             let snapshot = snapshot.read().unwrap();
-            let now_unix =
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-            (200, "text/html", crate::html::render(&snapshot, now_unix).into_bytes())
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            (
+                200,
+                "text/html",
+                crate::html::render(&snapshot, now_unix).into_bytes(),
+            )
         }
         ("GET", "/api/snapshot") => {
             let snapshot = snapshot.read().unwrap();
@@ -166,7 +195,10 @@ mod tests {
         let _client = TcpStream::connect(addr).unwrap();
         let (server_stream, _) = listener.accept().unwrap();
         apply_read_timeout(&server_stream);
-        assert_eq!(server_stream.read_timeout().unwrap(), Some(INBOUND_READ_TIMEOUT));
+        assert_eq!(
+            server_stream.read_timeout().unwrap(),
+            Some(INBOUND_READ_TIMEOUT)
+        );
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -174,13 +206,24 @@ mod tests {
     }
 
     fn start_test_server(snapshot: Snapshot) -> std::net::SocketAddr {
-        let reloading_tls =
-            crate::tls::ReloadingBrowserTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), Duration::from_secs(3600))
-                .unwrap();
+        let reloading_tls = crate::tls::ReloadingBrowserTls::spawn(
+            fixture("fixture-node.crt"),
+            fixture("fixture-node.key"),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let snapshot = Arc::new(RwLock::new(snapshot));
-        std::thread::spawn(move || run(listener, reloading_tls, snapshot, "admin".to_string(), "hunter2".to_string()));
+        std::thread::spawn(move || {
+            run(
+                listener,
+                reloading_tls,
+                snapshot,
+                "admin".to_string(),
+                "hunter2".to_string(),
+            )
+        });
         addr
     }
 
@@ -193,12 +236,16 @@ mod tests {
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
         let _ = roots;
-        let server_name = rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
+        let server_name =
+            rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
         let tcp = std::net::TcpStream::connect(addr).unwrap();
         let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
         let mut stream = rustls::StreamOwned::new(conn, tcp);
-        let auth = auth_header.map(|h| format!("Authorization: {h}\r\n")).unwrap_or_default();
-        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\n\r\n");
+        let auth = auth_header
+            .map(|h| format!("Authorization: {h}\r\n"))
+            .unwrap_or_default();
+        let req =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\n\r\n");
         stream.write_all(req.as_bytes()).unwrap();
         stream.sock.shutdown(std::net::Shutdown::Write).ok();
         let mut response = Vec::new();
@@ -212,7 +259,11 @@ mod tests {
             }
         }
         let text = String::from_utf8_lossy(&response).to_string();
-        let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let status: u16 = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
         (status, body)
     }
@@ -247,16 +298,21 @@ mod tests {
             Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
         }
         fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-            rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
         }
     }
 
     fn served_cert_der(addr: std::net::SocketAddr) -> Vec<u8> {
         crate::tls::ensure_crypto_provider();
         let verifier = std::sync::Arc::new(NoVerify);
-        let client_config =
-            rustls::ClientConfig::builder().dangerous().with_custom_certificate_verifier(verifier).with_no_client_auth();
-        let server_name = rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
+        let client_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        let server_name =
+            rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1).into());
         let tcp = std::net::TcpStream::connect(addr).unwrap();
         let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
         let mut stream = rustls::StreamOwned::new(conn, tcp);
@@ -269,18 +325,32 @@ mod tests {
 
     #[test]
     fn reloading_tls_picks_up_a_replaced_certificate_without_restart() {
-        let cert_dir = std::env::temp_dir().join(format!("keel-dashboard-reload-test-{}", std::process::id()));
+        let cert_dir =
+            std::env::temp_dir().join(format!("keel-dashboard-reload-test-{}", std::process::id()));
         std::fs::create_dir_all(&cert_dir).unwrap();
         let cert_path = cert_dir.join("dashboard.crt");
         let key_path = cert_dir.join("dashboard.key");
         std::fs::copy(fixture("fixture-node.crt"), &cert_path).unwrap();
         std::fs::copy(fixture("fixture-node.key"), &key_path).unwrap();
 
-        let reloading_tls = crate::tls::ReloadingBrowserTls::spawn(cert_path.clone(), key_path.clone(), Duration::from_millis(50)).unwrap();
+        let reloading_tls = crate::tls::ReloadingBrowserTls::spawn(
+            cert_path.clone(),
+            key_path.clone(),
+            Duration::from_millis(50),
+        )
+        .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let snapshot = Arc::new(RwLock::new(Snapshot::default()));
-        std::thread::spawn(move || run(listener, reloading_tls, snapshot, "admin".to_string(), "hunter2".to_string()));
+        std::thread::spawn(move || {
+            run(
+                listener,
+                reloading_tls,
+                snapshot,
+                "admin".to_string(),
+                "hunter2".to_string(),
+            )
+        });
 
         let original_cert = served_cert_der(addr);
 
@@ -363,9 +433,18 @@ mod tests {
             committed_memory: 1024 * 1024 * 1024,
             ingresses: vec![],
         };
-        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
-        let snapshot =
-            Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let node = NodeSnapshot {
+            status: node_status,
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
 
         let addr = start_test_server(snapshot);
         let header = format!("Basic {}", STANDARD.encode("admin:hunter2"));

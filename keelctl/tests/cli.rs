@@ -16,7 +16,10 @@ fn fresh_controlplane_state_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("keelctl-test-controlplane-{}-{id}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "keelctl-test-controlplane-{}-{id}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -48,7 +51,15 @@ fn start_test_server(name: &str) -> PathBuf {
     let socket_path = short_unique_socket_path();
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
-    thread::spawn(move || keel_agentd::http::run(listener, commands, keel_agentd::PodCidrSlot::new(), keel_agentd::ServiceVipSlot::new(), replica_targets));
+    thread::spawn(move || {
+        keel_agentd::http::run(
+            listener,
+            commands,
+            keel_agentd::PodCidrSlot::new(),
+            keel_agentd::ServiceVipSlot::new(),
+            replica_targets,
+        )
+    });
     socket_path
 }
 
@@ -113,7 +124,16 @@ fn start_test_agentd_tcp(name: &str) -> String {
         std::time::Duration::from_secs(3600),
     )
     .unwrap();
-    thread::spawn(move || keel_agentd::http::run_tls(listener, commands, reloading_tls, keel_agentd::PodCidrSlot::new(), keel_agentd::ServiceVipSlot::new(), replica_targets));
+    thread::spawn(move || {
+        keel_agentd::http::run_tls(
+            listener,
+            commands,
+            reloading_tls,
+            keel_agentd::PodCidrSlot::new(),
+            keel_agentd::ServiceVipSlot::new(),
+            replica_targets,
+        )
+    });
     addr
 }
 
@@ -155,7 +175,11 @@ fn start_test_control_plane_with_node(node_id: &str, node_addr: &str) -> String 
     addr
 }
 
-fn run_keelctl_routed(control_plane_addr: &str, node: &str, args: &[&str]) -> (bool, String, String) {
+fn run_keelctl_routed(
+    control_plane_addr: &str,
+    node: &str,
+    args: &[&str],
+) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_keelctl"))
         .args(args)
         .arg("--control-plane-addr")
@@ -187,17 +211,28 @@ fn run_keelctl_routed(control_plane_addr: &str, node: &str, args: &[&str]) -> (b
 /// Matches the pattern of `keel_controlplane::http`'s own
 /// `start_fake_remote_tls_agentd_with_truncated_body` and
 /// `keel_agentd::registration`'s `start_fake_control_plane_with_truncated_body`.
-fn start_fake_control_plane_with_truncated_body(claimed_body: &'static str, actual_body: &'static str) -> String {
+fn start_fake_control_plane_with_truncated_body(
+    claimed_body: &'static str,
+    actual_body: &'static str,
+) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let server_config = std::sync::Arc::new(
-        keel_controlplane::tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-            .unwrap(),
+        keel_controlplane::tls::load_server_config(
+            &fixture("fixture-node.crt"),
+            &fixture("fixture-node.key"),
+            &fixture("ca.crt"),
+            &fixture("crl.pem"),
+        )
+        .unwrap(),
     );
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let Ok(conn) = rustls::ServerConnection::new(std::sync::Arc::clone(&server_config)) else { continue };
+            let Ok(conn) = rustls::ServerConnection::new(std::sync::Arc::clone(&server_config))
+            else {
+                continue;
+            };
             let mut tls_stream = rustls::StreamOwned::new(conn, stream);
             let mut buf = [0u8; 4096];
             loop {
@@ -222,7 +257,8 @@ fn start_fake_control_plane_with_truncated_body(claimed_body: &'static str, actu
 }
 
 #[test]
-fn get_against_a_control_plane_that_truncates_mid_body_fails_instead_of_printing_a_partial_response() {
+fn get_against_a_control_plane_that_truncates_mid_body_fails_instead_of_printing_a_partial_response(
+) {
     // The header claims a much longer body than what actually gets written
     // before the connection drops uncleanly (no close_notify). Before the
     // fix, keelctl's UnexpectedEof tolerance let this print the partial body
@@ -236,7 +272,10 @@ fn get_against_a_control_plane_that_truncates_mid_body_fails_instead_of_printing
 
     assert!(!ok, "expected a truncated response to be treated as a failure, got success with stdout: {stdout}");
     assert!(!stdout.contains("truncat"), "truncated upstream body must not be printed as if it were a complete response, got stdout: {stdout}");
-    assert!(stderr.contains("truncated response"), "expected a truncation error in stderr, got: {stderr}");
+    assert!(
+        stderr.contains("truncated response"),
+        "expected a truncation error in stderr, got: {stderr}"
+    );
 }
 
 fn run_keelctl_scheduled(control_plane_addr: &str, args: &[&str]) -> (bool, String, String) {
@@ -267,13 +306,19 @@ fn apply_get_delete_round_trip_through_the_control_plane() {
     let control_plane_addr = start_test_control_plane_with_node("node-1", &node_addr);
     let spec_path = write_spec_file("routed_round_trip", "web-1");
 
-    let (ok, _, stderr) =
-        run_keelctl_routed(&control_plane_addr, "node-1", &["apply", "-f", spec_path.to_str().unwrap()]);
+    let (ok, _, stderr) = run_keelctl_routed(
+        &control_plane_addr,
+        "node-1",
+        &["apply", "-f", spec_path.to_str().unwrap()],
+    );
     assert!(ok, "apply failed: {stderr}");
 
     let (ok, stdout, stderr) = run_keelctl_routed(&control_plane_addr, "node-1", &["get", "web-1"]);
     assert!(ok, "get failed: {stderr}");
-    assert!(stdout.contains("running: true"), "expected running: true, got: {stdout}");
+    assert!(
+        stdout.contains("running: true"),
+        "expected running: true, got: {stdout}"
+    );
 
     let (ok, _, stderr) = run_keelctl_routed(&control_plane_addr, "node-1", &["delete", "web-1"]);
     assert!(ok, "delete failed: {stderr}");
@@ -284,10 +329,16 @@ fn apply_through_the_control_plane_to_an_unknown_node_fails() {
     let control_plane_addr = start_test_control_plane_with_node("node-1", "127.0.0.1:1");
     let spec_path = write_spec_file("routed_unknown_node", "web-1");
 
-    let (ok, _, stderr) =
-        run_keelctl_routed(&control_plane_addr, "node-missing", &["apply", "-f", spec_path.to_str().unwrap()]);
+    let (ok, _, stderr) = run_keelctl_routed(
+        &control_plane_addr,
+        "node-missing",
+        &["apply", "-f", spec_path.to_str().unwrap()],
+    );
     assert!(!ok);
-    assert!(stderr.contains("unknown node"), "expected 'unknown node' in stderr, got: {stderr}");
+    assert!(
+        stderr.contains("unknown node"),
+        "expected 'unknown node' in stderr, got: {stderr}"
+    );
 }
 
 #[test]
@@ -296,13 +347,18 @@ fn control_plane_addr_without_node_schedules_through_the_control_plane() {
     let control_plane_addr = start_test_control_plane_with_node("node-1", &node_addr);
     let spec_path = write_spec_file("scheduled_round_trip", "web-1");
 
-    let (ok, _, stderr) =
-        run_keelctl_scheduled(&control_plane_addr, &["apply", "-f", spec_path.to_str().unwrap()]);
+    let (ok, _, stderr) = run_keelctl_scheduled(
+        &control_plane_addr,
+        &["apply", "-f", spec_path.to_str().unwrap()],
+    );
     assert!(ok, "apply failed: {stderr}");
 
     let (ok, stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["get", "web-1"]);
     assert!(ok, "get failed: {stderr}");
-    assert!(stdout.contains("running: true"), "expected running: true, got: {stdout}");
+    assert!(
+        stdout.contains("running: true"),
+        "expected running: true, got: {stdout}"
+    );
 
     let (ok, _, stderr) = run_keelctl_scheduled(&control_plane_addr, &["delete", "web-1"]);
     assert!(ok, "delete failed: {stderr}");
@@ -318,7 +374,10 @@ fn node_without_control_plane_addr_is_a_usage_error() {
         .expect("failed to run keelctl binary");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--node requires --control-plane-addr"), "got: {stderr}");
+    assert!(
+        stderr.contains("--node requires --control-plane-addr"),
+        "got: {stderr}"
+    );
 }
 
 #[test]
@@ -331,14 +390,20 @@ fn apply_get_delete_round_trip() {
 
     let (ok, stdout, stderr) = run_keelctl(&socket_path, &["get", "web-1"]);
     assert!(ok, "get failed: {stderr}");
-    assert!(stdout.contains("running: true"), "expected running: true, got: {stdout}");
+    assert!(
+        stdout.contains("running: true"),
+        "expected running: true, got: {stdout}"
+    );
 
     let (ok, _, stderr) = run_keelctl(&socket_path, &["delete", "web-1"]);
     assert!(ok, "delete failed: {stderr}");
 
     let (ok, _, stderr) = run_keelctl(&socket_path, &["get", "web-1"]);
     assert!(!ok, "expected get on a deleted jail to fail");
-    assert!(stderr.contains("not found"), "expected 'not found' in stderr, got: {stderr}");
+    assert!(
+        stderr.contains("not found"),
+        "expected 'not found' in stderr, got: {stderr}"
+    );
 }
 
 fn write_spec_file_with_volume(test_name: &str, jail_name: &str, volume_name: &str) -> PathBuf {
@@ -352,7 +417,8 @@ fn write_spec_file_with_volume(test_name: &str, jail_name: &str, volume_name: &s
 
 #[test]
 fn delete_volume_survives_the_jails_deletion_then_frees_the_dataset() {
-    let socket_path = start_test_server("delete_volume_survives_the_jails_deletion_then_frees_the_dataset");
+    let socket_path =
+        start_test_server("delete_volume_survives_the_jails_deletion_then_frees_the_dataset");
     let spec_path = write_spec_file_with_volume(
         "delete_volume_survives_the_jails_deletion_then_frees_the_dataset",
         "web-1",
@@ -371,10 +437,17 @@ fn delete_volume_survives_the_jails_deletion_then_frees_the_dataset() {
 
 #[test]
 fn delete_volume_on_a_never_created_name_fails_with_not_found() {
-    let socket_path = start_test_server("delete_volume_on_a_never_created_name_fails_with_not_found");
+    let socket_path =
+        start_test_server("delete_volume_on_a_never_created_name_fails_with_not_found");
     let (ok, _, stderr) = run_keelctl(&socket_path, &["delete-volume", "missing"]);
-    assert!(!ok, "expected delete-volume on a never-created volume to fail");
-    assert!(stderr.contains("not found"), "expected 'not found' in stderr, got: {stderr}");
+    assert!(
+        !ok,
+        "expected delete-volume on a never-created volume to fail"
+    );
+    assert!(
+        stderr.contains("not found"),
+        "expected 'not found' in stderr, got: {stderr}"
+    );
 }
 
 fn write_service_spec_file(test_name: &str, service_name: &str, replicas: u32) -> PathBuf {
@@ -392,22 +465,38 @@ fn apply_routes_a_service_kind_to_the_services_path() {
     let control_plane_addr = start_test_control_plane_with_node("node-1", &node_addr);
     let spec_path = write_service_spec_file("service_apply_routing", "web", 0);
 
-    let (ok, _, stderr) = run_keelctl_scheduled(&control_plane_addr, &["apply", "-f", spec_path.to_str().unwrap()]);
+    let (ok, _, stderr) = run_keelctl_scheduled(
+        &control_plane_addr,
+        &["apply", "-f", spec_path.to_str().unwrap()],
+    );
     assert!(ok, "service apply failed: {stderr}");
 
     let (ok, body, stderr) = run_keelctl_scheduled(&control_plane_addr, &["get", "web"]);
-    assert!(ok, "expected the jail-path 404 to fall back to the service path: {stderr}");
-    assert_eq!(body.trim(), "[]", "a zero-replica service has no discoverable replicas yet");
+    assert!(
+        ok,
+        "expected the jail-path 404 to fall back to the service path: {stderr}"
+    );
+    assert_eq!(
+        body.trim(),
+        "[]",
+        "a zero-replica service has no discoverable replicas yet"
+    );
 }
 
 #[test]
 fn delete_falls_back_from_jail_to_service_on_404() {
     let control_plane_addr = start_test_control_plane_with_node("node-1", "127.0.0.1:1");
     let spec_path = write_service_spec_file("service_delete_fallback", "web", 0);
-    run_keelctl_scheduled(&control_plane_addr, &["apply", "-f", spec_path.to_str().unwrap()]);
+    run_keelctl_scheduled(
+        &control_plane_addr,
+        &["apply", "-f", spec_path.to_str().unwrap()],
+    );
 
     let (ok, _, stderr) = run_keelctl_scheduled(&control_plane_addr, &["delete", "web"]);
-    assert!(ok, "expected delete to fall back to the service path: {stderr}");
+    assert!(
+        ok,
+        "expected delete to fall back to the service path: {stderr}"
+    );
 }
 
 #[test]
@@ -415,7 +504,10 @@ fn get_on_a_name_that_is_neither_a_jail_nor_a_service_still_reports_jail_not_fou
     let socket_path = start_test_server("neither_jail_nor_service");
     let (ok, _, stderr) = run_keelctl(&socket_path, &["get", "missing"]);
     assert!(!ok);
-    assert!(stderr.contains("not found"), "expected the original jail-not-found error preserved, got: {stderr}");
+    assert!(
+        stderr.contains("not found"),
+        "expected the original jail-not-found error preserved, got: {stderr}"
+    );
 }
 
 #[test]
@@ -432,8 +524,26 @@ fn apply_rejects_a_file_with_an_invalid_spec() {
 #[test]
 fn get_lists_multiple_applied_jails() {
     let socket_path = start_test_server("get_lists_multiple_applied_jails");
-    run_keelctl(&socket_path, &["apply", "-f", write_spec_file("get_lists_multiple_applied_jails_1", "web-1").to_str().unwrap()]);
-    run_keelctl(&socket_path, &["apply", "-f", write_spec_file("get_lists_multiple_applied_jails_2", "web-2").to_str().unwrap()]);
+    run_keelctl(
+        &socket_path,
+        &[
+            "apply",
+            "-f",
+            write_spec_file("get_lists_multiple_applied_jails_1", "web-1")
+                .to_str()
+                .unwrap(),
+        ],
+    );
+    run_keelctl(
+        &socket_path,
+        &[
+            "apply",
+            "-f",
+            write_spec_file("get_lists_multiple_applied_jails_2", "web-2")
+                .to_str()
+                .unwrap(),
+        ],
+    );
 
     let (ok, stdout, stderr) = run_keelctl(&socket_path, &["get"]);
     assert!(ok, "get failed: {stderr}");
@@ -444,7 +554,11 @@ fn get_lists_multiple_applied_jails() {
 #[test]
 fn force_repin_on_an_unplaced_name_prints_the_control_planes_404_message() {
     let control_plane_addr = start_test_control_plane_with_node("node-1", "10.0.0.1:7621");
-    let (ok, _stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["force-repin", "db-0"]);
+    let (ok, _stdout, stderr) =
+        run_keelctl_scheduled(&control_plane_addr, &["force-repin", "db-0"]);
     assert!(!ok, "expected force-repin on an unplaced name to fail");
-    assert!(stderr.contains("no known placement"), "got stderr: {stderr}");
+    assert!(
+        stderr.contains("no known placement"),
+        "got stderr: {stderr}"
+    );
 }

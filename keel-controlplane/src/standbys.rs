@@ -60,7 +60,10 @@ mod tests {
     fn standbys_round_trips_through_yaml() {
         let mut standbys = Standbys::new();
         standbys.set("db-0".to_string(), "node-2".to_string());
-        let path = std::env::temp_dir().join(format!("keel-controlplane-standbys-test-{}.yaml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "keel-controlplane-standbys-test-{}.yaml",
+            std::process::id()
+        ));
         crate::store::save(&path, &standbys).unwrap();
         let loaded: Standbys = crate::store::load_or_default(&path);
         assert_eq!(loaded.get("db-0"), Some("node-2"));

@@ -54,6 +54,11 @@ pub trait JailRuntime {
     /// rctl rules (pcpu, vmemoryuse) are not applied atomically — if the
     /// second fails, the first remains in effect until
     /// `remove_resource_limits` is called.
-    fn set_resource_limits(&self, name: &str, pcpu_percent: u32, memory_bytes: u64) -> Result<(), JailError>;
+    fn set_resource_limits(
+        &self,
+        name: &str,
+        pcpu_percent: u32,
+        memory_bytes: u64,
+    ) -> Result<(), JailError>;
     fn remove_resource_limits(&self, name: &str) -> Result<(), JailError>;
 }
