@@ -78,7 +78,11 @@ fn main() -> ExitCode {
 fn extract_flag(args: &mut Vec<String>, name: &str) -> Option<String> {
     let index = args.iter().position(|a| a == name)?;
     args.remove(index);
-    Some(args.remove(index))
+    if index < args.len() {
+        Some(args.remove(index))
+    } else {
+        None
+    }
 }
 
 fn extract_socket_flag(args: &mut Vec<String>) -> Option<PathBuf> {
@@ -485,5 +489,27 @@ mod tests {
                 tls_crl_file: PathBuf::from("/etc/keel/crl.pem"),
             }
         );
+    }
+
+    #[test]
+    fn extract_flag_finds_and_removes_a_flag_and_its_value() {
+        let mut args = vec!["get".to_string(), "--node".to_string(), "node-1".to_string()];
+        assert_eq!(extract_flag(&mut args, "--node"), Some("node-1".to_string()));
+        assert_eq!(args, vec!["get".to_string()]);
+    }
+
+    #[test]
+    fn extract_flag_on_an_absent_flag_returns_none_and_leaves_args_untouched() {
+        let mut args = vec!["get".to_string()];
+        assert_eq!(extract_flag(&mut args, "--node"), None);
+        assert_eq!(args, vec!["get".to_string()]);
+    }
+
+    #[test]
+    fn extract_flag_on_a_trailing_flag_with_no_value_returns_none_instead_of_panicking() {
+        // Reproduced live: `keelctl get --node` used to panic with a
+        // removal-index-out-of-bounds instead of a clean usage error.
+        let mut args = vec!["get".to_string(), "--node".to_string()];
+        assert_eq!(extract_flag(&mut args, "--node"), None);
     }
 }

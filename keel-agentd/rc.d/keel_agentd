@@ -36,25 +36,33 @@ command="/usr/sbin/daemon"
 # passed when the operator has actually set the matching rc.conf variable,
 # since keel-agentd panics on startup if the control-plane/TLS/ACME flag
 # groups are only partially supplied (see keel-agentd/src/main.rs).
+#
+# Each value is wrapped in escaped double quotes (`\"...\"`) rather than
+# interpolated bare: `command_args` is itself re-split on whitespace when
+# rc.subr later evaluates it to build the real argv, so a value containing
+# a space or glob character would otherwise silently split into multiple
+# arguments instead of one. The escaped quotes become literal `"`
+# characters in `command_args`'s own string value, which rc.subr's later
+# evaluation then honors as real shell quoting.
 cluster_flags=""
-[ -n "$keel_agentd_node_id" ] && cluster_flags="$cluster_flags --node-id $keel_agentd_node_id"
-[ -n "$keel_agentd_control_plane_addr" ] && cluster_flags="$cluster_flags --control-plane-addr $keel_agentd_control_plane_addr"
-[ -n "$keel_agentd_advertise_addr" ] && cluster_flags="$cluster_flags --advertise-addr $keel_agentd_advertise_addr"
-[ -n "$keel_agentd_replicate_addr" ] && cluster_flags="$cluster_flags --replicate-addr $keel_agentd_replicate_addr"
-[ -n "$keel_agentd_tls_ca_file" ] && cluster_flags="$cluster_flags --tls-ca-file $keel_agentd_tls_ca_file"
-[ -n "$keel_agentd_tls_cert_file" ] && cluster_flags="$cluster_flags --tls-cert-file $keel_agentd_tls_cert_file"
-[ -n "$keel_agentd_tls_key_file" ] && cluster_flags="$cluster_flags --tls-key-file $keel_agentd_tls_key_file"
-[ -n "$keel_agentd_tls_crl_file" ] && cluster_flags="$cluster_flags --tls-crl-file $keel_agentd_tls_crl_file"
-[ -n "$keel_agentd_public_iface" ] && cluster_flags="$cluster_flags --public-iface $keel_agentd_public_iface"
+[ -n "$keel_agentd_node_id" ] && cluster_flags="$cluster_flags --node-id \"$keel_agentd_node_id\""
+[ -n "$keel_agentd_control_plane_addr" ] && cluster_flags="$cluster_flags --control-plane-addr \"$keel_agentd_control_plane_addr\""
+[ -n "$keel_agentd_advertise_addr" ] && cluster_flags="$cluster_flags --advertise-addr \"$keel_agentd_advertise_addr\""
+[ -n "$keel_agentd_replicate_addr" ] && cluster_flags="$cluster_flags --replicate-addr \"$keel_agentd_replicate_addr\""
+[ -n "$keel_agentd_tls_ca_file" ] && cluster_flags="$cluster_flags --tls-ca-file \"$keel_agentd_tls_ca_file\""
+[ -n "$keel_agentd_tls_cert_file" ] && cluster_flags="$cluster_flags --tls-cert-file \"$keel_agentd_tls_cert_file\""
+[ -n "$keel_agentd_tls_key_file" ] && cluster_flags="$cluster_flags --tls-key-file \"$keel_agentd_tls_key_file\""
+[ -n "$keel_agentd_tls_crl_file" ] && cluster_flags="$cluster_flags --tls-crl-file \"$keel_agentd_tls_crl_file\""
+[ -n "$keel_agentd_public_iface" ] && cluster_flags="$cluster_flags --public-iface \"$keel_agentd_public_iface\""
 
 acme_flags=""
-[ -n "$keel_agentd_dns_ovh_config" ] && acme_flags="$acme_flags --dns-ovh-config $keel_agentd_dns_ovh_config"
-[ -n "$keel_agentd_acme_directory_url" ] && acme_flags="$acme_flags --acme-directory-url $keel_agentd_acme_directory_url"
-[ -n "$keel_agentd_acme_account_key_file" ] && acme_flags="$acme_flags --acme-account-key-file $keel_agentd_acme_account_key_file"
+[ -n "$keel_agentd_dns_ovh_config" ] && acme_flags="$acme_flags --dns-ovh-config \"$keel_agentd_dns_ovh_config\""
+[ -n "$keel_agentd_acme_directory_url" ] && acme_flags="$acme_flags --acme-directory-url \"$keel_agentd_acme_directory_url\""
+[ -n "$keel_agentd_acme_account_key_file" ] && acme_flags="$acme_flags --acme-account-key-file \"$keel_agentd_acme_account_key_file\""
 
 command_args="-r -P ${pidfile} -S -T ${name} -- \
-  ${keel_agentd_bin} --pool ${keel_agentd_pool} \
-  --state-dir ${keel_agentd_state_dir} --socket ${keel_agentd_socket} \
+  ${keel_agentd_bin} --pool \"${keel_agentd_pool}\" \
+  --state-dir \"${keel_agentd_state_dir}\" --socket \"${keel_agentd_socket}\" \
   ${cluster_flags} ${acme_flags}"
 
 run_rc_command "$1"

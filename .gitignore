@@ -4,5 +4,6 @@
 /certs
 /.ovhrc
 testdata/tls/ca-db/*.old
-/deploy
+/deploy/*
+!/deploy/vps-lebaron/
 /.worktrees

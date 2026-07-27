@@ -1,0 +1,11 @@
+apiVersion: keel/v1
+kind: Ingress
+metadata:
+  name: blog
+spec:
+  host: lebaron.sh
+  backend:
+    service: hugo-site-v2
+    port: 8080
+  tls:
+    email: admin@lebaron.sh

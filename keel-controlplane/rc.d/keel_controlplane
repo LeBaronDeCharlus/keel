@@ -30,17 +30,23 @@ command="/usr/sbin/daemon"
 # named controlplane_extra_flags, not the generic "flags", since that name
 # collides with rc.subr's own reserved ${name}_flags convention (see
 # keel-dashboard's rc.d script for where this bug class was first found).
+#
+# Each value is wrapped in escaped double quotes (`\"...\"`) rather than
+# interpolated bare: `command_args` is itself re-split on whitespace when
+# rc.subr later evaluates it to build the real argv, so a value containing
+# a space or glob character would otherwise silently split into multiple
+# arguments instead of one.
 controlplane_extra_flags=""
-[ -n "$keel_controlplane_state_dir" ] && controlplane_extra_flags="--state-dir $keel_controlplane_state_dir"
+[ -n "$keel_controlplane_state_dir" ] && controlplane_extra_flags="--state-dir \"$keel_controlplane_state_dir\""
 
 command_args="-r -P ${pidfile} -S -T ${name} -- \
-  ${keel_controlplane_bin} --addr ${keel_controlplane_addr} \
-  --cluster-cidr ${keel_controlplane_cluster_cidr} \
-  --service-cidr ${keel_controlplane_service_cidr} \
-  --tls-ca-file ${keel_controlplane_tls_ca_file} \
-  --tls-cert-file ${keel_controlplane_tls_cert_file} \
-  --tls-key-file ${keel_controlplane_tls_key_file} \
-  --tls-crl-file ${keel_controlplane_tls_crl_file} \
+  ${keel_controlplane_bin} --addr \"${keel_controlplane_addr}\" \
+  --cluster-cidr \"${keel_controlplane_cluster_cidr}\" \
+  --service-cidr \"${keel_controlplane_service_cidr}\" \
+  --tls-ca-file \"${keel_controlplane_tls_ca_file}\" \
+  --tls-cert-file \"${keel_controlplane_tls_cert_file}\" \
+  --tls-key-file \"${keel_controlplane_tls_key_file}\" \
+  --tls-crl-file \"${keel_controlplane_tls_crl_file}\" \
   ${controlplane_extra_flags}"
 
 run_rc_command "$1"

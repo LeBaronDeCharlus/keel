@@ -15,6 +15,7 @@ pub struct Metadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spec {
     pub image: String,
     pub command: Vec<String>,
@@ -48,6 +49,7 @@ pub struct VolumeMount {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkSpec {
     pub vnet: bool,
     pub bridge: String,
@@ -197,6 +199,57 @@ spec:
     fn a_jail_with_no_volumes_key_parses_with_an_empty_list() {
         let spec: JailSpec = serde_yaml::from_str(EXAMPLE_YAML).unwrap();
         assert_eq!(spec.spec.volumes, vec![]);
+    }
+
+    #[test]
+    fn an_extra_typo_d_field_in_spec_is_rejected_instead_of_silently_dropped() {
+        // Every real, required field is present and correctly named here -
+        // `imageTypo` is purely an extra, unrecognized field alongside them
+        // (e.g. a typo of `image` the author meant to override), so the
+        // only thing that can make this fail to parse is deny_unknown_fields
+        // itself, not a missing required field.
+        let yaml = r#"
+apiVersion: keel/v1
+kind: Jail
+metadata:
+  name: web-1
+spec:
+  image: base/14.2-web
+  imageTypo: base/14.2-web
+  command: ["/usr/local/bin/myapp"]
+  network:
+    vnet: true
+    bridge: keel0
+    address: 10.0.0.5/24
+  resources:
+    cpu: "2"
+    memory: "512M"
+  restartPolicy: Always
+"#;
+        assert!(serde_yaml::from_str::<JailSpec>(yaml).is_err(), "expected an extra, unrecognized field to be rejected at parse time");
+    }
+
+    #[test]
+    fn an_extra_typo_d_field_in_network_spec_is_rejected_instead_of_silently_dropped() {
+        let yaml = r#"
+apiVersion: keel/v1
+kind: Jail
+metadata:
+  name: web-1
+spec:
+  image: base/14.2-web
+  command: ["/usr/local/bin/myapp"]
+  network:
+    vnet: true
+    bridge: keel0
+    address: 10.0.0.5/24
+    addressTypo: 10.0.0.5/24
+  resources:
+    cpu: "2"
+    memory: "512M"
+  restartPolicy: Always
+"#;
+        assert!(serde_yaml::from_str::<JailSpec>(yaml).is_err(), "expected an extra, unrecognized field to be rejected at parse time");
     }
 
     #[test]

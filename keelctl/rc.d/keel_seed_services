@@ -33,9 +33,18 @@ load_rc_config "$name"
 keel_seed_services_run()
 {
 	[ -d "${keel_seed_services_dir}" ] || return 0
+	# The retry loop's own exit status used to be this function's overall
+	# exit status: if one spec permanently failed but a later spec in the
+	# same directory happened to succeed, that success silently overwrote
+	# the earlier failure - given the control plane has no persistence and
+	# this script is the sole recovery mechanism on every boot, a
+	# permanently-dropped Service was easy to miss entirely. any_failed
+	# tracks every spec independently instead.
+	any_failed=0
 	for spec in "${keel_seed_services_dir}"/*.yaml; do
 		[ -e "${spec}" ] || continue
 		attempt=0
+		applied=0
 		while [ ${attempt} -lt 10 ]; do
 			if "${keel_seed_services_bin}" \
 				--control-plane-addr "${keel_seed_services_control_plane_addr}" \
@@ -45,12 +54,18 @@ keel_seed_services_run()
 				--tls-crl-file "${keel_seed_services_tls_crl_file}" \
 				apply -f "${spec}"; then
 				echo "keel_seed_services: applied ${spec}"
+				applied=1
 				break
 			fi
 			attempt=$((attempt + 1))
 			sleep 2
 		done
+		if [ ${applied} -eq 0 ]; then
+			echo "keel_seed_services: FAILED to apply ${spec} after ${attempt} attempts" >&2
+			any_failed=1
+		fi
 	done
+	[ ${any_failed} -eq 0 ]
 }
 
 run_rc_command "$1"

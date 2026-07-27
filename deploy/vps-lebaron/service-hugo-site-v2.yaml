@@ -1,0 +1,17 @@
+apiVersion: keel/v1
+kind: Service
+metadata:
+  name: hugo-site-v2
+spec:
+  replicas: 1
+  port: 8080
+  template:
+    image: base/test
+    command: ["/usr/local/bin/python3.11", "-m", "http.server", "8080", "--directory", "/var/www"]
+    network:
+      vnet: true
+      bridge: keel0
+    resources:
+      cpu: "1"
+      memory: "256M"
+    restartPolicy: Always
