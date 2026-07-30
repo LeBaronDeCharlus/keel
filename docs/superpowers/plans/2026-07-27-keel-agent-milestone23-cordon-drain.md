@@ -334,7 +334,7 @@ cargo clippy -p keel-controlplane --all-targets -- -D warnings
 - Produces: `keelctl cordon <node>`, `keelctl uncordon <node>` CLI subcommands.
 - Consumes: nothing new in `keel-agentd`/`ErrorBody` — these always go to the control plane directly (a node-targeting operation, never proxied through a single node's own socket the way `apply`/`get`/`delete` can be), so both require `--control-plane-addr`; reuse whatever existing error keelctl surfaces today when a `Target::Socket` is used for a control-plane-only command (check `jails_path`'s existing handling of a bare-socket target attempting a control-plane-only path, e.g. how `force-repin` already behaves against a plain socket target, and match it — likely a plain HTTP call against the socket that 404s, which is an acceptable existing precedent to reuse rather than invent new plumbing for).
 
-- [ ] **Step 1: Write the failing CLI-level tests**
+- [x] **Step 1: Write the failing CLI-level tests**
 
 Following the existing pattern at `keelctl/src/main.rs:373-412` (spinning up a `start_test_agent`/mock control-plane listener and calling the `run_*` function directly rather than shelling out):
 
@@ -355,7 +355,7 @@ fn run_cordon_with_no_node_argument_is_a_usage_error() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 Some((cmd, rest)) if cmd == "cordon" => run_cordon(&target, rest),
@@ -378,7 +378,7 @@ fn run_uncordon(target: &Target, args: &[String]) -> Result<String, String> {
 
 Update the usage string at `main.rs:59-61` to include `cordon NODE|uncordon NODE`.
 
-- [ ] **Step 3: Verification**
+- [x] **Step 3: Verification**
 
 ```bash
 cargo test -p keelctl
