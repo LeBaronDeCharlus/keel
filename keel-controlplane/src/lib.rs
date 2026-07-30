@@ -1,4 +1,5 @@
 pub mod addresses;
+pub mod cordoned;
 pub mod http;
 pub mod pending_fences;
 pub mod placements;
@@ -12,6 +13,7 @@ pub mod tls;
 pub mod wire;
 pub mod worker;
 
+pub use cordoned::Cordoned;
 pub use pending_fences::PendingFences;
 pub use placements::Placements;
 pub use registry::Registry;

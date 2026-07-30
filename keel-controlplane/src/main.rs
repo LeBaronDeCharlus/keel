@@ -129,6 +129,8 @@ fn main() {
         keel_controlplane::store::load_or_default(&config.state_dir.join("standbys.yaml"));
     let pending_fences: keel_controlplane::PendingFences =
         keel_controlplane::store::load_or_default(&config.state_dir.join("pending_fences.yaml"));
+    let cordoned: keel_controlplane::Cordoned =
+        keel_controlplane::store::load_or_default(&config.state_dir.join("cordoned.yaml"));
     let services = keel_controlplane::Services::load(&config.state_dir, service_cidr);
 
     let (_worker_handle, commands) = worker::spawn(
@@ -138,6 +140,7 @@ fn main() {
         used_addresses,
         standbys,
         pending_fences,
+        cordoned,
         config.state_dir.clone(),
     );
 

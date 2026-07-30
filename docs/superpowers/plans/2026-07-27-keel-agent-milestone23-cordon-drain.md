@@ -31,7 +31,7 @@
 - Produces: `keel_controlplane::Cordoned::new() -> Self`; `Cordoned::cordon(&mut self, node_id: String)`; `Cordoned::uncordon(&mut self, node_id: &str)`; `Cordoned::is_cordoned(&self, node_id: &str) -> bool`; `Command::Cordon(String, Sender<Result<(), UnknownNode>>)`; `Command::Uncordon(String, Sender<Result<(), UnknownNode>>)`.
 - Consumes: `keel_controlplane::registry::UnknownNode` (already exists, `registry.rs:28-30`) as the "no such node" error shape, matching every other node-id-taking path.
 
-- [ ] **Step 1: Write the failing tests in `keel-controlplane/src/cordoned.rs`**
+- [x] **Step 1: Write the failing tests in `keel-controlplane/src/cordoned.rs`**
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -115,7 +115,7 @@ mod tests {
 
 Run `cargo test -p keel-controlplane cordoned::` — all six pass immediately against this implementation (this type is simple enough that test-first and implementation land together, matching how `PendingFences` itself was written).
 
-- [ ] **Step 2: Wire `Command::Cordon`/`Command::Uncordon` into `worker.rs`**
+- [x] **Step 2: Wire `Command::Cordon`/`Command::Uncordon` into `worker.rs`**
 
 Add to the `Command` enum (alongside `RecordStandby`/`RemoveStandby`, `worker.rs:130-131`):
 
@@ -161,11 +161,11 @@ Command::Uncordon(node_id, reply) => {
 
 `registry.pod_cidr(&node_id).is_some()` is the existing, cheapest "is this a known node id at all" check already used elsewhere in this file (no aliveness implied — cordoning a currently-`Dead`-but-previously-registered node is legitimate and must succeed, matching `last_known_addr`'s same "no aliveness check on purpose" precedent at `registry.rs:145-152`).
 
-- [ ] **Step 3: Update every `spawn(...)` test call site**
+- [x] **Step 3: Update every `spawn(...)` test call site**
 
 Mechanical sweep across `keel-controlplane/src/worker.rs`'s ~20 test functions: each `spawn(Registry::new(test_cluster_cidr()), Placements::new(), Services::new(test_service_cidr()), UsedAddresses::new(), Standbys::new(), PendingFences::new(), state_dir)` call gains one more argument, `Cordoned::new()`, in the same position as the other five. Also update the two production call sites: `main.rs`'s `worker::spawn(...)` call (load `cordoned.yaml` first, matching the existing four-collection load block at `main.rs:101-114`) and any other test harness in `http.rs`'s test module that constructs a worker directly (`grep -n "worker::spawn" keel-controlplane/src/http.rs` to enumerate).
 
-- [ ] **Step 4: Run full verification**
+- [x] **Step 4: Run full verification**
 
 ```bash
 cargo test -p keel-controlplane
