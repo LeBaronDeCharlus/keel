@@ -47,6 +47,7 @@ mod tests {
             committed_cpu: 1.0,
             committed_memory: 1024 * 1024 * 1024,
             ingresses: vec![],
+            cordoned: false,
         }]);
 
         let snapshot = spawn(Box::new(client), Duration::from_millis(20));

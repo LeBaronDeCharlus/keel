@@ -770,7 +770,7 @@ cargo clippy -p keelctl --all-targets -- -D warnings
 **Interfaces:**
 - Produces: `NodeStatus.cordoned: bool`. No change needed to `keel-dashboard/src/snapshot.rs`'s `NodeSnapshot` — it wraps `NodeStatus` directly (`snapshot.rs:16-20`), so the new field flows through automatically once `NodeStatus` carries it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // keel-controlplane/src/wire.rs
@@ -795,7 +795,7 @@ fn list_reports_cordoned_true_for_a_cordoned_node() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `wire.rs`:
 
@@ -837,7 +837,7 @@ rows.push_str(&format!(
 
 (and add the matching `<th>Cordoned</th>` to the header row.)
 
-- [ ] **Step 3: Verification**
+- [x] **Step 3: Verification**
 
 ```bash
 cargo test -p keel-controlplane -p keel-dashboard

@@ -369,6 +369,7 @@ mod tests {
             committed_cpu: 0.0,
             committed_memory: 0,
             ingresses: vec![],
+            cordoned: false,
         }
     }
 

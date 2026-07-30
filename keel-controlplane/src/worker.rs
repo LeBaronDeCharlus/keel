@@ -314,7 +314,11 @@ fn handle_command(
             let _ = reply.send(result);
         }
         Command::List(reply) => {
-            let _ = reply.send(registry.list(Instant::now()));
+            let mut statuses = registry.list(Instant::now());
+            for s in &mut statuses {
+                s.cordoned = cordoned.is_cordoned(&s.id);
+            }
+            let _ = reply.send(statuses);
         }
         Command::Resolve(id, reply) => {
             let result = registry.resolve(&id, Instant::now());
@@ -946,6 +950,7 @@ mod tests {
             committed_cpu: 0.0,
             committed_memory: 0,
             ingresses: vec![],
+            cordoned: false,
         }
     }
 
@@ -1014,6 +1019,45 @@ mod tests {
         let statuses = list_rx.recv().unwrap();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].id, "node-1");
+    }
+
+    #[test]
+    fn list_reports_cordoned_true_for_a_cordoned_node() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            fresh_state_dir(),
+        )
+        .1;
+
+        let (reg_tx, reg_rx) = mpsc::channel();
+        commands
+            .send(Command::Register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                reg_tx,
+            ))
+            .unwrap();
+        reg_rx.recv().unwrap().unwrap();
+
+        let (cordon_tx, cordon_rx) = mpsc::channel();
+        commands
+            .send(Command::Cordon("node-1".to_string(), cordon_tx))
+            .unwrap();
+        cordon_rx.recv().unwrap().unwrap();
+
+        let (list_tx, list_rx) = mpsc::channel();
+        commands.send(Command::List(list_tx)).unwrap();
+        let statuses = list_rx.recv().unwrap();
+        assert!(statuses.iter().find(|s| s.id == "node-1").unwrap().cordoned);
     }
 
     #[test]

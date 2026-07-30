@@ -96,6 +96,7 @@ fn a_poll_cycle_is_reflected_in_both_the_json_api_and_the_rendered_html() {
         committed_cpu: 1.0,
         committed_memory: 1024 * 1024 * 1024,
         ingresses: vec![],
+        cordoned: false,
     }]);
     client.set_jails("node-1", vec![]);
     client.set_volumes("node-1", vec![]);

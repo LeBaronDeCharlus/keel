@@ -67,6 +67,12 @@ pub struct NodeStatus {
     /// before this field existed there.
     #[serde(default)]
     pub ingresses: Vec<IngressHealth>,
+    /// Same rolling-deploy rationale as `ingresses` above: an
+    /// as-yet-unupgraded control plane during a rolling deploy won't send
+    /// this field at all, and a newer dashboard reading it must default to
+    /// `false` rather than hard-failing.
+    #[serde(default)]
+    pub cordoned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +143,7 @@ mod tests {
             committed_cpu: 1.5,
             committed_memory: 512 * 1024 * 1024,
             ingresses: vec![],
+            cordoned: false,
         };
         let yaml = serde_yaml::to_string(&status).unwrap();
         let parsed: NodeStatus = serde_yaml::from_str(&yaml).unwrap();
@@ -153,6 +160,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.ingresses, vec![]);
+    }
+
+    #[test]
+    fn node_status_without_a_cordoned_field_deserializes_with_default_false() {
+        let parsed: NodeStatus = serde_yaml::from_str(
+            "id: node-1\naddr: 192.168.64.4\npod_cidr: 10.0.4.0/24\nstatus: Alive\nlast_seen_secs: 3\ncapacity_cpu: 4\ncapacity_memory: 8589934592\ncommitted_cpu: 1.5\ncommitted_memory: 536870912\n",
+        )
+        .unwrap();
+        assert!(!parsed.cordoned);
     }
 
     #[test]
@@ -266,6 +282,7 @@ mod tests {
                 backend_port: 8080,
                 cert_expires_at_unix: Some(1_800_000_000),
             }],
+            cordoned: false,
         };
         let yaml = serde_yaml::to_string(&status).unwrap();
         let parsed: NodeStatus = serde_yaml::from_str(&yaml).unwrap();
