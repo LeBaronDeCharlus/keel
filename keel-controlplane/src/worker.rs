@@ -90,6 +90,13 @@ pub enum ReplicaAction {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementKind {
+    PlainJail,
+    StatelessService,
+    StatefulService,
+}
+
 pub enum Command {
     Register(
         String,
@@ -116,6 +123,7 @@ pub enum Command {
     ResolvePlacement(String, Sender<Result<(String, String), PlacementError>>),
     RecordPlacement(String, String, Sender<()>),
     RemovePlacement(String, Sender<()>),
+    NodePlacements(String, Sender<Vec<(String, PlacementKind)>>),
     OwnerOf(String, Sender<Option<Owner>>),
     ApplyService(
         String,
@@ -362,6 +370,30 @@ fn handle_command(
             placements.remove(&jail_name);
             persist_placements(placements, state_dir);
             let _ = reply.send(());
+        }
+        Command::NodePlacements(node_id, reply) => {
+            let result = placements
+                .iter()
+                .filter(|(_, placed_node)| *placed_node == node_id)
+                .map(|(name, _)| {
+                    let kind = match services::owner_of(name, placements, services) {
+                        Some(Owner::Service(service_name)) => {
+                            let stateful = services
+                                .get(&service_name)
+                                .map(|r| !r.template.volumes.is_empty())
+                                .unwrap_or(false);
+                            if stateful {
+                                PlacementKind::StatefulService
+                            } else {
+                                PlacementKind::StatelessService
+                            }
+                        }
+                        _ => PlacementKind::PlainJail,
+                    };
+                    (name.to_string(), kind)
+                })
+                .collect();
+            let _ = reply.send(result);
         }
         Command::OwnerOf(name, reply) => {
             let _ = reply.send(services::owner_of(&name, placements, services));
