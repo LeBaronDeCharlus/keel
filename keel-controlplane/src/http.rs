@@ -236,6 +236,8 @@ fn route(
         ("POST", ["replicas", name, "force-repin"]) => {
             handle_force_repin(name, commands, client_config)
         }
+        ("POST", ["nodes", id, "cordon"]) => handle_cordon(id, commands),
+        ("POST", ["nodes", id, "uncordon"]) => handle_uncordon(id, commands),
         _ => error_response(
             404,
             format!("no route for {} {}", request.method, request.path),
@@ -434,6 +436,36 @@ fn handle_force_repin(
                 prep.standby_node_id, prep.standby_addr
             ),
         ),
+    }
+}
+
+fn handle_cordon(node_id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if commands
+        .send(Command::Cordon(node_id.to_string(), reply_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(Ok(())) => (200, Vec::new()),
+        Ok(Err(e)) => error_response(404, e.to_string()),
+        Err(_) => error_response(500, "control plane worker did not respond".to_string()),
+    }
+}
+
+fn handle_uncordon(node_id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if commands
+        .send(Command::Uncordon(node_id.to_string(), reply_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(Ok(())) => (200, Vec::new()),
+        Ok(Err(e)) => error_response(404, e.to_string()),
+        Err(_) => error_response(500, "control plane worker did not respond".to_string()),
     }
 }
 
@@ -1887,6 +1919,59 @@ mod tests {
         let (status, body) = send_request(&cp_addr, "PUT", "/jails/web-1", "apiVersion: keel/v1\n");
         assert_eq!(status, 503);
         assert!(body.contains("no alive nodes"), "got: {body}");
+    }
+
+    #[test]
+    fn cordon_an_unknown_node_returns_404() {
+        let cp_addr = start_test_server();
+        let (status, _) = send_request(&cp_addr, "POST", "/nodes/ghost/cordon", "");
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn uncordon_an_unknown_node_returns_404() {
+        let cp_addr = start_test_server();
+        let (status, _) = send_request(&cp_addr, "POST", "/nodes/ghost/uncordon", "");
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn cordon_then_list_shows_the_node_excluded_from_a_fresh_schedule() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        let (status, _) = send_request(&cp_addr, "POST", "/nodes/node-1/cordon", "");
+        assert_eq!(status, 200);
+
+        // A fresh PUT /jails/<name> with only node-1 registered now has no
+        // schedulable candidate at all.
+        let (status, body) = send_request(&cp_addr, "PUT", "/jails/web-1", "apiVersion: keel/v1\n");
+        assert_eq!(status, 503, "got: {body}");
+    }
+
+    #[test]
+    fn uncordon_restores_schedulability() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        send_request(&cp_addr, "POST", "/nodes/node-1/cordon", "");
+        send_request(&cp_addr, "POST", "/nodes/node-1/uncordon", "");
+
+        let (status, body) = send_request(&cp_addr, "PUT", "/jails/web-1", "apiVersion: keel/v1\n");
+        assert_eq!(status, 200, "got: {body}");
+    }
+
+    #[test]
+    fn cordoning_an_already_cordoned_node_is_a_no_op_success() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        send_request(&cp_addr, "POST", "/nodes/node-1/cordon", "");
+        let (status, _) = send_request(&cp_addr, "POST", "/nodes/node-1/cordon", "");
+        assert_eq!(status, 200);
     }
 
     #[test]
