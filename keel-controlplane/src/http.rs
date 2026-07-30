@@ -1,6 +1,8 @@
 use crate::tls;
-use crate::wire::{Heartbeat, NodeRegistration, RegisterResponse};
-use crate::worker::{Command, ForceRepinError, ReplicaAction, ScheduleOrResolveError};
+use crate::wire::{Heartbeat, NodeRegistration, NodeState, NodeStatus, RegisterResponse};
+use crate::worker::{
+    Command, ForceRepinError, ForceRepinPrep, PlacementKind, ReplicaAction, ScheduleOrResolveError,
+};
 use keel_spec::{error_response, yaml_response};
 use rustls::{ServerConnection, StreamOwned};
 use std::io::{self, Read, Write};
@@ -238,6 +240,7 @@ fn route(
         }
         ("POST", ["nodes", id, "cordon"]) => handle_cordon(id, commands),
         ("POST", ["nodes", id, "uncordon"]) => handle_uncordon(id, commands),
+        ("POST", ["nodes", id, "drain"]) => handle_drain(id, commands, client_config),
         _ => error_response(
             404,
             format!("no route for {} {}", request.method, request.path),
@@ -348,6 +351,24 @@ fn handle_force_repin(
         Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
     };
 
+    match execute_repin(prep, name, commands, client_config) {
+        Ok(body) => (200, body),
+        Err(response) => response,
+    }
+}
+
+/// Shared by `handle_force_repin` and `drain`'s stateful-replica case
+/// (`drain_stateful_replica`): promotes the standby prepared by either
+/// `PrepareForceRepin` or `PrepareDrainRepin` and fences the old primary
+/// synchronously. Neither the standby-readiness check nor the promotion
+/// PUT nor the immediate fencing DELETE differ between the two callers --
+/// they differ only in how `prep` was computed (Task 5).
+fn execute_repin(
+    prep: ForceRepinPrep,
+    name: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<Vec<u8>, (u16, Vec<u8>)> {
     match forward(
         &prep.standby_addr,
         "GET",
@@ -357,31 +378,31 @@ fn handle_force_repin(
     ) {
         Ok((status, _)) if (200..300).contains(&status) => {}
         Ok((404, _)) | Ok((409, _)) => {
-            return error_response(
+            return Err(error_response(
                 409,
                 format!(
                     "standby node '{}' has not completed a first full replication for '{name}'",
                     prep.standby_node_id
                 ),
-            );
+            ));
         }
         Ok((status, body)) => {
-            return error_response(
+            return Err(error_response(
                 500,
                 format!(
                     "unexpected response checking standby readiness: status {status}, body {:?}",
                     String::from_utf8_lossy(&body)
                 ),
-            )
+            ))
         }
         Err(e) => {
-            return error_response(
+            return Err(error_response(
                 500,
                 format!(
                     "failed to reach standby node '{}' at {}: {e}",
                     prep.standby_node_id, prep.standby_addr
                 ),
-            )
+            ))
         }
     }
 
@@ -424,18 +445,260 @@ fn handle_force_repin(
                     _ => {}
                 }
             }
-            (200, resp_body)
+            Ok(resp_body)
         }
-        Ok((status, resp_body)) => {
-            error_response(status, String::from_utf8_lossy(&resp_body).to_string())
-        }
-        Err(e) => error_response(
+        Ok((status, resp_body)) => Err(error_response(
+            status,
+            String::from_utf8_lossy(&resp_body).to_string(),
+        )),
+        Err(e) => Err(error_response(
             500,
             format!(
                 "failed to reach node '{}' at {}: {e}",
                 prep.standby_node_id, prep.standby_addr
             ),
-        ),
+        )),
+    }
+}
+
+fn handle_drain(
+    node_id: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
+    let statuses: Vec<NodeStatus> = {
+        let (tx, rx) = mpsc::channel();
+        if commands.send(Command::List(tx)).is_err() {
+            return error_response(500, "control plane worker is not running".to_string());
+        }
+        rx.recv().unwrap_or_default()
+    };
+    let Some(node_status) = statuses.into_iter().find(|s| s.id == node_id) else {
+        return error_response(404, format!("unknown node '{node_id}'"));
+    };
+    if node_status.status != NodeState::Alive {
+        return error_response(
+            409,
+            format!("node '{node_id}' is not Alive; use force-repin per-replica instead of drain"),
+        );
+    }
+    if !node_status.ingresses.is_empty() {
+        let hosts: Vec<&str> = node_status
+            .ingresses
+            .iter()
+            .map(|i| i.host.as_str())
+            .collect();
+        return error_response(
+            409,
+            format!(
+                "node '{node_id}' has {} live Ingress host(s) that would be stranded by drain: {}. Move them first: keelctl apply -f <ingress>.yaml --node <other-node>, then delete the old one, then retry drain.",
+                hosts.len(),
+                hosts.join(", ")
+            ),
+        );
+    }
+
+    // Implicit cordon so nothing new lands mid-drain.
+    let (tx, rx) = mpsc::channel();
+    if commands
+        .send(Command::Cordon(node_id.to_string(), tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let _ = rx.recv();
+
+    let placed: Vec<(String, PlacementKind)> = {
+        let (tx, rx) = mpsc::channel();
+        if commands
+            .send(Command::NodePlacements(node_id.to_string(), tx))
+            .is_err()
+        {
+            return error_response(500, "control plane worker is not running".to_string());
+        }
+        rx.recv().unwrap_or_default()
+    };
+
+    let mut failed = Vec::new();
+    for (name, kind) in placed {
+        let outcome = match kind {
+            PlacementKind::StatefulService => {
+                drain_stateful_replica(&name, commands, client_config)
+            }
+            PlacementKind::StatelessService => {
+                drain_stateless_replica(&name, &node_status, commands, client_config)
+            }
+            PlacementKind::PlainJail => {
+                drain_plain_jail(&name, &node_status, commands, client_config)
+            }
+        };
+        if let Err(reason) = outcome {
+            failed.push(format!("{name}: {reason}"));
+        }
+    }
+
+    if failed.is_empty() {
+        (200, Vec::new())
+    } else {
+        error_response(
+            500,
+            format!(
+                "drain of '{node_id}' partially failed: {}",
+                failed.join("; ")
+            ),
+        )
+    }
+}
+
+/// Case 1 from the design doc's Architecture section: a stateless Service
+/// replica already self-heals once its placement disappears -- the next
+/// `ReconcileServices` pass (any subsequent heartbeat) sees it missing and
+/// schedules a replacement on a schedulable node. Unlike a genuinely `Dead`
+/// node, this node is still `Alive` and won't tear the jail down on its
+/// own, so the still-running jail on this node needs an explicit delete.
+fn drain_stateless_replica(
+    name: &str,
+    node_status: &NodeStatus,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    commands
+        .send(Command::RemovePlacement(name.to_string(), tx))
+        .map_err(|_| "worker not running".to_string())?;
+    let _ = rx.recv();
+    match forward(
+        &node_status.addr,
+        "DELETE",
+        &format!("/jails/{name}"),
+        &[],
+        client_config,
+    ) {
+        Ok((status, _)) if (200..300).contains(&status) || status == 404 => Ok(()),
+        Ok((status, body)) => Err(format!(
+            "delete on old node returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        )),
+        Err(e) => Err(format!("failed to reach old node: {e}")),
+    }
+}
+
+/// Case 2: Task 5's `PrepareDrainRepin`, then the same promotion +
+/// synchronous fence `execute_repin` already performs for the ordinary
+/// force-repin path -- reused rather than duplicated.
+fn drain_stateful_replica(
+    name: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    commands
+        .send(Command::PrepareDrainRepin(name.to_string(), tx))
+        .map_err(|_| "worker not running".to_string())?;
+    match rx.recv() {
+        Ok(Ok(prep)) => execute_repin(prep, name, commands, client_config)
+            .map(|_| ())
+            .map_err(|(_, body)| String::from_utf8_lossy(&body).to_string()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("worker did not respond".to_string()),
+    }
+}
+
+/// Case 3, the genuinely new mechanism this milestone adds: fetch the spec
+/// from the old node, place it on a fresh schedulable node, and delete the
+/// old one only once the new placement's `PUT` has actually succeeded.
+///
+/// Ordering matters here exactly as much as the two-step commit it
+/// resembles: `RemovePlacement` happens *before* `ResolveOrSchedule` (so
+/// the fresh pick doesn't just re-resolve this same, now-cordoned node),
+/// and the old node's `DELETE` happens *only after* the new node's `PUT`
+/// succeeds. On a `PUT` failure the original placement is restored via
+/// `RecordPlacement` rather than left pointing nowhere -- a failed
+/// migration attempt must leave the source jail and its placement exactly
+/// as they were, not a torn-down `Placements` entry.
+fn drain_plain_jail(
+    name: &str,
+    node_status: &NodeStatus,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<(), String> {
+    let spec_body = match forward(
+        &node_status.addr,
+        "GET",
+        &format!("/jails/{name}"),
+        &[],
+        client_config,
+    ) {
+        Ok((status, body)) if (200..300).contains(&status) => body,
+        Ok((status, body)) => {
+            return Err(format!(
+                "failed to fetch spec from old node: status {status}, {}",
+                String::from_utf8_lossy(&body)
+            ))
+        }
+        Err(e) => return Err(format!("failed to reach old node: {e}")),
+    };
+
+    let (rp_tx, rp_rx) = mpsc::channel();
+    commands
+        .send(Command::RemovePlacement(name.to_string(), rp_tx))
+        .map_err(|_| "worker not running".to_string())?;
+    let _ = rp_rx.recv();
+
+    let (sched_tx, sched_rx) = mpsc::channel();
+    commands
+        .send(Command::ResolveOrSchedule(name.to_string(), sched_tx))
+        .map_err(|_| "worker not running".to_string())?;
+    let (new_node_id, new_addr) = match sched_rx.recv() {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            send_record_placement(name, &node_status.id, commands);
+            return Err(e.to_string());
+        }
+        Err(_) => {
+            send_record_placement(name, &node_status.id, commands);
+            return Err("worker did not respond".to_string());
+        }
+    };
+
+    match forward(
+        &new_addr,
+        "PUT",
+        &format!("/jails/{name}"),
+        &spec_body,
+        client_config,
+    ) {
+        Ok((status, _)) if (200..300).contains(&status) => {
+            send_record_placement(name, &new_node_id, commands);
+        }
+        Ok((status, body)) => {
+            send_record_placement(name, &node_status.id, commands);
+            return Err(format!(
+                "PUT to new node '{new_node_id}' returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        Err(e) => {
+            send_record_placement(name, &node_status.id, commands);
+            return Err(format!("failed to reach new node '{new_node_id}': {e}"));
+        }
+    }
+
+    match forward(
+        &node_status.addr,
+        "DELETE",
+        &format!("/jails/{name}"),
+        &[],
+        client_config,
+    ) {
+        Ok((status, _)) if (200..300).contains(&status) || status == 404 => Ok(()),
+        Ok((status, body)) => Err(format!(
+            "new placement succeeded but delete on old node returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        )),
+        Err(e) => Err(format!(
+            "new placement succeeded but failed to reach old node to clean up: {e}"
+        )),
     }
 }
 
@@ -2944,6 +3207,236 @@ mod tests {
             "PUT",
             &format!("/services/{name}"),
             &stateful_service_yaml(name, replicas),
+        );
+    }
+
+    fn plain_jail_yaml(name: &str) -> String {
+        format!(
+            "apiVersion: keel/v1\nkind: Jail\nmetadata:\n  name: {name}\nspec:\n  image: base/14.2-web\n  command: [\"/usr/local/bin/myapp\"]\n  network:\n    vnet: true\n    bridge: keel0\n  resources:\n    cpu: \"1\"\n    memory: 256M\n  restartPolicy: Always\n"
+        )
+    }
+
+    fn resolve_placement_via_commands(commands: &Sender<Command>, name: &str) -> Option<String> {
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::ResolvePlacement(name.to_string(), tx))
+            .unwrap();
+        rx.recv().unwrap().ok().map(|(node_id, _addr)| node_id)
+    }
+
+    #[test]
+    fn drain_a_dead_node_is_refused() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        // No heartbeat ever sent after registration -- aged past
+        // DEAD_THRESHOLD below, same real-sleep pattern as
+        // force_repin_immediately_pushes_a_delete_to_the_old_primary...
+        std::thread::sleep(std::time::Duration::from_secs(16));
+
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 409, "got: {body}");
+        assert!(
+            body.contains("force-repin"),
+            "expected the error to point at force-repin as the per-replica alternative, got: {body}"
+        );
+    }
+
+    #[test]
+    fn drain_refuses_a_node_with_a_live_ingress() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-1", &node_addr);
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-1/heartbeat",
+            "committed_cpu: 1\ncommitted_memory: 2\ningresses:\n  - name: blog\n    host: example.com\n    backend_service: hugo-site\n    backend_port: 8080\n    cert_expires_at_unix: 1800000000\n",
+        );
+
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 409, "got: {body}");
+        assert!(
+            body.contains("example.com"),
+            "expected the stranded Ingress host to be named in the error, got: {body}"
+        );
+    }
+
+    #[test]
+    fn drain_leaves_an_empty_node_as_a_trivial_success() {
+        let cp_addr = start_test_server();
+        let node_addr = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-1", &node_addr);
+
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 200, "got: {body}");
+    }
+
+    #[test]
+    fn drain_reschedules_a_stateless_service_replica_elsewhere() {
+        let (cp_addr, commands) = start_test_server_with_commands();
+        let (node_1_addr, node_1_deletes) = start_fake_remote_tls_agentd_recording_deletes(200);
+        register_node(&cp_addr, "node-1", &node_1_addr);
+
+        // Only node-1 is Alive when the service is applied, so its one
+        // replica is deterministically scheduled there.
+        let (status, body) =
+            send_request(&cp_addr, "PUT", "/services/web", &service_yaml("web", 1));
+        assert_eq!(status, 200, "got: {body}");
+        assert_eq!(
+            resolve_placement_via_commands(&commands, "web-0"),
+            Some("node-1".to_string())
+        );
+
+        let node_2_addr = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-2", &node_2_addr);
+
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 200, "got: {body}");
+        assert!(
+            node_1_deletes
+                .lock()
+                .unwrap()
+                .contains(&"web-0".to_string()),
+            "expected drain to delete the still-running replica off the still-Alive drained node"
+        );
+
+        // Reconcile is piggybacked on heartbeats -- one more heartbeat from
+        // node-2 is what actually reschedules the now-unplaced replica.
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/node-2/heartbeat",
+            "committed_cpu: 0\ncommitted_memory: 0\n",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            resolve_placement_via_commands(&commands, "web-0"),
+            Some("node-2".to_string()),
+            "expected web-0 to have been rescheduled onto node-2, the only schedulable node left"
+        );
+    }
+
+    #[test]
+    fn drain_migrates_a_plain_jail_to_a_schedulable_node() {
+        let (cp_addr, commands) = start_test_server_with_commands();
+        let (node_1_addr, node_1_deletes) = start_fake_remote_tls_agentd_recording_deletes(200);
+        register_node(&cp_addr, "node-1", &node_1_addr);
+
+        let (status, body) =
+            send_request(&cp_addr, "PUT", "/jails/solo-1", &plain_jail_yaml("solo-1"));
+        assert_eq!(status, 200, "got: {body}");
+        assert_eq!(
+            resolve_placement_via_commands(&commands, "solo-1"),
+            Some("node-1".to_string())
+        );
+
+        let (node_2_addr, node_2_puts) = start_fake_remote_tls_agentd_recording_put_bodies(200);
+        register_node(&cp_addr, "node-2", &node_2_addr);
+
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 200, "got: {body}");
+
+        assert_eq!(
+            resolve_placement_via_commands(&commands, "solo-1"),
+            Some("node-2".to_string()),
+            "expected solo-1 to have migrated to node-2"
+        );
+        assert_eq!(
+            node_2_puts.lock().unwrap().len(),
+            1,
+            "expected exactly one PUT of solo-1's spec to the new node"
+        );
+        assert!(
+            node_1_deletes
+                .lock()
+                .unwrap()
+                .contains(&"solo-1".to_string()),
+            "expected the old node's copy to be deleted only after the new placement succeeded"
+        );
+    }
+
+    #[test]
+    fn drain_promotes_a_stateful_replicas_standby_and_fences_the_old_primary() {
+        let (cp_addr, commands) = start_test_server_with_commands();
+        // Applied before any node is registered, so ApplyService's own
+        // piggybacked reconcile has no Alive node to auto-schedule onto --
+        // same trick as the force-repin tests, so db-0's placement below is
+        // unambiguous.
+        apply_service_with_template_via_http(&cp_addr, "db", 1);
+
+        let (node_1_addr, node_1_deletes) = start_fake_remote_tls_agentd_recording_deletes(200);
+        register_node(&cp_addr, "node-1", &node_1_addr);
+        record_placement(&commands, "db-0", "node-1");
+
+        let node_2_addr = start_fake_remote_tls_agentd(200, "running: true\n");
+        register_node(&cp_addr, "node-2", &node_2_addr);
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
+        rx.recv().unwrap();
+
+        // node-3 needs a real advertised replicate_addr for the fresh-
+        // standby pick, same as PrepareForceRepin's happy-path test.
+        send_request(
+            &cp_addr,
+            "POST",
+            "/nodes/register",
+            "id: node-3\naddr: 127.0.0.1:1\nreplicate_addr: 127.0.0.1:2\ncapacity_cpu: 4.0\ncapacity_memory: 8589934592\n",
+        );
+
+        // Unlike force-repin, node-1 (the primary) is genuinely Alive here
+        // -- that's the entire point of drain over force-repin.
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 200, "got: {body}");
+
+        assert_eq!(
+            resolve_placement_via_commands(&commands, "db-0"),
+            Some("node-2".to_string()),
+            "expected db-0 to have been promoted onto its standby, node-2"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            node_1_deletes.lock().unwrap().contains(&"db-0".to_string()),
+            "expected the old, still-Alive primary to have been fenced synchronously as part of drain"
+        );
+    }
+
+    #[test]
+    fn drain_leaves_a_failed_migration_in_place_rather_than_deleting_the_original() {
+        let (cp_addr, commands) = start_test_server_with_commands();
+        let (node_1_addr, node_1_deletes) = start_fake_remote_tls_agentd_recording_deletes(200);
+        register_node(&cp_addr, "node-1", &node_1_addr);
+
+        let (status, body) =
+            send_request(&cp_addr, "PUT", "/jails/solo-1", &plain_jail_yaml("solo-1"));
+        assert_eq!(status, 200, "got: {body}");
+
+        // node-2 is reachable but rejects the PUT outright.
+        let node_2_addr = start_fake_remote_tls_agentd(500, "boom\n");
+        register_node(&cp_addr, "node-2", &node_2_addr);
+
+        let (status, body) = send_request(&cp_addr, "POST", "/nodes/node-1/drain", "");
+        assert_eq!(status, 500, "got: {body}");
+        assert!(
+            body.contains("solo-1"),
+            "expected the failed placement to be named in the error, got: {body}"
+        );
+
+        assert_eq!(
+            resolve_placement_via_commands(&commands, "solo-1"),
+            Some("node-1".to_string()),
+            "expected the original placement to be restored, not left dangling, after a failed migration"
+        );
+        assert!(
+            node_1_deletes.lock().unwrap().is_empty(),
+            "expected the old node's copy to be left alone since the new placement never succeeded"
         );
     }
 }
