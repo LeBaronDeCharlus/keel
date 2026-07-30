@@ -1083,6 +1083,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            crate::cordoned::Cordoned::new(),
             fresh_state_dir(),
         );
         let reloading_tls = tls::ReloadingTls::spawn(
@@ -1995,6 +1996,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            crate::cordoned::Cordoned::new(),
             fresh_state_dir(),
         );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2460,6 +2462,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            crate::cordoned::Cordoned::new(),
             fresh_state_dir(),
         );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2489,6 +2492,7 @@ mod tests {
             crate::addresses::UsedAddresses::new(),
             crate::standbys::Standbys::new(),
             crate::pending_fences::PendingFences::new(),
+            crate::cordoned::Cordoned::new(),
             state_dir.clone(),
         );
         let reloading_tls = tls::ReloadingTls::spawn(

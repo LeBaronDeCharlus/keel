@@ -1,4 +1,5 @@
 use crate::addresses::{self, UsedAddresses};
+use crate::cordoned::Cordoned;
 use crate::pending_fences::PendingFences;
 use crate::placements::Placements;
 use crate::registry::{PodCidrCollision, Registry, ResolveError, UnknownNode};
@@ -179,8 +180,11 @@ pub enum Command {
     PendingFencesForNode(String, Sender<Vec<String>>),
     RemovePendingFence(String, Sender<()>),
     PrepareForceRepin(String, Sender<Result<ForceRepinPrep, ForceRepinError>>),
+    Cordon(String, Sender<Result<(), UnknownNode>>),
+    Uncordon(String, Sender<Result<(), UnknownNode>>),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     mut registry: Registry,
     mut placements: Placements,
@@ -188,6 +192,7 @@ pub fn spawn(
     mut used_addresses: UsedAddresses,
     mut standbys: Standbys,
     mut pending_fences: PendingFences,
+    mut cordoned: Cordoned,
     state_dir: PathBuf,
 ) -> (JoinHandle<()>, Sender<Command>) {
     let (tx, rx) = mpsc::channel::<Command>();
@@ -201,6 +206,7 @@ pub fn spawn(
                     &mut used_addresses,
                     &mut standbys,
                     &mut pending_fences,
+                    &mut cordoned,
                     &state_dir,
                     command,
                 );
@@ -253,6 +259,12 @@ fn persist_pending_fences(pending_fences: &PendingFences, state_dir: &Path) {
     }
 }
 
+fn persist_cordoned(cordoned: &Cordoned, state_dir: &Path) {
+    if let Err(e) = crate::store::save(&state_dir.join("cordoned.yaml"), cordoned) {
+        eprintln!("keel-controlplane: failed to persist cordoned state: {e}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     registry: &mut Registry,
@@ -261,6 +273,7 @@ fn handle_command(
     used_addresses: &mut UsedAddresses,
     standbys: &mut Standbys,
     pending_fences: &mut PendingFences,
+    cordoned: &mut Cordoned,
     state_dir: &Path,
     command: Command,
 ) {
@@ -728,6 +741,26 @@ fn handle_command(
             })();
             let _ = reply.send(result);
         }
+        Command::Cordon(node_id, reply) => {
+            let result = if registry.pod_cidr(&node_id).is_some() {
+                cordoned.cordon(node_id);
+                persist_cordoned(cordoned, state_dir);
+                Ok(())
+            } else {
+                Err(UnknownNode(node_id))
+            };
+            let _ = reply.send(result);
+        }
+        Command::Uncordon(node_id, reply) => {
+            let result = if registry.pod_cidr(&node_id).is_some() {
+                cordoned.uncordon(&node_id);
+                persist_cordoned(cordoned, state_dir);
+                Ok(())
+            } else {
+                Err(UnknownNode(node_id))
+            };
+            let _ = reply.send(result);
+        }
     }
 }
 
@@ -852,6 +885,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -885,6 +919,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -912,6 +947,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -952,6 +988,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -983,6 +1020,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1034,6 +1072,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1051,6 +1090,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1069,6 +1109,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1102,6 +1143,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1185,6 +1227,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1210,6 +1253,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1237,6 +1281,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1272,6 +1317,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1297,6 +1343,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1320,6 +1367,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1369,6 +1417,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1395,6 +1444,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1438,6 +1488,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1481,6 +1532,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1529,6 +1581,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1549,6 +1602,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1683,6 +1737,7 @@ mod tests {
                 UsedAddresses::new(),
                 Standbys::new(),
                 PendingFences::new(),
+                Cordoned::new(),
                 state_dir.clone(),
             )
             .1;
@@ -1716,6 +1771,7 @@ mod tests {
             used_addresses,
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             state_dir,
         )
         .1;
@@ -1746,6 +1802,7 @@ mod tests {
                 UsedAddresses::new(),
                 Standbys::new(),
                 PendingFences::new(),
+                Cordoned::new(),
                 state_dir.clone(),
             )
             .1;
@@ -1924,6 +1981,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1972,6 +2030,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2004,6 +2063,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2043,6 +2103,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2087,6 +2148,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2123,6 +2185,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2147,6 +2210,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2187,6 +2251,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2219,6 +2284,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2261,6 +2327,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2291,6 +2358,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2313,6 +2381,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2376,6 +2445,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2414,6 +2484,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2436,6 +2507,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2501,6 +2573,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2571,6 +2644,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2627,6 +2701,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2658,6 +2733,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2701,6 +2777,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2719,6 +2796,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2741,6 +2819,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2773,6 +2852,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2822,6 +2902,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;

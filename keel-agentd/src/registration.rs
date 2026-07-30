@@ -452,6 +452,7 @@ mod tests {
             keel_controlplane::addresses::UsedAddresses::new(),
             keel_controlplane::Standbys::new(),
             keel_controlplane::PendingFences::new(),
+            keel_controlplane::Cordoned::new(),
             fresh_controlplane_state_dir(),
         );
         let reloading_tls = keel_controlplane::tls::ReloadingTls::spawn(
