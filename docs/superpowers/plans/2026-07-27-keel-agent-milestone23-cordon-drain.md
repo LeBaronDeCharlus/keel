@@ -183,7 +183,7 @@ cargo clippy -p keel-controlplane --all-targets -- -D warnings
 - Produces: `fn is_schedulable(status: &wire::NodeStatus, cordoned: &Cordoned) -> bool` (private to `worker.rs`, no new public surface).
 - Consumes: `NodeState::Alive` comparison (unchanged), `Cordoned::is_cordoned`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -205,7 +205,7 @@ fn is_schedulable_excludes_dead_and_cordoned_nodes() {
 
 (`test_node_status` is a small new test helper constructing a minimal `NodeStatus` with the given `id`/`status` and zeroed resource fields — follow the existing `NodeStatus { .. }` literal pattern already used in this file's other tests, e.g. around `worker.rs:712`.)
 
-- [ ] **Step 2: Implement and wire in at all three call sites**
+- [x] **Step 2: Implement and wire in at all three call sites**
 
 ```rust
 fn is_schedulable(status: &wire::NodeStatus, cordoned: &Cordoned) -> bool {
@@ -217,7 +217,7 @@ Replace `.filter(|status| status.status == NodeState::Alive)` at `worker.rs:250`
 
 No other change: `scheduler::pick_node`'s bin-packing and `services::pick_node_for_service`'s same-service spreading (`services.rs:199-207`) are completely untouched — only the candidate set feeding them changes.
 
-- [ ] **Step 3: Regression + verification**
+- [x] **Step 3: Regression + verification**
 
 Existing tests exercising `ResolveOrSchedule`/`ReconcileServices` against an all-`Alive`, never-cordoned cluster must still pass unchanged — this proves the change is additive on the common case. Then:
 

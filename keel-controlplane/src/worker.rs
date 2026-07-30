@@ -265,6 +265,10 @@ fn persist_cordoned(cordoned: &Cordoned, state_dir: &Path) {
     }
 }
 
+fn is_schedulable(status: &wire::NodeStatus, cordoned: &Cordoned) -> bool {
+    status.status == NodeState::Alive && !cordoned.is_cordoned(&status.id)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     registry: &mut Registry,
@@ -318,7 +322,7 @@ fn handle_command(
                 let nodes: Vec<scheduler::NodeResources> = registry
                     .list(now)
                     .into_iter()
-                    .filter(|status| status.status == NodeState::Alive)
+                    .filter(|status| is_schedulable(status, cordoned))
                     .map(|status| scheduler::NodeResources {
                         id: status.id,
                         capacity_cpu: status.capacity_cpu,
@@ -390,7 +394,7 @@ fn handle_command(
             let mut alive_nodes: Vec<scheduler::NodeResources> = registry
                 .list(now)
                 .into_iter()
-                .filter(|s| s.status == NodeState::Alive)
+                .filter(|s| is_schedulable(s, cordoned))
                 .map(|s| scheduler::NodeResources {
                     id: s.id,
                     capacity_cpu: s.capacity_cpu,
@@ -693,7 +697,7 @@ fn handle_command(
                 let alive_nodes: Vec<scheduler::NodeResources> = registry
                     .list(now)
                     .into_iter()
-                    .filter(|s| s.status == NodeState::Alive)
+                    .filter(|s| is_schedulable(s, cordoned))
                     .map(|s| scheduler::NodeResources {
                         id: s.id,
                         capacity_cpu: s.capacity_cpu,
@@ -857,6 +861,37 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    fn test_node_status(id: &str, status: NodeState) -> wire::NodeStatus {
+        wire::NodeStatus {
+            id: id.to_string(),
+            addr: "192.168.64.4".to_string(),
+            pod_cidr: "10.0.4.0/24".to_string(),
+            status,
+            last_seen_secs: 0,
+            capacity_cpu: 0.0,
+            capacity_memory: 0,
+            committed_cpu: 0.0,
+            committed_memory: 0,
+            ingresses: vec![],
+        }
+    }
+
+    #[test]
+    fn is_schedulable_excludes_dead_and_cordoned_nodes() {
+        let cordoned = {
+            let mut c = Cordoned::new();
+            c.cordon("node-cordoned".to_string());
+            c
+        };
+        let alive_schedulable = test_node_status("node-1", NodeState::Alive);
+        let alive_cordoned = test_node_status("node-cordoned", NodeState::Alive);
+        let dead_uncordoned = test_node_status("node-2", NodeState::Dead);
+
+        assert!(is_schedulable(&alive_schedulable, &cordoned));
+        assert!(!is_schedulable(&alive_cordoned, &cordoned));
+        assert!(!is_schedulable(&dead_uncordoned, &cordoned));
     }
 
     fn template() -> JailTemplate {
