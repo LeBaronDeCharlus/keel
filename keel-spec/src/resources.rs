@@ -7,7 +7,9 @@ use crate::error::SpecError;
 const MAX_CPU_CORES: f64 = 1024.0;
 
 pub fn parse_cpu_cores(s: &str) -> Result<f64, SpecError> {
-    let cores: f64 = s.parse().map_err(|_| SpecError::InvalidCpu(s.to_string()))?;
+    let cores: f64 = s
+        .parse()
+        .map_err(|_| SpecError::InvalidCpu(s.to_string()))?;
     let invalid = || SpecError::InvalidCpu(s.to_string());
     if !(cores > 0.0 && cores.is_finite() && cores <= MAX_CPU_CORES) {
         return Err(invalid());
@@ -63,9 +65,18 @@ mod tests {
 
     #[test]
     fn rejects_invalid_cpu_values() {
-        assert_eq!(parse_cpu_cores("0"), Err(SpecError::InvalidCpu("0".to_string())));
-        assert_eq!(parse_cpu_cores("-1"), Err(SpecError::InvalidCpu("-1".to_string())));
-        assert_eq!(parse_cpu_cores("abc"), Err(SpecError::InvalidCpu("abc".to_string())));
+        assert_eq!(
+            parse_cpu_cores("0"),
+            Err(SpecError::InvalidCpu("0".to_string()))
+        );
+        assert_eq!(
+            parse_cpu_cores("-1"),
+            Err(SpecError::InvalidCpu("-1".to_string()))
+        );
+        assert_eq!(
+            parse_cpu_cores("abc"),
+            Err(SpecError::InvalidCpu("abc".to_string()))
+        );
     }
 
     #[test]
@@ -73,7 +84,10 @@ mod tests {
         // 0.001 cores passes a bare ">0.0" check but rounds to 0% in
         // cores_to_pcpu_percent, producing a completely frozen (pcpu:deny=0)
         // jail with no error raised anywhere.
-        assert_eq!(parse_cpu_cores("0.001"), Err(SpecError::InvalidCpu("0.001".to_string())));
+        assert_eq!(
+            parse_cpu_cores("0.001"),
+            Err(SpecError::InvalidCpu("0.001".to_string()))
+        );
     }
 
     #[test]
@@ -87,7 +101,10 @@ mod tests {
         // cores_to_pcpu_percent's `as u32` conversion silently saturates
         // to u32::MAX rather than erroring on an obviously-impossible
         // value for any real (or realistically future) machine.
-        assert_eq!(parse_cpu_cores("1e9"), Err(SpecError::InvalidCpu("1e9".to_string())));
+        assert_eq!(
+            parse_cpu_cores("1e9"),
+            Err(SpecError::InvalidCpu("1e9".to_string()))
+        );
     }
 
     #[test]

@@ -37,9 +37,14 @@ impl FakeDnsProvider {
 impl DnsProvider for FakeDnsProvider {
     fn create_txt_record(&self, name: &str, value: &str) -> Result<(), DnsError> {
         if *self.fail_create.lock().unwrap() {
-            return Err(DnsError::Request(format!("simulated failure creating '{name}'")));
+            return Err(DnsError::Request(format!(
+                "simulated failure creating '{name}'"
+            )));
         }
-        self.records.lock().unwrap().insert(name.to_string(), value.to_string());
+        self.records
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), value.to_string());
         Ok(())
     }
 
@@ -63,8 +68,11 @@ mod tests {
     #[test]
     fn create_then_wait_for_propagation_succeeds() {
         let dns = FakeDnsProvider::new();
-        dns.create_txt_record("_acme-challenge.example.com", "token-value").unwrap();
-        assert!(dns.wait_for_propagation("_acme-challenge.example.com", "token-value").is_ok());
+        dns.create_txt_record("_acme-challenge.example.com", "token-value")
+            .unwrap();
+        assert!(dns
+            .wait_for_propagation("_acme-challenge.example.com", "token-value")
+            .is_ok());
     }
 
     #[test]
@@ -72,22 +80,30 @@ mod tests {
         let dns = FakeDnsProvider::new();
         assert_eq!(
             dns.wait_for_propagation("_acme-challenge.example.com", "token-value"),
-            Err(DnsError::NotFound("_acme-challenge.example.com".to_string()))
+            Err(DnsError::NotFound(
+                "_acme-challenge.example.com".to_string()
+            ))
         );
     }
 
     #[test]
     fn delete_then_wait_for_propagation_fails() {
         let dns = FakeDnsProvider::new();
-        dns.create_txt_record("_acme-challenge.example.com", "token-value").unwrap();
-        dns.delete_txt_record("_acme-challenge.example.com").unwrap();
-        assert!(dns.wait_for_propagation("_acme-challenge.example.com", "token-value").is_err());
+        dns.create_txt_record("_acme-challenge.example.com", "token-value")
+            .unwrap();
+        dns.delete_txt_record("_acme-challenge.example.com")
+            .unwrap();
+        assert!(dns
+            .wait_for_propagation("_acme-challenge.example.com", "token-value")
+            .is_err());
     }
 
     #[test]
     fn create_txt_record_can_be_made_to_fail_for_retry_tests() {
         let dns = FakeDnsProvider::new();
         dns.set_fail_create(true);
-        assert!(dns.create_txt_record("_acme-challenge.example.com", "token-value").is_err());
+        assert!(dns
+            .create_txt_record("_acme-challenge.example.com", "token-value")
+            .is_err());
     }
 }

@@ -37,7 +37,10 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
             tick += 1;
 
             let (tx, rx) = std::sync::mpsc::channel();
-            if commands.send(Command::Get(Some(replica_name.clone()), tx)).is_err() {
+            if commands
+                .send(Command::Get(Some(replica_name.clone()), tx))
+                .is_err()
+            {
                 return;
             }
             let Ok(statuses) = rx.recv() else { return };
@@ -52,11 +55,22 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
 
             let snapshot_id = format!("keel-repl-{tick}");
             if let Err(e) = zfs.snapshot(&dataset, &snapshot_id) {
-                eprintln!("keel-agentd: failed to snapshot '{dataset}' for replica '{replica_name}': {e}");
+                eprintln!(
+                    "keel-agentd: failed to snapshot '{dataset}' for replica '{replica_name}': {e}"
+                );
                 continue;
             }
 
-            match send_once(&zfs, &replica_name, &dataset, &snapshot_id, last_confirmed_sent.as_deref(), &replicate_to, generation, &tls.client_config()) {
+            match send_once(
+                &zfs,
+                &replica_name,
+                &dataset,
+                &snapshot_id,
+                last_confirmed_sent.as_deref(),
+                &replicate_to,
+                generation,
+                &tls.client_config(),
+            ) {
                 Ok(()) => {
                     // Prune the previous incremental base now that a new one
                     // has been confirmed: keep exactly one snapshot per
@@ -85,7 +99,9 @@ pub fn spawn<Z: ZfsManager + Clone + Send + 'static>(
                     return;
                 }
                 Err(SendOnceError::Io(e)) => {
-                    eprintln!("keel-agentd: failed to replicate '{replica_name}' to {replicate_to}: {e}");
+                    eprintln!(
+                        "keel-agentd: failed to replicate '{replica_name}' to {replicate_to}: {e}"
+                    );
                 }
             }
         }
@@ -98,6 +114,8 @@ enum SendOnceError {
     Io(String),
 }
 
+// each parameter is independently needed to drive the ZFS send and dial the replica target; bundling into a struct would be over-engineering for this single call site
+#[allow(clippy::too_many_arguments)]
 fn send_once<Z: ZfsManager>(
     zfs: &Z,
     replica_name: &str,
@@ -109,19 +127,25 @@ fn send_once<Z: ZfsManager>(
     client_config: &Arc<rustls::ClientConfig>,
 ) -> Result<(), SendOnceError> {
     let server_name = crate::tls::server_name_from_addr(replicate_to).map_err(SendOnceError::Io)?;
-    let tcp_stream = TcpStream::connect(replicate_to).map_err(|e| SendOnceError::Io(e.to_string()))?;
-    let conn = ClientConnection::new(Arc::clone(client_config), server_name).map_err(|e| SendOnceError::Io(e.to_string()))?;
+    let tcp_stream =
+        TcpStream::connect(replicate_to).map_err(|e| SendOnceError::Io(e.to_string()))?;
+    let conn = ClientConnection::new(Arc::clone(client_config), server_name)
+        .map_err(|e| SendOnceError::Io(e.to_string()))?;
     let mut stream = StreamOwned::new(conn, tcp_stream);
-    replication::write_header(&mut stream, replica_name, snapshot_id, base, generation).map_err(|e| SendOnceError::Io(e.to_string()))?;
+    replication::write_header(&mut stream, replica_name, snapshot_id, base, generation)
+        .map_err(|e| SendOnceError::Io(e.to_string()))?;
     let mut ack = [0u8; 1];
-    stream.read_exact(&mut ack).map_err(|e| SendOnceError::Io(e.to_string()))?;
+    stream
+        .read_exact(&mut ack)
+        .map_err(|e| SendOnceError::Io(e.to_string()))?;
     if ack[0] == ACK_NEED_FULL {
         return Err(SendOnceError::NeedFull);
     }
     if ack[0] == replication::ACK_STALE_GENERATION {
         return Err(SendOnceError::Fenced);
     }
-    zfs.send_snapshot(dataset, snapshot_id, base, &mut stream).map_err(|e| SendOnceError::Io(e.to_string()))?;
+    zfs.send_snapshot(dataset, snapshot_id, base, &mut stream)
+        .map_err(|e| SendOnceError::Io(e.to_string()))?;
     stream.sock.shutdown(std::net::Shutdown::Write).ok();
     Ok(())
 }
@@ -133,7 +157,7 @@ mod tests {
     use crate::worker;
     use keel_jail::{FakeJailRuntime, FakeMountManager};
     use keel_net::FakeNetManager;
-    use keel_spec::{Metadata, NetworkSpec, RestartPolicy, ResourcesSpec, Spec, VolumeMount};
+    use keel_spec::{Metadata, NetworkSpec, ResourcesSpec, RestartPolicy, Spec, VolumeMount};
     use keel_zfs::FakeZfsManager;
     use std::path::PathBuf;
 
@@ -148,22 +172,41 @@ mod tests {
     }
 
     fn test_reloading_tls() -> Arc<ReloadingTls> {
-        ReloadingTls::spawn(fixture("fixture-node.crt"), fixture("fixture-node.key"), fixture("ca.crt"), fixture("crl.pem"), Duration::from_secs(3600))
-            .unwrap()
+        ReloadingTls::spawn(
+            fixture("fixture-node.crt"),
+            fixture("fixture-node.key"),
+            fixture("ca.crt"),
+            fixture("crl.pem"),
+            Duration::from_secs(3600),
+        )
+        .unwrap()
     }
 
     fn stateful_spec(name: &str) -> keel_spec::JailSpec {
         keel_spec::JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: Spec {
                 image: "base/14.2-web".to_string(),
                 command: vec!["/usr/local/bin/myapp".to_string()],
-                network: NetworkSpec { vnet: true, bridge: "keel0".to_string(), address: "10.0.0.5/24".to_string() },
-                resources: ResourcesSpec { cpu: "1".to_string(), memory: "256M".to_string() },
+                network: NetworkSpec {
+                    vnet: true,
+                    bridge: "keel0".to_string(),
+                    address: "10.0.0.5/24".to_string(),
+                },
+                resources: ResourcesSpec {
+                    cpu: "1".to_string(),
+                    memory: "256M".to_string(),
+                },
                 restart_policy: RestartPolicy::Always,
-                volumes: vec![VolumeMount { name: format!("{name}-data"), mount_path: "/var/db".to_string(), size: "1G".to_string() }],
+                volumes: vec![VolumeMount {
+                    name: format!("{name}-data"),
+                    mount_path: "/var/db".to_string(),
+                    size: "1G".to_string(),
+                }],
                 replicate_to: None,
                 generation: 0,
             },
@@ -175,11 +218,26 @@ mod tests {
         let dir = test_state_dir("a_tick_snapshots_and_sends_a_full_replication_on_first_contact");
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
-        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (_worker_handle, commands) =
+            worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = std::sync::mpsc::channel();
-        commands.send(Command::Apply(stateful_spec("db-0"), apply_tx)).unwrap();
+        commands
+            .send(Command::Apply(stateful_spec("db-0"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let receiver_zfs = FakeZfsManager::new();
@@ -190,22 +248,48 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let receiver_zfs_clone = receiver_zfs.clone();
         let targets_clone = targets.clone();
-        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone, test_reloading_tls()));
+        std::thread::spawn(move || {
+            crate::replication::run(
+                listener,
+                receiver_zfs_clone,
+                "zroot".to_string(),
+                targets_clone,
+                test_reloading_tls(),
+            )
+        });
 
         let (rt_tx, rt_rx) = std::sync::mpsc::channel();
-        commands.send(Command::SetReplicateTo("db-0".to_string(), Some(addr), rt_tx)).unwrap();
+        commands
+            .send(Command::SetReplicateTo(
+                "db-0".to_string(),
+                Some(addr),
+                rt_tx,
+            ))
+            .unwrap();
         rt_rx.recv().unwrap().unwrap();
 
-        let _handle = spawn("db-0".to_string(), "db-0-data".to_string(), "zroot".to_string(), zfs.clone(), commands.clone(), Duration::from_millis(50), test_reloading_tls());
+        let _handle = spawn(
+            "db-0".to_string(),
+            "db-0-data".to_string(),
+            "zroot".to_string(),
+            zfs.clone(),
+            commands.clone(),
+            Duration::from_millis(50),
+            test_reloading_tls(),
+        );
 
         std::thread::sleep(Duration::from_millis(300));
-        assert!(receiver_zfs.dataset_exists("zroot/keel/volumes/db-0-data").unwrap());
+        assert!(receiver_zfs
+            .dataset_exists("zroot/keel/volumes/db-0-data")
+            .unwrap());
         // The wire protocol's `replica_name` header field carries the plain
         // replica/jail name ("db-0"), matching `Standbys`, `PendingFences`,
         // `Placements`, and force-repin's own probe -- see
         // `replication::handle_connection`, which reconstructs the volume
         // name ("db-0-data") from this same field.
-        assert!(targets.get("db-0").is_some_and(|t| t.last_snapshot.is_some()));
+        assert!(targets
+            .get("db-0")
+            .is_some_and(|t| t.last_snapshot.is_some()));
     }
 
     #[test]
@@ -218,11 +302,26 @@ mod tests {
         let dir = test_state_dir("a_successful_send_prunes_the_previous_confirmed_snapshot");
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
-        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (_worker_handle, commands) =
+            worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = std::sync::mpsc::channel();
-        commands.send(Command::Apply(stateful_spec("db-2"), apply_tx)).unwrap();
+        commands
+            .send(Command::Apply(stateful_spec("db-2"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let receiver_zfs = FakeZfsManager::new();
@@ -233,17 +332,39 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let receiver_zfs_clone = receiver_zfs.clone();
         let targets_clone = targets.clone();
-        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone, test_reloading_tls()));
+        std::thread::spawn(move || {
+            crate::replication::run(
+                listener,
+                receiver_zfs_clone,
+                "zroot".to_string(),
+                targets_clone,
+                test_reloading_tls(),
+            )
+        });
 
         let (rt_tx, rt_rx) = std::sync::mpsc::channel();
-        commands.send(Command::SetReplicateTo("db-2".to_string(), Some(addr), rt_tx)).unwrap();
+        commands
+            .send(Command::SetReplicateTo(
+                "db-2".to_string(),
+                Some(addr),
+                rt_tx,
+            ))
+            .unwrap();
         rt_rx.recv().unwrap().unwrap();
 
         // 200ms interval: ticks land at ~200ms and ~400ms. Asserting at
         // 450ms falls comfortably after the second tick's send completes
         // but well before the third (~600ms), so exactly two successful
         // sends have happened.
-        let _handle = spawn("db-2".to_string(), "db-2-data".to_string(), "zroot".to_string(), zfs.clone(), commands.clone(), Duration::from_millis(200), test_reloading_tls());
+        let _handle = spawn(
+            "db-2".to_string(),
+            "db-2-data".to_string(),
+            "zroot".to_string(),
+            zfs.clone(),
+            commands.clone(),
+            Duration::from_millis(200),
+            test_reloading_tls(),
+        );
         std::thread::sleep(Duration::from_millis(450));
 
         let dataset = "zroot/keel/volumes/db-2-data";
@@ -253,7 +374,8 @@ mod tests {
             "expected the first tick's snapshot to have been pruned after the second tick's successful send"
         );
         assert!(
-            zfs.send_snapshot(dataset, "keel-repl-2", None, &mut discard).is_ok(),
+            zfs.send_snapshot(dataset, "keel-repl-2", None, &mut discard)
+                .is_ok(),
             "expected the second tick's snapshot to still exist as the current incremental base"
         );
     }
@@ -269,27 +391,52 @@ mod tests {
         let dir = test_state_dir("the_loop_exits_once_its_replica_record_is_deleted");
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
-        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (_worker_handle, commands) =
+            worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = std::sync::mpsc::channel();
-        commands.send(Command::Apply(stateful_spec("db-1"), apply_tx)).unwrap();
+        commands
+            .send(Command::Apply(stateful_spec("db-1"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let (del_tx, del_rx) = std::sync::mpsc::channel();
-        commands.send(Command::Delete("db-1".to_string(), del_tx)).unwrap();
+        commands
+            .send(Command::Delete("db-1".to_string(), del_tx))
+            .unwrap();
         del_rx.recv().unwrap().unwrap();
 
-        let handle = spawn("db-1".to_string(), "db-1-data".to_string(), "zroot".to_string(), zfs.clone(), commands.clone(), Duration::from_millis(20), test_reloading_tls());
+        let handle = spawn(
+            "db-1".to_string(),
+            "db-1-data".to_string(),
+            "zroot".to_string(),
+            zfs.clone(),
+            commands.clone(),
+            Duration::from_millis(20),
+            test_reloading_tls(),
+        );
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = handle.join();
             let _ = done_tx.send(());
         });
-        done_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("expected the replication loop thread to exit once its replica record was deleted");
+        done_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "expected the replication loop thread to exit once its replica record was deleted",
+        );
     }
 
     #[test]
@@ -303,11 +450,26 @@ mod tests {
         let dir = test_state_dir("the_loop_exits_once_the_standby_rejects_its_generation_as_stale");
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
-        let reconciler = Reconciler::new(FakeJailRuntime::new(), zfs.clone(), FakeNetManager::new(), FakeMountManager::new(), "zroot".to_string(), dir, Box::new(keel_ingress::FakeAcmeClient::new()), Box::new(keel_ingress::FakeDnsProvider::new()), Box::new(crate::nginx::FakeNginxController::new()), crate::ServiceVipSlot::new()).unwrap();
-        let (_worker_handle, commands) = worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
+        let reconciler = Reconciler::new(
+            FakeJailRuntime::new(),
+            zfs.clone(),
+            FakeNetManager::new(),
+            FakeMountManager::new(),
+            "zroot".to_string(),
+            dir,
+            Box::new(keel_ingress::FakeAcmeClient::new()),
+            Box::new(keel_ingress::FakeDnsProvider::new()),
+            Box::new(crate::nginx::FakeNginxController::new()),
+            crate::ServiceVipSlot::new(),
+        )
+        .unwrap();
+        let (_worker_handle, commands) =
+            worker::spawn(reconciler, zfs.clone(), "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = std::sync::mpsc::channel();
-        commands.send(Command::Apply(stateful_spec("db-4"), apply_tx)).unwrap();
+        commands
+            .send(Command::Apply(stateful_spec("db-4"), apply_tx))
+            .unwrap();
         apply_rx.recv().unwrap().unwrap();
 
         let receiver_zfs = FakeZfsManager::new();
@@ -322,13 +484,35 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let receiver_zfs_clone = receiver_zfs.clone();
         let targets_clone = targets.clone();
-        std::thread::spawn(move || crate::replication::run(listener, receiver_zfs_clone, "zroot".to_string(), targets_clone, test_reloading_tls()));
+        std::thread::spawn(move || {
+            crate::replication::run(
+                listener,
+                receiver_zfs_clone,
+                "zroot".to_string(),
+                targets_clone,
+                test_reloading_tls(),
+            )
+        });
 
         let (rt_tx, rt_rx) = std::sync::mpsc::channel();
-        commands.send(Command::SetReplicateTo("db-4".to_string(), Some(addr), rt_tx)).unwrap();
+        commands
+            .send(Command::SetReplicateTo(
+                "db-4".to_string(),
+                Some(addr),
+                rt_tx,
+            ))
+            .unwrap();
         rt_rx.recv().unwrap().unwrap();
 
-        let handle = spawn("db-4".to_string(), "db-4-data".to_string(), "zroot".to_string(), zfs.clone(), commands.clone(), Duration::from_millis(20), test_reloading_tls());
+        let handle = spawn(
+            "db-4".to_string(),
+            "db-4-data".to_string(),
+            "zroot".to_string(),
+            zfs.clone(),
+            commands.clone(),
+            Duration::from_millis(20),
+            test_reloading_tls(),
+        );
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

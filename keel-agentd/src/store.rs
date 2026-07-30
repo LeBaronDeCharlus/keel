@@ -51,13 +51,15 @@ pub fn remove(state_dir: &Path, spec_name: &str) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keel_spec::{Metadata, NetworkSpec, RestartPolicy, ResourcesSpec, Spec};
+    use keel_spec::{Metadata, NetworkSpec, ResourcesSpec, RestartPolicy, Spec};
 
     fn sample_spec(name: &str) -> keel_spec::JailSpec {
         keel_spec::JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: Spec {
                 image: "base/14.2-web".to_string(),
                 command: vec!["/usr/local/bin/myapp".to_string()],
@@ -66,7 +68,10 @@ mod tests {
                     bridge: "keel0".to_string(),
                     address: "10.0.0.5/24".to_string(),
                 },
-                resources: ResourcesSpec { cpu: "2".to_string(), memory: "512M".to_string() },
+                resources: ResourcesSpec {
+                    cpu: "2".to_string(),
+                    memory: "512M".to_string(),
+                },
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
@@ -76,7 +81,11 @@ mod tests {
     }
 
     fn sample_record(name: &str) -> JailRecord {
-        JailRecord { spec: sample_spec(name), epair_ordinal: 5, deleting: false }
+        JailRecord {
+            spec: sample_spec(name),
+            epair_ordinal: 5,
+            deleting: false,
+        }
     }
 
     fn test_state_dir(name: &str) -> PathBuf {

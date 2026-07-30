@@ -16,7 +16,9 @@ pub enum SpecError {
     InvalidPort(u16),
     #[error("duplicate volume name '{0}' in spec.volumes")]
     DuplicateVolumeName(String),
-    #[error("field '{0}' cannot be changed after the jail is created; delete and re-apply instead")]
+    #[error(
+        "field '{0}' cannot be changed after the jail is created; delete and re-apply instead"
+    )]
     ImmutableField(&'static str),
     #[error("invalid host '{0}': must be a syntactically well-formed DNS name")]
     InvalidHost(String),

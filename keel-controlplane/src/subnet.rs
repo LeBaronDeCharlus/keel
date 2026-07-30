@@ -13,7 +13,8 @@ pub fn derive_pod_cidr(node_id: &str, cluster_cidr: &Ipv4Net) -> Ipv4Net {
     let index = fnv1a(node_id.as_bytes()) % block_count;
     let base = u32::from(cluster_cidr.network());
     let block_addr = Ipv4Addr::from(base + index * (1u32 << (32 - POD_PREFIX_LEN)));
-    Ipv4Net::new(block_addr, POD_PREFIX_LEN).expect("prefix length 24 is always valid for an IPv4 address")
+    Ipv4Net::new(block_addr, POD_PREFIX_LEN)
+        .expect("prefix length 24 is always valid for an IPv4 address")
 }
 
 /// Allocates a service's VIP at host-address granularity within
@@ -57,7 +58,10 @@ mod tests {
     #[test]
     fn deterministic_across_repeated_calls() {
         let cluster_cidr = cidr("10.0.0.0/16");
-        assert_eq!(derive_pod_cidr("node-1", &cluster_cidr), derive_pod_cidr("node-1", &cluster_cidr));
+        assert_eq!(
+            derive_pod_cidr("node-1", &cluster_cidr),
+            derive_pod_cidr("node-1", &cluster_cidr)
+        );
     }
 
     #[test]
@@ -65,25 +69,45 @@ mod tests {
         // fnv1a("node-1") = 1422144387 % 256 = 131; fnv1a("node-2") = 1438922006 % 256 = 22;
         // fnv1a("node-3") = 1455699625 % 256 = 169 (computed independently in Python, see the plan doc).
         let cluster_cidr = cidr("10.0.0.0/16");
-        assert_eq!(derive_pod_cidr("node-1", &cluster_cidr), cidr("10.0.131.0/24"));
-        assert_eq!(derive_pod_cidr("node-2", &cluster_cidr), cidr("10.0.22.0/24"));
-        assert_eq!(derive_pod_cidr("node-3", &cluster_cidr), cidr("10.0.169.0/24"));
+        assert_eq!(
+            derive_pod_cidr("node-1", &cluster_cidr),
+            cidr("10.0.131.0/24")
+        );
+        assert_eq!(
+            derive_pod_cidr("node-2", &cluster_cidr),
+            cidr("10.0.22.0/24")
+        );
+        assert_eq!(
+            derive_pod_cidr("node-3", &cluster_cidr),
+            cidr("10.0.169.0/24")
+        );
     }
 
     #[test]
     fn different_node_ids_spread_across_the_available_blocks() {
         let cluster_cidr = cidr("10.0.0.0/16");
-        let blocks: std::collections::HashSet<Ipv4Net> =
-            (1..=20).map(|i| derive_pod_cidr(&format!("node-{i}"), &cluster_cidr)).collect();
-        assert!(blocks.len() > 15, "expected most of 20 node-ids on distinct blocks, got {}", blocks.len());
+        let blocks: std::collections::HashSet<Ipv4Net> = (1..=20)
+            .map(|i| derive_pod_cidr(&format!("node-{i}"), &cluster_cidr))
+            .collect();
+        assert!(
+            blocks.len() > 15,
+            "expected most of 20 node-ids on distinct blocks, got {}",
+            blocks.len()
+        );
     }
 
     #[test]
     fn two_node_ids_can_collide_on_a_small_cluster_cidr() {
         // fnv1a("node-4") % 4 == fnv1a("node-8") % 4 == 0 (computed independently in Python).
         let cluster_cidr = cidr("10.0.0.0/22");
-        assert_eq!(derive_pod_cidr("node-4", &cluster_cidr), derive_pod_cidr("node-8", &cluster_cidr));
-        assert_eq!(derive_pod_cidr("node-4", &cluster_cidr), cidr("10.0.0.0/24"));
+        assert_eq!(
+            derive_pod_cidr("node-4", &cluster_cidr),
+            derive_pod_cidr("node-8", &cluster_cidr)
+        );
+        assert_eq!(
+            derive_pod_cidr("node-4", &cluster_cidr),
+            cidr("10.0.0.0/24")
+        );
     }
 
     #[test]
@@ -112,7 +136,10 @@ mod tests {
         let service_cidr = cidr("10.0.250.0/24");
         for name in ["web", "api", "cache", "worker", "db"] {
             let vip = derive_service_vip(name, &service_cidr, 0);
-            assert!(service_cidr.contains(&vip), "{vip} not inside {service_cidr}");
+            assert!(
+                service_cidr.contains(&vip),
+                "{vip} not inside {service_cidr}"
+            );
         }
     }
 
@@ -124,9 +151,13 @@ mod tests {
         // /24-block granularity, could only ever return service_cidr's own
         // network address here).
         let service_cidr = cidr("10.0.250.0/24");
-        let vips: std::collections::HashSet<Ipv4Addr> =
-            (0u32..20).map(|i| derive_service_vip(&format!("svc-{i}"), &service_cidr, 0)).collect();
-        assert!(vips.len() > 1, "expected distinct host addresses across 20 service names, got {vips:?}");
+        let vips: std::collections::HashSet<Ipv4Addr> = (0u32..20)
+            .map(|i| derive_service_vip(&format!("svc-{i}"), &service_cidr, 0))
+            .collect();
+        assert!(
+            vips.len() > 1,
+            "expected distinct host addresses across 20 service names, got {vips:?}"
+        );
     }
 
     #[test]

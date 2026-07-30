@@ -91,8 +91,7 @@ impl ZfsManager for CliZfsManager {
                     {
                         return Err(ZfsError::NotFound(dataset.to_string()));
                     }
-                    let is_busy =
-                        matches!(&e, ZfsError::CommandFailed(_, _, stderr) if stderr.contains("dataset is busy"));
+                    let is_busy = matches!(&e, ZfsError::CommandFailed(_, _, stderr) if stderr.contains("dataset is busy"));
                     last_was_busy = is_busy;
                     last_err = Some(e);
                     if !is_busy {
@@ -116,7 +115,13 @@ impl ZfsManager for CliZfsManager {
         Self::run_checked(&["destroy", &format!("{dataset}@{snapshot}")])
     }
 
-    fn send_snapshot(&self, dataset: &str, snapshot: &str, base: Option<&str>, out: &mut dyn Write) -> Result<(), ZfsError> {
+    fn send_snapshot(
+        &self,
+        dataset: &str,
+        snapshot: &str,
+        base: Option<&str>,
+        out: &mut dyn Write,
+    ) -> Result<(), ZfsError> {
         let target = format!("{dataset}@{snapshot}");
         let base_arg = base.map(|b| format!("{dataset}@{b}"));
         let mut args: Vec<&str> = vec!["send"];
@@ -138,7 +143,11 @@ impl ZfsManager for CliZfsManager {
         })
         .map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
         if !status.success() {
-            return Err(ZfsError::CommandFailed(format!("zfs {}", args.join(" ")), status, stderr));
+            return Err(ZfsError::CommandFailed(
+                format!("zfs {}", args.join(" ")),
+                status,
+                stderr,
+            ));
         }
         copy_result.map_err(|e| ZfsError::Spawn("zfs send".to_string(), e))?;
         Ok(())
@@ -157,7 +166,11 @@ impl ZfsManager for CliZfsManager {
         })
         .map_err(|e| ZfsError::Spawn("zfs".to_string(), e))?;
         if !status.success() {
-            return Err(ZfsError::CommandFailed(format!("zfs receive {dataset}"), status, stderr));
+            return Err(ZfsError::CommandFailed(
+                format!("zfs receive {dataset}"),
+                status,
+                stderr,
+            ));
         }
         copy_result.map_err(|e| ZfsError::Spawn("zfs receive".to_string(), e))?;
         Ok(())
@@ -223,7 +236,9 @@ fn run_and_drain_stderr(
     });
     let copy_result = copy(&mut child);
     let status = child.wait()?;
-    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
     Ok((copy_result, status, stderr))
 }
 
@@ -255,11 +270,15 @@ mod tests {
             let _ = done_tx.send((copy_result.is_ok(), status.success(), stderr.len(), out));
         });
 
-        let (copy_ok, exited_ok, stderr_len, stdout_bytes) =
-            done_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("expected no deadlock: run_and_drain_stderr must return");
+        let (copy_ok, exited_ok, stderr_len, stdout_bytes) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("expected no deadlock: run_and_drain_stderr must return");
         assert!(copy_ok, "expected the stdout copy to succeed");
         assert!(exited_ok, "expected the child to exit successfully");
-        assert_eq!(stderr_len, 300_000, "expected the full flooded stderr to have been drained");
+        assert_eq!(
+            stderr_len, 300_000,
+            "expected the full flooded stderr to have been drained"
+        );
         assert_eq!(String::from_utf8_lossy(&stdout_bytes).trim(), "done");
     }
 }

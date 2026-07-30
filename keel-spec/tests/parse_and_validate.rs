@@ -28,13 +28,19 @@ fn parses_and_validates_the_design_spec_example() {
 #[test]
 fn rejects_an_invalid_name() {
     let yaml = VALID_YAML.replace("name: web-1", "name: Invalid_Name");
-    assert!(matches!(parse_and_validate(&yaml), Err(SpecError::InvalidName(_))));
+    assert!(matches!(
+        parse_and_validate(&yaml),
+        Err(SpecError::InvalidName(_))
+    ));
 }
 
 #[test]
 fn rejects_a_malformed_address() {
     let yaml = VALID_YAML.replace("address: 10.0.0.5/24", "address: not-an-address");
-    assert!(matches!(parse_and_validate(&yaml), Err(SpecError::InvalidAddress(_, _))));
+    assert!(matches!(
+        parse_and_validate(&yaml),
+        Err(SpecError::InvalidAddress(_, _))
+    ));
 }
 
 #[test]

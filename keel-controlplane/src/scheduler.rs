@@ -19,7 +19,10 @@ pub fn pick_node(nodes: &[NodeResources]) -> Result<String, ScheduleError> {
         .map(|n| (headroom_score(n), n.id.as_str()))
         .fold(None, |best: Option<(f64, &str)>, candidate| match best {
             None => Some(candidate),
-            Some(current) if candidate.0 > current.0 || (candidate.0 == current.0 && candidate.1 < current.1) => {
+            Some(current)
+                if candidate.0 > current.0
+                    || (candidate.0 == current.0 && candidate.1 < current.1) =>
+            {
                 Some(candidate)
             }
             _ => best,
@@ -29,7 +32,11 @@ pub fn pick_node(nodes: &[NodeResources]) -> Result<String, ScheduleError> {
 }
 
 fn headroom_score(n: &NodeResources) -> f64 {
-    let cpu_frac = if n.capacity_cpu > 0.0 { (n.capacity_cpu - n.committed_cpu) / n.capacity_cpu } else { 0.0 };
+    let cpu_frac = if n.capacity_cpu > 0.0 {
+        (n.capacity_cpu - n.committed_cpu) / n.capacity_cpu
+    } else {
+        0.0
+    };
     let mem_frac = if n.capacity_memory > 0 {
         (n.capacity_memory as f64 - n.committed_memory as f64) / n.capacity_memory as f64
     } else {
@@ -42,8 +49,20 @@ fn headroom_score(n: &NodeResources) -> f64 {
 mod tests {
     use super::*;
 
-    fn node(id: &str, capacity_cpu: f64, capacity_memory: u64, committed_cpu: f64, committed_memory: u64) -> NodeResources {
-        NodeResources { id: id.to_string(), capacity_cpu, capacity_memory, committed_cpu, committed_memory }
+    fn node(
+        id: &str,
+        capacity_cpu: f64,
+        capacity_memory: u64,
+        committed_cpu: f64,
+        committed_memory: u64,
+    ) -> NodeResources {
+        NodeResources {
+            id: id.to_string(),
+            capacity_cpu,
+            capacity_memory,
+            committed_cpu,
+            committed_memory,
+        }
     }
 
     #[test]
@@ -73,7 +92,10 @@ mod tests {
 
     #[test]
     fn ties_on_the_min_fraction_score_are_broken_by_ascending_node_id() {
-        let nodes = vec![node("node-2", 4.0, 100, 2.0, 50), node("node-1", 4.0, 100, 2.0, 50)];
+        let nodes = vec![
+            node("node-2", 4.0, 100, 2.0, 50),
+            node("node-1", 4.0, 100, 2.0, 50),
+        ];
         assert_eq!(pick_node(&nodes), Ok("node-1".to_string()));
     }
 

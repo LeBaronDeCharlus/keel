@@ -49,7 +49,10 @@ impl ZfsManager for FakeZfsManager {
             return Err(ZfsError::NotFound(base_dataset.to_string()));
         }
         drop(datasets);
-        self.datasets.lock().unwrap().insert(target_dataset.to_string());
+        self.datasets
+            .lock()
+            .unwrap()
+            .insert(target_dataset.to_string());
         Ok(())
     }
 
@@ -73,7 +76,10 @@ impl ZfsManager for FakeZfsManager {
         if !self.datasets.lock().unwrap().contains(dataset) {
             return Err(ZfsError::NotFound(dataset.to_string()));
         }
-        self.snapshots.lock().unwrap().insert(format!("{dataset}@{snapshot}"));
+        self.snapshots
+            .lock()
+            .unwrap()
+            .insert(format!("{dataset}@{snapshot}"));
         Ok(())
     }
 
@@ -86,7 +92,13 @@ impl ZfsManager for FakeZfsManager {
         }
     }
 
-    fn send_snapshot(&self, dataset: &str, snapshot: &str, base: Option<&str>, out: &mut dyn Write) -> Result<(), ZfsError> {
+    fn send_snapshot(
+        &self,
+        dataset: &str,
+        snapshot: &str,
+        base: Option<&str>,
+        out: &mut dyn Write,
+    ) -> Result<(), ZfsError> {
         let key = format!("{dataset}@{snapshot}");
         if !self.snapshots.lock().unwrap().contains(&key) {
             return Err(ZfsError::NotFound(key));
@@ -101,18 +113,25 @@ impl ZfsManager for FakeZfsManager {
             "keel-zfs-fake-send:{dataset}@{snapshot}:base={}\n",
             base.unwrap_or("none")
         );
-        out.write_all(marker.as_bytes()).map_err(|e| ZfsError::Spawn("fake zfs send".to_string(), e))
+        out.write_all(marker.as_bytes())
+            .map_err(|e| ZfsError::Spawn("fake zfs send".to_string(), e))
     }
 
     fn receive_snapshot(&self, dataset: &str, input: &mut dyn Read) -> Result<(), ZfsError> {
         let mut buf = String::new();
-        input.read_to_string(&mut buf).map_err(|e| ZfsError::Spawn("fake zfs receive".to_string(), e))?;
+        input
+            .read_to_string(&mut buf)
+            .map_err(|e| ZfsError::Spawn("fake zfs receive".to_string(), e))?;
         let marker = buf.strip_prefix("keel-zfs-fake-send:");
         let parsed = marker.and_then(|rest| {
             let rest = rest.strip_suffix('\n').unwrap_or(rest);
             let (sent, base_part) = rest.split_once(":base=")?;
             let (_sender_dataset, snapshot) = sent.split_once('@')?;
-            let base = if base_part == "none" { None } else { Some(base_part.to_string()) };
+            let base = if base_part == "none" {
+                None
+            } else {
+                Some(base_part.to_string())
+            };
             Some((snapshot.to_string(), base))
         });
         let Some((snapshot, base)) = parsed else {
@@ -133,7 +152,10 @@ impl ZfsManager for FakeZfsManager {
             }
         }
         self.datasets.lock().unwrap().insert(dataset.to_string());
-        self.snapshots.lock().unwrap().insert(format!("{dataset}@{snapshot}"));
+        self.snapshots
+            .lock()
+            .unwrap()
+            .insert(format!("{dataset}@{snapshot}"));
         Ok(())
     }
 
@@ -159,9 +181,9 @@ mod tests {
     #[test]
     fn dataset_exists_is_false_until_seeded() {
         let zfs = FakeZfsManager::new();
-        assert_eq!(zfs.dataset_exists("zroot/keel/base/test").unwrap(), false);
+        assert!(!zfs.dataset_exists("zroot/keel/base/test").unwrap());
         zfs.seed_dataset("zroot/keel/base/test");
-        assert_eq!(zfs.dataset_exists("zroot/keel/base/test").unwrap(), true);
+        assert!(zfs.dataset_exists("zroot/keel/base/test").unwrap());
     }
 
     #[test]
@@ -177,8 +199,9 @@ mod tests {
     fn clone_from_base_creates_target_dataset() {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/test");
-        zfs.clone_from_base("zroot/keel/base/test", "zroot/keel/jails/web-1").unwrap();
-        assert_eq!(zfs.dataset_exists("zroot/keel/jails/web-1").unwrap(), true);
+        zfs.clone_from_base("zroot/keel/base/test", "zroot/keel/jails/web-1")
+            .unwrap();
+        assert!(zfs.dataset_exists("zroot/keel/jails/web-1").unwrap());
     }
 
     #[test]
@@ -186,28 +209,34 @@ mod tests {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/jails/web-1");
         zfs.destroy_dataset("zroot/keel/jails/web-1").unwrap();
-        assert_eq!(zfs.dataset_exists("zroot/keel/jails/web-1").unwrap(), false);
+        assert!(!zfs.dataset_exists("zroot/keel/jails/web-1").unwrap());
     }
 
     #[test]
     fn destroy_dataset_on_unknown_dataset_returns_not_found() {
         let zfs = FakeZfsManager::new();
-        assert!(matches!(zfs.destroy_dataset("zroot/keel/jails/missing"), Err(ZfsError::NotFound(_))));
+        assert!(matches!(
+            zfs.destroy_dataset("zroot/keel/jails/missing"),
+            Err(ZfsError::NotFound(_))
+        ));
     }
 
     #[test]
     fn create_volume_creates_the_dataset() {
         let zfs = FakeZfsManager::new();
-        zfs.create_volume("zroot/keel/volumes/web-data", "1G").unwrap();
-        assert_eq!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap(), true);
+        zfs.create_volume("zroot/keel/volumes/web-data", "1G")
+            .unwrap();
+        assert!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
     }
 
     #[test]
     fn create_volume_is_idempotent_on_an_already_existing_dataset() {
         let zfs = FakeZfsManager::new();
-        zfs.create_volume("zroot/keel/volumes/web-data", "1G").unwrap();
-        zfs.create_volume("zroot/keel/volumes/web-data", "1G").unwrap();
-        assert_eq!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap(), true);
+        zfs.create_volume("zroot/keel/volumes/web-data", "1G")
+            .unwrap();
+        zfs.create_volume("zroot/keel/volumes/web-data", "1G")
+            .unwrap();
+        assert!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
     }
 
     #[test]
@@ -215,8 +244,11 @@ mod tests {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
         zfs.mark_busy("zroot/keel/volumes/web-data");
-        assert!(matches!(zfs.destroy_dataset("zroot/keel/volumes/web-data"), Err(ZfsError::Busy(_))));
-        assert_eq!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap(), true);
+        assert!(matches!(
+            zfs.destroy_dataset("zroot/keel/volumes/web-data"),
+            Err(ZfsError::Busy(_))
+        ));
+        assert!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
     }
 
     #[test]
@@ -224,17 +256,23 @@ mod tests {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
         zfs.mark_busy("zroot/keel/volumes/web-data");
-        assert!(matches!(zfs.destroy_dataset("zroot/keel/volumes/web-data"), Err(ZfsError::Busy(_))));
+        assert!(matches!(
+            zfs.destroy_dataset("zroot/keel/volumes/web-data"),
+            Err(ZfsError::Busy(_))
+        ));
 
         zfs.unmark_busy("zroot/keel/volumes/web-data");
         zfs.destroy_dataset("zroot/keel/volumes/web-data").unwrap();
-        assert_eq!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap(), false);
+        assert!(!zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
     }
 
     #[test]
     fn snapshot_requires_an_existing_dataset() {
         let zfs = FakeZfsManager::new();
-        assert!(matches!(zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1"), Err(ZfsError::NotFound(_))));
+        assert!(matches!(
+            zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1"),
+            Err(ZfsError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -252,25 +290,42 @@ mod tests {
     fn send_snapshot_full_then_receive_snapshot_creates_the_target_dataset() {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
 
         let mut stream = Vec::new();
-        zfs.send_snapshot("zroot/keel/volumes/web-data", "keel-repl-1", None, &mut stream).unwrap();
+        zfs.send_snapshot(
+            "zroot/keel/volumes/web-data",
+            "keel-repl-1",
+            None,
+            &mut stream,
+        )
+        .unwrap();
 
         let target = FakeZfsManager::new();
-        target.receive_snapshot("zroot/keel/volumes/web-0-data", &mut stream.as_slice()).unwrap();
-        assert!(target.dataset_exists("zroot/keel/volumes/web-0-data").unwrap());
+        target
+            .receive_snapshot("zroot/keel/volumes/web-0-data", &mut stream.as_slice())
+            .unwrap();
+        assert!(target
+            .dataset_exists("zroot/keel/volumes/web-0-data")
+            .unwrap());
     }
 
     #[test]
     fn send_snapshot_incremental_requires_the_base_snapshot_to_exist() {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-2").unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-2")
+            .unwrap();
 
         let mut out = Vec::new();
         assert!(matches!(
-            zfs.send_snapshot("zroot/keel/volumes/web-data", "keel-repl-2", Some("keel-repl-1"), &mut out),
+            zfs.send_snapshot(
+                "zroot/keel/volumes/web-data",
+                "keel-repl-2",
+                Some("keel-repl-1"),
+                &mut out
+            ),
             Err(ZfsError::NotFound(_))
         ));
     }
@@ -279,19 +334,33 @@ mod tests {
     fn send_snapshot_incremental_succeeds_once_the_base_exists() {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-2").unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-2")
+            .unwrap();
 
         let mut out = Vec::new();
-        zfs.send_snapshot("zroot/keel/volumes/web-data", "keel-repl-2", Some("keel-repl-1"), &mut out).unwrap();
-        assert!(!out.is_empty(), "expected the fake to still write a synthetic byte marker for an incremental send");
+        zfs.send_snapshot(
+            "zroot/keel/volumes/web-data",
+            "keel-repl-2",
+            Some("keel-repl-1"),
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            !out.is_empty(),
+            "expected the fake to still write a synthetic byte marker for an incremental send"
+        );
     }
 
     #[test]
     fn receive_snapshot_on_a_malformed_stream_fails_without_creating_the_dataset() {
         let zfs = FakeZfsManager::new();
         let mut garbage: &[u8] = b"not a real send stream";
-        assert!(matches!(zfs.receive_snapshot("zroot/keel/volumes/web-0-data", &mut garbage), Err(ZfsError::CommandFailed(_, _, _))));
+        assert!(matches!(
+            zfs.receive_snapshot("zroot/keel/volumes/web-0-data", &mut garbage),
+            Err(ZfsError::CommandFailed(_, _, _))
+        ));
         assert!(!zfs.dataset_exists("zroot/keel/volumes/web-0-data").unwrap());
     }
 
@@ -299,12 +368,21 @@ mod tests {
     fn receive_snapshot_incremental_rejects_when_base_was_never_received_on_target() {
         let source = FakeZfsManager::new();
         source.seed_dataset("zroot/keel/volumes/web-data");
-        source.snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
-        source.snapshot("zroot/keel/volumes/web-data", "keel-repl-2").unwrap();
+        source
+            .snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
+        source
+            .snapshot("zroot/keel/volumes/web-data", "keel-repl-2")
+            .unwrap();
 
         let mut stream = Vec::new();
         source
-            .send_snapshot("zroot/keel/volumes/web-data", "keel-repl-2", Some("keel-repl-1"), &mut stream)
+            .send_snapshot(
+                "zroot/keel/volumes/web-data",
+                "keel-repl-2",
+                Some("keel-repl-1"),
+                &mut stream,
+            )
             .unwrap();
 
         // Target never received keel-repl-1, so an incremental receive based on it must fail,
@@ -314,37 +392,64 @@ mod tests {
             target.receive_snapshot("zroot/keel/volumes/web-0-data", &mut stream.as_slice()),
             Err(ZfsError::CommandFailed(_, _, _))
         ));
-        assert!(!target.dataset_exists("zroot/keel/volumes/web-0-data").unwrap());
+        assert!(!target
+            .dataset_exists("zroot/keel/volumes/web-0-data")
+            .unwrap());
     }
 
     #[test]
     fn receive_snapshot_incremental_succeeds_once_the_base_was_received_first() {
         let source = FakeZfsManager::new();
         source.seed_dataset("zroot/keel/volumes/web-data");
-        source.snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
-        source.snapshot("zroot/keel/volumes/web-data", "keel-repl-2").unwrap();
+        source
+            .snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
+        source
+            .snapshot("zroot/keel/volumes/web-data", "keel-repl-2")
+            .unwrap();
 
         let mut full_stream = Vec::new();
-        source.send_snapshot("zroot/keel/volumes/web-data", "keel-repl-1", None, &mut full_stream).unwrap();
+        source
+            .send_snapshot(
+                "zroot/keel/volumes/web-data",
+                "keel-repl-1",
+                None,
+                &mut full_stream,
+            )
+            .unwrap();
         let mut incremental_stream = Vec::new();
         source
-            .send_snapshot("zroot/keel/volumes/web-data", "keel-repl-2", Some("keel-repl-1"), &mut incremental_stream)
+            .send_snapshot(
+                "zroot/keel/volumes/web-data",
+                "keel-repl-2",
+                Some("keel-repl-1"),
+                &mut incremental_stream,
+            )
             .unwrap();
 
         let target = FakeZfsManager::new();
-        target.receive_snapshot("zroot/keel/volumes/web-0-data", &mut full_stream.as_slice()).unwrap();
         target
-            .receive_snapshot("zroot/keel/volumes/web-0-data", &mut incremental_stream.as_slice())
+            .receive_snapshot("zroot/keel/volumes/web-0-data", &mut full_stream.as_slice())
             .unwrap();
-        assert!(target.dataset_exists("zroot/keel/volumes/web-0-data").unwrap());
+        target
+            .receive_snapshot(
+                "zroot/keel/volumes/web-0-data",
+                &mut incremental_stream.as_slice(),
+            )
+            .unwrap();
+        assert!(target
+            .dataset_exists("zroot/keel/volumes/web-0-data")
+            .unwrap());
     }
 
     #[test]
     fn destroy_snapshot_removes_an_existing_snapshot() {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
-        zfs.destroy_snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
+        zfs.destroy_snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
 
         let mut out = Vec::new();
         assert!(matches!(
@@ -357,13 +462,21 @@ mod tests {
     fn destroy_snapshot_then_send_using_it_as_a_base_fails() {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
-        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-2").unwrap();
-        zfs.destroy_snapshot("zroot/keel/volumes/web-data", "keel-repl-1").unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "keel-repl-2")
+            .unwrap();
+        zfs.destroy_snapshot("zroot/keel/volumes/web-data", "keel-repl-1")
+            .unwrap();
 
         let mut out = Vec::new();
         assert!(matches!(
-            zfs.send_snapshot("zroot/keel/volumes/web-data", "keel-repl-2", Some("keel-repl-1"), &mut out),
+            zfs.send_snapshot(
+                "zroot/keel/volumes/web-data",
+                "keel-repl-2",
+                Some("keel-repl-1"),
+                &mut out
+            ),
             Err(ZfsError::NotFound(_))
         ));
     }
@@ -383,7 +496,10 @@ mod tests {
         let zfs = FakeZfsManager::new();
         let clone = zfs.clone();
         clone.seed_dataset("zroot/keel/volumes/shared");
-        assert!(zfs.dataset_exists("zroot/keel/volumes/shared").unwrap(), "expected a clone's mutation to be visible through the original handle");
+        assert!(
+            zfs.dataset_exists("zroot/keel/volumes/shared").unwrap(),
+            "expected a clone's mutation to be visible through the original handle"
+        );
     }
 
     #[test]
@@ -394,7 +510,10 @@ mod tests {
         zfs.seed_dataset("zroot/keel/jails/web-1");
         assert_eq!(
             zfs.list_child_datasets("zroot/keel/volumes").unwrap(),
-            vec!["zroot/keel/volumes/db-data".to_string(), "zroot/keel/volumes/web-data".to_string()]
+            vec![
+                "zroot/keel/volumes/db-data".to_string(),
+                "zroot/keel/volumes/web-data".to_string()
+            ]
         );
     }
 
@@ -403,12 +522,18 @@ mod tests {
         let zfs = FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/volumes/web-data");
         zfs.seed_dataset("zroot/keel/volumes/web-data/nested");
-        assert_eq!(zfs.list_child_datasets("zroot/keel/volumes").unwrap(), vec!["zroot/keel/volumes/web-data".to_string()]);
+        assert_eq!(
+            zfs.list_child_datasets("zroot/keel/volumes").unwrap(),
+            vec!["zroot/keel/volumes/web-data".to_string()]
+        );
     }
 
     #[test]
     fn list_child_datasets_on_an_unseeded_parent_is_empty() {
         let zfs = FakeZfsManager::new();
-        assert_eq!(zfs.list_child_datasets("zroot/keel/volumes").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            zfs.list_child_datasets("zroot/keel/volumes").unwrap(),
+            Vec::<String>::new()
+        );
     }
 }

@@ -15,7 +15,11 @@ pub struct BackoffState {
 
 impl Default for BackoffState {
     fn default() -> Self {
-        Self { current_delay: INITIAL_DELAY, next_retry_at: None, last_started_at: None }
+        Self {
+            current_delay: INITIAL_DELAY,
+            next_retry_at: None,
+            last_started_at: None,
+        }
     }
 }
 
@@ -198,6 +202,10 @@ mod tests {
         assert_eq!(status.current_delay_secs, Some(2));
 
         let later = state.status(t0 + Duration::from_millis(500));
-        assert_eq!(later.retry_in_secs, Some(0), "500ms remaining rounds down to 0 whole seconds");
+        assert_eq!(
+            later.retry_in_secs,
+            Some(0),
+            "500ms remaining rounds down to 0 whole seconds"
+        );
     }
 }

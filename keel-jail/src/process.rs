@@ -10,7 +10,9 @@ pub struct ProcessJailRuntime {
 
 impl ProcessJailRuntime {
     pub fn new() -> Self {
-        Self { children: Mutex::new(Vec::new()) }
+        Self {
+            children: Mutex::new(Vec::new()),
+        }
     }
 
     fn run(program: &str, args: &[&str]) -> Result<Output, JailError> {
@@ -70,7 +72,8 @@ impl JailRuntime for ProcessJailRuntime {
         // ZFS) already has one, but this makes `create` robust regardless
         // of what the rootfs happened to contain beforehand, rather than
         // relying on every caller to have created it.
-        std::fs::create_dir_all(rootfs.join("dev")).map_err(|e| JailError::Spawn("mkdir devfs mountpoint".to_string(), e))?;
+        std::fs::create_dir_all(rootfs.join("dev"))
+            .map_err(|e| JailError::Spawn("mkdir devfs mountpoint".to_string(), e))?;
 
         let path_arg = format!("path={}", rootfs.display());
         let name_arg = format!("name={name}");
@@ -161,7 +164,9 @@ impl JailRuntime for ProcessJailRuntime {
         let mine = {
             let mut children = self.children.lock().unwrap();
             let all = std::mem::take(&mut *children);
-            let (mine, others): (Vec<_>, Vec<_>) = all.into_iter().partition(|(child_name, _)| child_name == name);
+            let (mine, others): (Vec<_>, Vec<_>) = all
+                .into_iter()
+                .partition(|(child_name, _)| child_name == name);
             *children = others;
             mine
         };
@@ -181,12 +186,10 @@ impl JailRuntime for ProcessJailRuntime {
             None => return Ok(false),
         };
         let ps = Self::run("ps", &["-J", &jid, "-o", "state="])?;
-        let has_live_process = String::from_utf8_lossy(&ps.stdout)
-            .lines()
-            .any(|state| {
-                let state = state.trim();
-                !state.is_empty() && !state.starts_with('Z')
-            });
+        let has_live_process = String::from_utf8_lossy(&ps.stdout).lines().any(|state| {
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        });
         Ok(has_live_process)
     }
 
@@ -210,14 +213,30 @@ impl JailRuntime for ProcessJailRuntime {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
-        let child = cmd.spawn().map_err(|e| JailError::Spawn("jexec".to_string(), e))?;
-        self.children.lock().unwrap().push((name.to_string(), child));
+        let child = cmd
+            .spawn()
+            .map_err(|e| JailError::Spawn("jexec".to_string(), e))?;
+        self.children
+            .lock()
+            .unwrap()
+            .push((name.to_string(), child));
         Ok(())
     }
 
-    fn set_resource_limits(&self, name: &str, pcpu_percent: u32, memory_bytes: u64) -> Result<(), JailError> {
-        Self::run_checked("rctl", &["-a", &format!("jail:{name}:pcpu:deny={pcpu_percent}")])?;
-        Self::run_checked("rctl", &["-a", &format!("jail:{name}:vmemoryuse:deny={memory_bytes}")])
+    fn set_resource_limits(
+        &self,
+        name: &str,
+        pcpu_percent: u32,
+        memory_bytes: u64,
+    ) -> Result<(), JailError> {
+        Self::run_checked(
+            "rctl",
+            &["-a", &format!("jail:{name}:pcpu:deny={pcpu_percent}")],
+        )?;
+        Self::run_checked(
+            "rctl",
+            &["-a", &format!("jail:{name}:vmemoryuse:deny={memory_bytes}")],
+        )
     }
 
     fn remove_resource_limits(&self, name: &str) -> Result<(), JailError> {

@@ -1,7 +1,8 @@
 use crate::acme::{AcmeClient, AcmeError, Cert};
 use crate::dns::DnsProvider;
 use instant_acme::{
-    Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy,
+    Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
+    RetryPolicy,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -40,13 +41,23 @@ impl InstantAcmeClient {
             .enable_all()
             .build()
             .map_err(|e| AcmeError::Request(e.to_string()))?;
-        Ok(Self { directory_url, account_key_path, runtime })
+        Ok(Self {
+            directory_url,
+            account_key_path,
+            runtime,
+        })
     }
 }
 
 impl AcmeClient for InstantAcmeClient {
-    fn request_certificate(&self, domain: &str, contact_email: &str, dns: &dyn DnsProvider) -> Result<Cert, AcmeError> {
-        self.runtime.block_on(self.request_certificate_async(domain, contact_email, dns))
+    fn request_certificate(
+        &self,
+        domain: &str,
+        contact_email: &str,
+        dns: &dyn DnsProvider,
+    ) -> Result<Cert, AcmeError> {
+        self.runtime
+            .block_on(self.request_certificate_async(domain, contact_email, dns))
     }
 }
 
@@ -58,8 +69,8 @@ impl InstantAcmeClient {
     /// registering a fresh one with the ACME server on every run.
     async fn load_or_create_account(&self, contact_email: &str) -> Result<Account, AcmeError> {
         if let Ok(existing) = std::fs::read_to_string(&self.account_key_path) {
-            let credentials: AccountCredentials =
-                serde_json::from_str(&existing).map_err(|e| AcmeError::Request(format!("malformed account credentials: {e}")))?;
+            let credentials: AccountCredentials = serde_json::from_str(&existing)
+                .map_err(|e| AcmeError::Request(format!("malformed account credentials: {e}")))?;
             let account = Account::builder()
                 .map_err(convert_acme_error)?
                 .from_credentials(credentials)
@@ -69,25 +80,38 @@ impl InstantAcmeClient {
         }
 
         let contact = format!("mailto:{contact_email}");
-        let new_account = NewAccount { contact: &[&contact], terms_of_service_agreed: true, only_return_existing: false };
+        let new_account = NewAccount {
+            contact: &[&contact],
+            terms_of_service_agreed: true,
+            only_return_existing: false,
+        };
         let (account, credentials) = Account::builder()
             .map_err(convert_acme_error)?
             .create(&new_account, self.directory_url.clone(), None)
             .await
             .map_err(convert_acme_error)?;
 
-        let serialized =
-            serde_json::to_string(&credentials).map_err(|e| AcmeError::Request(format!("failed to serialize account credentials: {e}")))?;
+        let serialized = serde_json::to_string(&credentials).map_err(|e| {
+            AcmeError::Request(format!("failed to serialize account credentials: {e}"))
+        })?;
         persist_account_credentials(&self.account_key_path, &serialized)?;
 
         Ok(account)
     }
 
-    async fn request_certificate_async(&self, domain: &str, contact_email: &str, dns: &dyn DnsProvider) -> Result<Cert, AcmeError> {
+    async fn request_certificate_async(
+        &self,
+        domain: &str,
+        contact_email: &str,
+        dns: &dyn DnsProvider,
+    ) -> Result<Cert, AcmeError> {
         let account = self.load_or_create_account(contact_email).await?;
 
         let identifier = Identifier::Dns(domain.to_string());
-        let mut order = account.new_order(&NewOrder::new(&[identifier])).await.map_err(convert_acme_error)?;
+        let mut order = account
+            .new_order(&NewOrder::new(&[identifier]))
+            .await
+            .map_err(convert_acme_error)?;
 
         let challenge_name = format!("_acme-challenge.{domain}");
         let mut dns_values = Vec::new();
@@ -105,9 +129,14 @@ impl InstantAcmeClient {
             let mut authorizations = order.authorizations();
             while let Some(result) = authorizations.next().await {
                 let mut authorization = result.map_err(convert_acme_error)?;
-                let mut challenge = authorization
-                    .challenge(ChallengeType::Dns01)
-                    .ok_or_else(|| AcmeError::Request(format!("no DNS-01 challenge offered for '{domain}'")))?;
+                let mut challenge =
+                    authorization
+                        .challenge(ChallengeType::Dns01)
+                        .ok_or_else(|| {
+                            AcmeError::Request(format!(
+                                "no DNS-01 challenge offered for '{domain}'"
+                            ))
+                        })?;
                 let dns_value = challenge.key_authorization().dns_value();
                 dns.create_txt_record(&challenge_name, &dns_value)?;
                 dns_values.push(dns_value.clone());
@@ -133,15 +162,26 @@ impl InstantAcmeClient {
         issuance_result
     }
 
-    async fn finalize_and_download(&self, order: &mut instant_acme::Order) -> Result<Cert, AcmeError> {
+    async fn finalize_and_download(
+        &self,
+        order: &mut instant_acme::Order,
+    ) -> Result<Cert, AcmeError> {
         let retry_policy = RetryPolicy::new().timeout(POLL_TIMEOUT);
-        let status = order.poll_ready(&retry_policy).await.map_err(convert_acme_error)?;
+        let status = order
+            .poll_ready(&retry_policy)
+            .await
+            .map_err(convert_acme_error)?;
         if status != OrderStatus::Ready {
-            return Err(AcmeError::Request(format!("order did not become ready, status: {status:?}")));
+            return Err(AcmeError::Request(format!(
+                "order did not become ready, status: {status:?}"
+            )));
         }
 
         let key_pem = order.finalize().await.map_err(convert_acme_error)?;
-        let cert_pem = order.poll_certificate(&retry_policy).await.map_err(convert_acme_error)?;
+        let cert_pem = order
+            .poll_certificate(&retry_policy)
+            .await
+            .map_err(convert_acme_error)?;
 
         Ok(Cert { cert_pem, key_pem })
     }
@@ -151,7 +191,10 @@ impl InstantAcmeClient {
 /// server-issued `kid`) to `account_key_path` via temp-file-then-rename,
 /// owner-only permissions applied before the rename so the credentials are
 /// never briefly world-readable under their final name.
-fn persist_account_credentials(account_key_path: &std::path::Path, serialized: &str) -> Result<(), AcmeError> {
+fn persist_account_credentials(
+    account_key_path: &std::path::Path,
+    serialized: &str,
+) -> Result<(), AcmeError> {
     use std::os::unix::fs::PermissionsExt;
 
     if let Some(parent) = account_key_path.parent() {
@@ -159,7 +202,8 @@ fn persist_account_credentials(account_key_path: &std::path::Path, serialized: &
     }
     let tmp_path = account_key_path.with_extension("tmp");
     std::fs::write(&tmp_path, serialized).map_err(|e| AcmeError::Request(e.to_string()))?;
-    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| AcmeError::Request(e.to_string()))?;
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| AcmeError::Request(e.to_string()))?;
     std::fs::rename(&tmp_path, account_key_path).map_err(|e| AcmeError::Request(e.to_string()))?;
     Ok(())
 }
@@ -170,7 +214,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn test_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("keel-ingress-acme-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-ingress-acme-test-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("acme-account.json")
     }
@@ -182,13 +229,23 @@ mod tests {
         persist_account_credentials(&path, r#"{"kid":"https://example.com/acct/1"}"#).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "persisted ACME account credentials must not be readable by group/other");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"kid":"https://example.com/acct/1"}"#);
+        assert_eq!(
+            mode, 0o600,
+            "persisted ACME account credentials must not be readable by group/other"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"kid":"https://example.com/acct/1"}"#
+        );
     }
 
     #[test]
     fn persist_account_credentials_creates_missing_parent_directories() {
-        let path = test_path("missing-parent").parent().unwrap().join("nested").join("acme-account.json");
+        let path = test_path("missing-parent")
+            .parent()
+            .unwrap()
+            .join("nested")
+            .join("acme-account.json");
 
         persist_account_credentials(&path, "{}").unwrap();
 
@@ -203,7 +260,10 @@ mod tests {
             status: Some(429),
             subproblems: vec![],
         };
-        assert!(matches!(convert_acme_error(problem.into()), AcmeError::RateLimited(_)));
+        assert!(matches!(
+            convert_acme_error(problem.into()),
+            AcmeError::RateLimited(_)
+        ));
     }
 
     #[test]
@@ -214,6 +274,9 @@ mod tests {
             status: Some(400),
             subproblems: vec![],
         };
-        assert!(matches!(convert_acme_error(problem.into()), AcmeError::Request(_)));
+        assert!(matches!(
+            convert_acme_error(problem.into()),
+            AcmeError::Request(_)
+        ));
     }
 }

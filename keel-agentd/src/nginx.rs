@@ -50,25 +50,40 @@ impl FakeNginxController {
     }
 
     pub fn reload_count(&self, jail_name: &str) -> u32 {
-        *self.reload_count.lock().unwrap().get(jail_name).unwrap_or(&0)
+        *self
+            .reload_count
+            .lock()
+            .unwrap()
+            .get(jail_name)
+            .unwrap_or(&0)
     }
 }
 
 impl NginxController for FakeNginxController {
     fn write_config(&self, jail_name: &str, config: &str) -> Result<(), NginxError> {
-        self.written.lock().unwrap().insert(jail_name.to_string(), config.to_string());
+        self.written
+            .lock()
+            .unwrap()
+            .insert(jail_name.to_string(), config.to_string());
         Ok(())
     }
 
     fn test_config(&self, _jail_name: &str) -> Result<(), NginxError> {
         if *self.fail_test.lock().unwrap() {
-            return Err(NginxError::ValidationFailed("simulated nginx -t failure".to_string()));
+            return Err(NginxError::ValidationFailed(
+                "simulated nginx -t failure".to_string(),
+            ));
         }
         Ok(())
     }
 
     fn reload(&self, jail_name: &str) -> Result<(), NginxError> {
-        *self.reload_count.lock().unwrap().entry(jail_name.to_string()).or_insert(0) += 1;
+        *self
+            .reload_count
+            .lock()
+            .unwrap()
+            .entry(jail_name.to_string())
+            .or_insert(0) += 1;
         Ok(())
     }
 }
@@ -94,8 +109,15 @@ impl JexecNginxController {
         Self { pool }
     }
 
-    fn run_jexec(&self, jail_name: &str, args: &[&str]) -> Result<std::process::Output, std::io::Error> {
-        std::process::Command::new("jexec").arg(jail_name).args(args).output()
+    fn run_jexec(
+        &self,
+        jail_name: &str,
+        args: &[&str],
+    ) -> Result<std::process::Output, std::io::Error> {
+        std::process::Command::new("jexec")
+            .arg(jail_name)
+            .args(args)
+            .output()
     }
 }
 
@@ -114,23 +136,39 @@ impl NginxController for JexecNginxController {
 
     fn test_config(&self, jail_name: &str) -> Result<(), NginxError> {
         let output = self
-            .run_jexec(jail_name, &["/usr/local/sbin/nginx", "-c", NGINX_CONF_PATH, "-t"])
+            .run_jexec(
+                jail_name,
+                &["/usr/local/sbin/nginx", "-c", NGINX_CONF_PATH, "-t"],
+            )
             .map_err(|e| NginxError::ValidationFailed(e.to_string()))?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(NginxError::ValidationFailed(String::from_utf8_lossy(&output.stderr).to_string()))
+            Err(NginxError::ValidationFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
         }
     }
 
     fn reload(&self, jail_name: &str) -> Result<(), NginxError> {
         let output = self
-            .run_jexec(jail_name, &["/usr/local/sbin/nginx", "-c", NGINX_CONF_PATH, "-s", "reload"])
+            .run_jexec(
+                jail_name,
+                &[
+                    "/usr/local/sbin/nginx",
+                    "-c",
+                    NGINX_CONF_PATH,
+                    "-s",
+                    "reload",
+                ],
+            )
             .map_err(|e| NginxError::ReloadFailed(e.to_string()))?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(NginxError::ReloadFailed(String::from_utf8_lossy(&output.stderr).to_string()))
+            Err(NginxError::ReloadFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
         }
     }
 }
@@ -143,7 +181,10 @@ mod tests {
     fn write_config_then_last_written_config_returns_it() {
         let nginx = FakeNginxController::new();
         nginx.write_config("keel-ingress", "config-v1").unwrap();
-        assert_eq!(nginx.last_written_config("keel-ingress"), Some("config-v1".to_string()));
+        assert_eq!(
+            nginx.last_written_config("keel-ingress"),
+            Some("config-v1".to_string())
+        );
     }
 
     #[test]

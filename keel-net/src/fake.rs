@@ -8,6 +8,8 @@ use std::sync::Mutex;
 pub struct FakeNetManager {
     bridges: Arc<Mutex<HashSet<String>>>,
     bridge_addresses: Arc<Mutex<HashMap<String, String>>>,
+    // (bridge, address, prefix_len) tuple mirrors the FakeNetManager call sites; a named type isn't worth it for this test double
+    #[allow(clippy::type_complexity)]
     attachments: Arc<Mutex<HashMap<String, (String, String, String)>>>,
     routes: Arc<Mutex<HashMap<String, String>>>,
     aliases: Arc<Mutex<HashMap<String, HashSet<String>>>>,
@@ -27,7 +29,11 @@ impl FakeNetManager {
     }
 
     pub fn has_alias(&self, bridge: &str, address: &str) -> bool {
-        self.aliases.lock().unwrap().get(bridge).is_some_and(|set| set.contains(address))
+        self.aliases
+            .lock()
+            .unwrap()
+            .get(bridge)
+            .is_some_and(|set| set.contains(address))
     }
 }
 
@@ -37,15 +43,28 @@ impl NetManager for FakeNetManager {
         Ok(())
     }
 
-    fn attach_jail(&self, jail_name: &str, bridge: &str, epair_base: &str, address: &str) -> Result<(), NetError> {
+    fn attach_jail(
+        &self,
+        jail_name: &str,
+        bridge: &str,
+        epair_base: &str,
+        address: &str,
+    ) -> Result<(), NetError> {
         if !self.bridges.lock().unwrap().contains(bridge) {
             return Err(NetError::NotFound(bridge.to_string()));
         }
         let gateway = crate::bridge_gateway(address)?;
-        self.bridge_addresses.lock().unwrap().insert(bridge.to_string(), gateway);
+        self.bridge_addresses
+            .lock()
+            .unwrap()
+            .insert(bridge.to_string(), gateway);
         self.attachments.lock().unwrap().insert(
             epair_base.to_string(),
-            (jail_name.to_string(), bridge.to_string(), address.to_string()),
+            (
+                jail_name.to_string(),
+                bridge.to_string(),
+                address.to_string(),
+            ),
         );
         Ok(())
     }
@@ -56,7 +75,10 @@ impl NetManager for FakeNetManager {
     }
 
     fn add_route(&self, subnet: &str, gateway_addr: &str) -> Result<(), NetError> {
-        self.routes.lock().unwrap().insert(subnet.to_string(), gateway_addr.to_string());
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(subnet.to_string(), gateway_addr.to_string());
         Ok(())
     }
 
@@ -66,7 +88,12 @@ impl NetManager for FakeNetManager {
     }
 
     fn add_alias(&self, bridge: &str, address: &str) -> Result<(), NetError> {
-        self.aliases.lock().unwrap().entry(bridge.to_string()).or_default().insert(address.to_string());
+        self.aliases
+            .lock()
+            .unwrap()
+            .entry(bridge.to_string())
+            .or_default()
+            .insert(address.to_string());
         Ok(())
     }
 
@@ -102,7 +129,8 @@ mod tests {
     fn attach_jail_succeeds_after_ensure_bridge_exists() {
         let net = FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24").unwrap();
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24")
+            .unwrap();
     }
 
     #[test]
@@ -115,17 +143,21 @@ mod tests {
     fn detach_then_reattach_works() {
         let net = FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24").unwrap();
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24")
+            .unwrap();
         net.detach_jail("epair7").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24").unwrap();
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24")
+            .unwrap();
     }
 
     #[test]
     fn attach_jail_is_idempotent_when_called_twice_without_detaching() {
         let net = FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24").unwrap();
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24")
+            .unwrap();
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.0.5/24")
+            .unwrap();
     }
 
     #[test]
@@ -133,7 +165,10 @@ mod tests {
         let net = FakeNetManager::new();
         assert_eq!(net.has_route("10.0.4.0/24"), None);
         net.add_route("10.0.4.0/24", "192.168.64.5").unwrap();
-        assert_eq!(net.has_route("10.0.4.0/24"), Some("192.168.64.5".to_string()));
+        assert_eq!(
+            net.has_route("10.0.4.0/24"),
+            Some("192.168.64.5".to_string())
+        );
     }
 
     #[test]
@@ -141,7 +176,10 @@ mod tests {
         let net = FakeNetManager::new();
         net.add_route("10.0.4.0/24", "192.168.64.5").unwrap();
         net.add_route("10.0.4.0/24", "192.168.64.5").unwrap();
-        assert_eq!(net.has_route("10.0.4.0/24"), Some("192.168.64.5".to_string()));
+        assert_eq!(
+            net.has_route("10.0.4.0/24"),
+            Some("192.168.64.5".to_string())
+        );
     }
 
     #[test]
@@ -162,17 +200,26 @@ mod tests {
     fn attach_jail_assigns_the_bridges_gateway_address() {
         let net = FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.60.5/24").unwrap();
-        assert_eq!(net.bridge_address("keel0"), Some("10.0.60.1/24".to_string()));
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.60.5/24")
+            .unwrap();
+        assert_eq!(
+            net.bridge_address("keel0"),
+            Some("10.0.60.1/24".to_string())
+        );
     }
 
     #[test]
     fn two_jails_in_the_same_subnet_compute_the_same_bridge_gateway() {
         let net = FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.60.5/24").unwrap();
-        net.attach_jail("web-2", "keel0", "epair8", "10.0.60.6/24").unwrap();
-        assert_eq!(net.bridge_address("keel0"), Some("10.0.60.1/24".to_string()));
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.60.5/24")
+            .unwrap();
+        net.attach_jail("web-2", "keel0", "epair8", "10.0.60.6/24")
+            .unwrap();
+        assert_eq!(
+            net.bridge_address("keel0"),
+            Some("10.0.60.1/24".to_string())
+        );
     }
 
     #[test]
@@ -213,9 +260,13 @@ mod tests {
     fn a_bridges_gateway_and_its_service_alias_coexist_independently() {
         let net = FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
-        net.attach_jail("web-1", "keel0", "epair7", "10.0.60.5/24").unwrap();
+        net.attach_jail("web-1", "keel0", "epair7", "10.0.60.5/24")
+            .unwrap();
         net.add_alias("keel0", "10.0.250.7").unwrap();
-        assert_eq!(net.bridge_address("keel0"), Some("10.0.60.1/24".to_string()));
+        assert_eq!(
+            net.bridge_address("keel0"),
+            Some("10.0.60.1/24".to_string())
+        );
         assert!(net.has_alias("keel0", "10.0.250.7"));
     }
 }

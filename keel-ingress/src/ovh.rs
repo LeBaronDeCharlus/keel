@@ -11,11 +11,20 @@ pub struct OvhDnsProvider {
 
 impl OvhDnsProvider {
     pub fn new(app_key: String, app_secret: String, consumer_key: String, zone: String) -> Self {
-        Self { app_key, app_secret, consumer_key, zone, endpoint: "https://eu.api.ovh.com/1.0".to_string() }
+        Self {
+            app_key,
+            app_secret,
+            consumer_key,
+            zone,
+            endpoint: "https://eu.api.ovh.com/1.0".to_string(),
+        }
     }
 
     fn sign(&self, method: &str, url: &str, body: &str, timestamp: u64) -> String {
-        let to_hash = format!("{}+{}+{}+{}+{}+{}", self.app_secret, self.consumer_key, method, url, body, timestamp);
+        let to_hash = format!(
+            "{}+{}+{}+{}+{}+{}",
+            self.app_secret, self.consumer_key, method, url, body, timestamp
+        );
         let mut hasher = Sha1::new();
         hasher.update(to_hash.as_bytes());
         format!("$1${:x}", hasher.finalize())
@@ -38,7 +47,8 @@ impl OvhDnsProvider {
             .map_err(|e| DnsError::Request(e.to_string()))?
             .as_secs();
         let signature = self.sign(method, &url, body, timestamp);
-        let method = ureq::http::Method::from_bytes(method.as_bytes()).map_err(|e| DnsError::Request(e.to_string()))?;
+        let method = ureq::http::Method::from_bytes(method.as_bytes())
+            .map_err(|e| DnsError::Request(e.to_string()))?;
         let request = ureq::http::Request::builder()
             .method(method)
             .uri(&url)
@@ -54,14 +64,21 @@ impl OvhDnsProvider {
             .body(body.to_string())
             .map_err(|e| DnsError::Request(e.to_string()))?;
         let agent = ureq::Agent::new_with_defaults();
-        let mut response = agent.run(request).map_err(|e| DnsError::Request(e.to_string()))?;
-        response.body_mut().read_to_string().map_err(|e| DnsError::Request(e.to_string()))
+        let mut response = agent
+            .run(request)
+            .map_err(|e| DnsError::Request(e.to_string()))?;
+        response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| DnsError::Request(e.to_string()))
     }
 }
 
 impl DnsProvider for OvhDnsProvider {
     fn create_txt_record(&self, name: &str, value: &str) -> Result<(), DnsError> {
-        let sub_domain = name.trim_end_matches(&format!(".{}", self.zone)).trim_end_matches(&self.zone);
+        let sub_domain = name
+            .trim_end_matches(&format!(".{}", self.zone))
+            .trim_end_matches(&self.zone);
         let body = serde_json::json!({ "fieldType": "TXT", "subDomain": sub_domain, "target": value, "ttl": 60 }).to_string();
         self.request("POST", &format!("/domain/zone/{}/record", self.zone), &body)?;
         self.request("POST", &format!("/domain/zone/{}/refresh", self.zone), "")?;
@@ -69,11 +86,25 @@ impl DnsProvider for OvhDnsProvider {
     }
 
     fn delete_txt_record(&self, name: &str) -> Result<(), DnsError> {
-        let sub_domain = name.trim_end_matches(&format!(".{}", self.zone)).trim_end_matches(&self.zone);
-        let list_body = self.request("GET", &format!("/domain/zone/{}/record?fieldType=TXT&subDomain={sub_domain}", self.zone), "")?;
-        let ids: Vec<u64> = serde_json::from_str(&list_body).map_err(|e| DnsError::Request(e.to_string()))?;
+        let sub_domain = name
+            .trim_end_matches(&format!(".{}", self.zone))
+            .trim_end_matches(&self.zone);
+        let list_body = self.request(
+            "GET",
+            &format!(
+                "/domain/zone/{}/record?fieldType=TXT&subDomain={sub_domain}",
+                self.zone
+            ),
+            "",
+        )?;
+        let ids: Vec<u64> =
+            serde_json::from_str(&list_body).map_err(|e| DnsError::Request(e.to_string()))?;
         for id in ids {
-            self.request("DELETE", &format!("/domain/zone/{}/record/{id}", self.zone), "")?;
+            self.request(
+                "DELETE",
+                &format!("/domain/zone/{}/record/{id}", self.zone),
+                "",
+            )?;
         }
         self.request("POST", &format!("/domain/zone/{}/refresh", self.zone), "")?;
         Ok(())
@@ -120,7 +151,10 @@ impl OvhDnsProvider {
             .map_err(|e| DnsError::Request(e.to_string()))?;
         let nameservers = parse_ns_records(&String::from_utf8_lossy(&output.stdout));
         if nameservers.is_empty() {
-            return Err(DnsError::Request(format!("could not resolve any authoritative nameserver for zone '{}'", self.zone)));
+            return Err(DnsError::Request(format!(
+                "could not resolve any authoritative nameserver for zone '{}'",
+                self.zone
+            )));
         }
         Ok(nameservers)
     }
@@ -145,32 +179,75 @@ mod tests {
 
     #[test]
     fn sign_produces_the_dollar_one_dollar_prefixed_sha1_hex_digest() {
-        let provider = OvhDnsProvider::new("app-key".to_string(), "app-secret".to_string(), "consumer-key".to_string(), "example.com".to_string());
-        let signature = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_000);
+        let provider = OvhDnsProvider::new(
+            "app-key".to_string(),
+            "app-secret".to_string(),
+            "consumer-key".to_string(),
+            "example.com".to_string(),
+        );
+        let signature = provider.sign(
+            "POST",
+            "https://eu.api.ovh.com/1.0/domain/zone/example.com/record",
+            "{}",
+            1_800_000_000,
+        );
         assert!(signature.starts_with("$1$"));
         assert_eq!(signature.len(), 3 + 40); // "$1$" + 40 hex chars of a SHA1 digest
     }
 
     #[test]
     fn sign_is_deterministic_for_the_same_inputs() {
-        let provider = OvhDnsProvider::new("app-key".to_string(), "app-secret".to_string(), "consumer-key".to_string(), "example.com".to_string());
-        let a = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_000);
-        let b = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_000);
+        let provider = OvhDnsProvider::new(
+            "app-key".to_string(),
+            "app-secret".to_string(),
+            "consumer-key".to_string(),
+            "example.com".to_string(),
+        );
+        let a = provider.sign(
+            "POST",
+            "https://eu.api.ovh.com/1.0/domain/zone/example.com/record",
+            "{}",
+            1_800_000_000,
+        );
+        let b = provider.sign(
+            "POST",
+            "https://eu.api.ovh.com/1.0/domain/zone/example.com/record",
+            "{}",
+            1_800_000_000,
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn sign_changes_when_the_timestamp_changes() {
-        let provider = OvhDnsProvider::new("app-key".to_string(), "app-secret".to_string(), "consumer-key".to_string(), "example.com".to_string());
-        let a = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_000);
-        let b = provider.sign("POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record", "{}", 1_800_000_001);
+        let provider = OvhDnsProvider::new(
+            "app-key".to_string(),
+            "app-secret".to_string(),
+            "consumer-key".to_string(),
+            "example.com".to_string(),
+        );
+        let a = provider.sign(
+            "POST",
+            "https://eu.api.ovh.com/1.0/domain/zone/example.com/record",
+            "{}",
+            1_800_000_000,
+        );
+        let b = provider.sign(
+            "POST",
+            "https://eu.api.ovh.com/1.0/domain/zone/example.com/record",
+            "{}",
+            1_800_000_001,
+        );
         assert_ne!(a, b);
     }
 
     #[test]
     fn parse_ns_records_extracts_hostnames_and_strips_the_trailing_root_dot() {
         let output = "example.com name server has NS record ns13.ovh.net.\nexample.com name server has NS record dns13.ovh.net.\n";
-        assert_eq!(parse_ns_records(output), vec!["ns13.ovh.net".to_string(), "dns13.ovh.net".to_string()]);
+        assert_eq!(
+            parse_ns_records(output),
+            vec!["ns13.ovh.net".to_string(), "dns13.ovh.net".to_string()]
+        );
     }
 
     #[test]

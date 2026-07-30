@@ -2,9 +2,9 @@ use crate::placements::Placements;
 use crate::scheduler::{self, NodeResources};
 use ipnet::Ipv4Net;
 use keel_spec::JailTemplate;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::Ipv4Addr;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceRecord {
@@ -63,18 +63,26 @@ impl Services {
     /// never be silently overridden by stale persisted data.
     pub fn load(state_dir: &std::path::Path, service_cidr: Ipv4Net) -> Self {
         let state: ServicesState = crate::store::load_or_default(&state_dir.join("services.yaml"));
-        Self { service_cidr, by_name: state.by_name }
+        Self {
+            service_cidr,
+            by_name: state.by_name,
+        }
     }
 
     pub fn persist(&self, state_dir: &std::path::Path) {
-        let state = ServicesState { by_name: self.by_name.clone() };
+        let state = ServicesState {
+            by_name: self.by_name.clone(),
+        };
         if let Err(e) = crate::store::save(&state_dir.join("services.yaml"), &state) {
             eprintln!("keel-controlplane: failed to persist services.yaml: {e}");
         }
     }
 
     pub fn new(service_cidr: Ipv4Net) -> Self {
-        Self { service_cidr, by_name: HashMap::new() }
+        Self {
+            service_cidr,
+            by_name: HashMap::new(),
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&ServiceRecord> {
@@ -113,7 +121,15 @@ impl Services {
                 return Err(ApplyServiceError::PortChanged(name));
             }
             let vip = existing.vip;
-            self.by_name.insert(name, ServiceRecord { desired_replicas, template, vip, port });
+            self.by_name.insert(
+                name,
+                ServiceRecord {
+                    desired_replicas,
+                    template,
+                    vip,
+                    port,
+                },
+            );
             return Ok(());
         }
 
@@ -124,7 +140,15 @@ impl Services {
             .find(|addr| !taken.contains(addr))
             .ok_or_else(|| ApplyServiceError::VipPoolExhausted(name.clone()))?;
 
-        self.by_name.insert(name, ServiceRecord { desired_replicas, template, vip, port });
+        self.by_name.insert(
+            name,
+            ServiceRecord {
+                desired_replicas,
+                template,
+                vip,
+                port,
+            },
+        );
         Ok(())
     }
 
@@ -144,7 +168,11 @@ pub fn replica_name(service_name: &str, index: u32) -> String {
 pub fn replica_index(service_name: &str, jail_name: &str) -> Option<u32> {
     let suffix = jail_name.strip_prefix(service_name)?.strip_prefix('-')?;
     let index: u32 = suffix.parse().ok()?;
-    if index.to_string() == suffix { Some(index) } else { None }
+    if index.to_string() == suffix {
+        Some(index)
+    } else {
+        None
+    }
 }
 
 /// Returns the current owner of a name already present in `placements`, or
@@ -170,11 +198,19 @@ pub fn diff_replicas(desired: u32, healthy_indices: &BTreeSet<u32>) -> (Vec<u32>
     let healthy_count = healthy_indices.len() as u32;
     if healthy_count < desired {
         let missing = desired - healthy_count;
-        let to_add = (0u32..).filter(|i| !healthy_indices.contains(i)).take(missing as usize).collect();
+        let to_add = (0u32..)
+            .filter(|i| !healthy_indices.contains(i))
+            .take(missing as usize)
+            .collect();
         (to_add, Vec::new())
     } else if healthy_count > desired {
         let excess = healthy_count - desired;
-        let to_remove = healthy_indices.iter().rev().take(excess as usize).copied().collect();
+        let to_remove = healthy_indices
+            .iter()
+            .rev()
+            .take(excess as usize)
+            .copied()
+            .collect();
         (Vec::new(), to_remove)
     } else {
         (Vec::new(), Vec::new())
@@ -200,7 +236,11 @@ pub fn pick_node_for_service(
     candidates: Vec<NodeResources>,
     busy_nodes: &HashSet<String>,
 ) -> Result<String, scheduler::ScheduleError> {
-    let filtered: Vec<NodeResources> = candidates.iter().filter(|n| !busy_nodes.contains(&n.id)).cloned().collect();
+    let filtered: Vec<NodeResources> = candidates
+        .iter()
+        .filter(|n| !busy_nodes.contains(&n.id))
+        .cloned()
+        .collect();
     if !filtered.is_empty() {
         scheduler::pick_node(&filtered)
     } else {
@@ -221,8 +261,14 @@ mod tests {
         JailTemplate {
             image: "base/14.2-web".to_string(),
             command: vec!["/usr/local/bin/myapp".to_string()],
-            network: TemplateNetworkSpec { vnet: true, bridge: "keel0".to_string() },
-            resources: ResourcesSpec { cpu: "1".to_string(), memory: "256M".to_string() },
+            network: TemplateNetworkSpec {
+                vnet: true,
+                bridge: "keel0".to_string(),
+            },
+            resources: ResourcesSpec {
+                cpu: "1".to_string(),
+                memory: "256M".to_string(),
+            },
             restart_policy: RestartPolicy::Always,
             volumes: vec![],
         }
@@ -231,7 +277,9 @@ mod tests {
     #[test]
     fn apply_creates_a_new_service() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 3, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 3, template(), 8080)
+            .unwrap();
         assert_eq!(services.get("web").unwrap().desired_replicas, 3);
         assert_eq!(services.get("web").unwrap().port, 8080);
     }
@@ -239,17 +287,25 @@ mod tests {
     #[test]
     fn apply_again_with_the_same_template_and_port_scales_up_or_down() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 3, template(), 8080).unwrap();
-        services.apply("web".to_string(), 5, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 3, template(), 8080)
+            .unwrap();
+        services
+            .apply("web".to_string(), 5, template(), 8080)
+            .unwrap();
         assert_eq!(services.get("web").unwrap().desired_replicas, 5);
-        services.apply("web".to_string(), 0, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 0, template(), 8080)
+            .unwrap();
         assert_eq!(services.get("web").unwrap().desired_replicas, 0);
     }
 
     #[test]
     fn apply_with_a_changed_template_is_rejected() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 3, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 3, template(), 8080)
+            .unwrap();
         let mut changed = template();
         changed.image = "base/different-image".to_string();
         assert_eq!(
@@ -261,7 +317,9 @@ mod tests {
     #[test]
     fn apply_with_a_changed_port_is_rejected() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 3, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 3, template(), 8080)
+            .unwrap();
         assert_eq!(
             services.apply("web".to_string(), 3, template(), 9090),
             Err(ApplyServiceError::PortChanged("web".to_string()))
@@ -271,18 +329,29 @@ mod tests {
     #[test]
     fn apply_preserves_the_same_vip_across_a_scale_only_reapply() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 1, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 1, template(), 8080)
+            .unwrap();
         let first_vip = services.get("web").unwrap().vip;
-        services.apply("web".to_string(), 5, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 5, template(), 8080)
+            .unwrap();
         assert_eq!(services.get("web").unwrap().vip, first_vip);
     }
 
     #[test]
     fn apply_gives_two_different_services_two_different_vips() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 1, template(), 8080).unwrap();
-        services.apply("api".to_string(), 1, template(), 8080).unwrap();
-        assert_ne!(services.get("web").unwrap().vip, services.get("api").unwrap().vip);
+        services
+            .apply("web".to_string(), 1, template(), 8080)
+            .unwrap();
+        services
+            .apply("api".to_string(), 1, template(), 8080)
+            .unwrap();
+        assert_ne!(
+            services.get("web").unwrap().vip,
+            services.get("api").unwrap().vip
+        );
     }
 
     #[test]
@@ -291,18 +360,24 @@ mod tests {
         // must exhaust the pool.
         let mut services = Services::new("10.0.250.0/30".parse().unwrap());
         for i in 0..4 {
-            services.apply(format!("svc-{i}"), 1, template(), 8080).unwrap();
+            services
+                .apply(format!("svc-{i}"), 1, template(), 8080)
+                .unwrap();
         }
         assert_eq!(
             services.apply("one-too-many".to_string(), 1, template(), 8080),
-            Err(ApplyServiceError::VipPoolExhausted("one-too-many".to_string()))
+            Err(ApplyServiceError::VipPoolExhausted(
+                "one-too-many".to_string()
+            ))
         );
     }
 
     #[test]
     fn remove_deletes_the_service() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 3, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 3, template(), 8080)
+            .unwrap();
         assert!(services.remove("web").is_some());
         assert!(services.get("web").is_none());
     }
@@ -310,8 +385,12 @@ mod tests {
     #[test]
     fn list_is_sorted_by_name() {
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 1, template(), 8080).unwrap();
-        services.apply("api".to_string(), 1, template(), 8080).unwrap();
+        services
+            .apply("web".to_string(), 1, template(), 8080)
+            .unwrap();
+        services
+            .apply("api".to_string(), 1, template(), 8080)
+            .unwrap();
         let names: Vec<&str> = services.list().iter().map(|(n, _)| *n).collect();
         assert_eq!(names, vec!["api", "web"]);
     }
@@ -346,8 +425,13 @@ mod tests {
         let mut placements = Placements::new();
         placements.set("web-0".to_string(), "node-1".to_string());
         let mut services = Services::new(test_service_cidr());
-        services.apply("web".to_string(), 1, template(), 8080).unwrap();
-        assert_eq!(owner_of("web-0", &placements, &services), Some(Owner::Service("web".to_string())));
+        services
+            .apply("web".to_string(), 1, template(), 8080)
+            .unwrap();
+        assert_eq!(
+            owner_of("web-0", &placements, &services),
+            Some(Owner::Service("web".to_string()))
+        );
     }
 
     #[test]
@@ -355,7 +439,10 @@ mod tests {
         let mut placements = Placements::new();
         placements.set("web-1".to_string(), "node-1".to_string());
         let services = Services::new(test_service_cidr());
-        assert_eq!(owner_of("web-1", &placements, &services), Some(Owner::Unmanaged));
+        assert_eq!(
+            owner_of("web-1", &placements, &services),
+            Some(Owner::Unmanaged)
+        );
     }
 
     #[test]
@@ -394,7 +481,13 @@ mod tests {
     }
 
     fn node(id: &str, capacity_cpu: f64, capacity_memory: u64) -> NodeResources {
-        NodeResources { id: id.to_string(), capacity_cpu, capacity_memory, committed_cpu: 0.0, committed_memory: 0 }
+        NodeResources {
+            id: id.to_string(),
+            capacity_cpu,
+            capacity_memory,
+            committed_cpu: 0.0,
+            committed_memory: 0,
+        }
     }
 
     #[test]
@@ -404,14 +497,20 @@ mod tests {
         placements.set("web-1".to_string(), "node-2".to_string());
         placements.set("other-jail".to_string(), "node-3".to_string());
         let busy = nodes_hosting_service("web", &placements);
-        assert_eq!(busy, HashSet::from(["node-1".to_string(), "node-2".to_string()]));
+        assert_eq!(
+            busy,
+            HashSet::from(["node-1".to_string(), "node-2".to_string()])
+        );
     }
 
     #[test]
     fn pick_node_for_service_avoids_a_busy_node_when_an_alternative_exists() {
         let candidates = vec![node("node-1", 4.0, 100), node("node-2", 4.0, 100)];
         let busy = HashSet::from(["node-1".to_string()]);
-        assert_eq!(pick_node_for_service(candidates, &busy), Ok("node-2".to_string()));
+        assert_eq!(
+            pick_node_for_service(candidates, &busy),
+            Ok("node-2".to_string())
+        );
     }
 
     #[test]
@@ -420,33 +519,50 @@ mod tests {
         let busy = HashSet::from(["node-1".to_string(), "node-2".to_string()]);
         // Both busy: falls back to the unfiltered candidate list, which
         // `pick_node`'s own tie-break (ascending id) picks node-1.
-        assert_eq!(pick_node_for_service(candidates, &busy), Ok("node-1".to_string()));
+        assert_eq!(
+            pick_node_for_service(candidates, &busy),
+            Ok("node-1".to_string())
+        );
     }
 
     #[test]
     fn pick_node_for_service_with_no_candidates_at_all_is_no_available_nodes() {
-        assert_eq!(pick_node_for_service(vec![], &HashSet::new()), Err(scheduler::ScheduleError::NoAvailableNodes));
+        assert_eq!(
+            pick_node_for_service(vec![], &HashSet::new()),
+            Err(scheduler::ScheduleError::NoAvailableNodes)
+        );
     }
 
     #[test]
     fn load_uses_the_passed_in_service_cidr_not_whatever_was_persisted_last() {
-        let dir = std::env::temp_dir().join(format!("keel-controlplane-services-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-services-test-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut original = Services::new("10.0.250.0/24".parse().unwrap());
-        original.apply("web".to_string(), 1, template(), 8080).unwrap();
+        original
+            .apply("web".to_string(), 1, template(), 8080)
+            .unwrap();
         original.persist(&dir);
 
         // A restart with a *different* --service-cidr flag: the loaded
         // Services must use the new cidr, not silently keep serving the old
         // one from disk.
         let reloaded = Services::load(&dir, "10.0.251.0/24".parse().unwrap());
-        assert_eq!(reloaded.get("web").unwrap().desired_replicas, 1, "the persisted service itself must still be there");
+        assert_eq!(
+            reloaded.get("web").unwrap().desired_replicas,
+            1,
+            "the persisted service itself must still be there"
+        );
 
         let mut fresh_apply = reloaded;
         // A fresh, never-before-seen service name must get a VIP inside the
         // *new* cidr, proving service_cidr truly came from the argument.
-        fresh_apply.apply("api".to_string(), 1, template(), 8080).unwrap();
+        fresh_apply
+            .apply("api".to_string(), 1, template(), 8080)
+            .unwrap();
         let vip = fresh_apply.get("api").unwrap().vip;
         assert!(
             "10.0.251.0/24".parse::<Ipv4Net>().unwrap().contains(&vip),
@@ -456,7 +572,10 @@ mod tests {
 
     #[test]
     fn load_on_a_missing_state_dir_returns_an_empty_services() {
-        let dir = std::env::temp_dir().join(format!("keel-controlplane-services-test-missing-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-services-test-missing-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let services = Services::load(&dir, test_service_cidr());
         assert_eq!(services.list(), vec![]);

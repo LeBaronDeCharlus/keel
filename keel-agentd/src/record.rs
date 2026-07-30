@@ -52,13 +52,15 @@ pub fn volume_mountpoint(pool: &str, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keel_spec::{Metadata, NetworkSpec, RestartPolicy, ResourcesSpec, Spec};
+    use keel_spec::{Metadata, NetworkSpec, ResourcesSpec, RestartPolicy, Spec};
 
     fn sample_spec(name: &str) -> JailSpec {
         JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: Spec {
                 image: "base/14.2-web".to_string(),
                 command: vec!["/usr/local/bin/myapp".to_string()],
@@ -67,7 +69,10 @@ mod tests {
                     bridge: "keel0".to_string(),
                     address: "10.0.0.5/24".to_string(),
                 },
-                resources: ResourcesSpec { cpu: "2".to_string(), memory: "512M".to_string() },
+                resources: ResourcesSpec {
+                    cpu: "2".to_string(),
+                    memory: "512M".to_string(),
+                },
                 restart_policy: RestartPolicy::Always,
                 volumes: vec![],
                 replicate_to: None,
@@ -83,17 +88,26 @@ mod tests {
 
     #[test]
     fn base_dataset_path_appends_image_directly() {
-        assert_eq!(base_dataset_path("zroot", "base/14.2-web"), "zroot/keel/base/14.2-web");
+        assert_eq!(
+            base_dataset_path("zroot", "base/14.2-web"),
+            "zroot/keel/base/14.2-web"
+        );
     }
 
     #[test]
     fn jail_dataset_path_uses_jails_subdirectory() {
-        assert_eq!(jail_dataset_path("zroot", "web-1"), "zroot/keel/jails/web-1");
+        assert_eq!(
+            jail_dataset_path("zroot", "web-1"),
+            "zroot/keel/jails/web-1"
+        );
     }
 
     #[test]
     fn jail_rootfs_path_is_leading_slash_plus_dataset_path() {
-        assert_eq!(jail_rootfs_path("zroot", "web-1"), PathBuf::from("/zroot/keel/jails/web-1"));
+        assert_eq!(
+            jail_rootfs_path("zroot", "web-1"),
+            PathBuf::from("/zroot/keel/jails/web-1")
+        );
     }
 
     #[test]
@@ -103,17 +117,27 @@ mod tests {
 
     #[test]
     fn volume_dataset_path_uses_volumes_subdirectory() {
-        assert_eq!(volume_dataset_path("zroot", "web-data"), "zroot/keel/volumes/web-data");
+        assert_eq!(
+            volume_dataset_path("zroot", "web-data"),
+            "zroot/keel/volumes/web-data"
+        );
     }
 
     #[test]
     fn volume_mountpoint_is_leading_slash_plus_dataset_path() {
-        assert_eq!(volume_mountpoint("zroot", "web-data"), PathBuf::from("/zroot/keel/volumes/web-data"));
+        assert_eq!(
+            volume_mountpoint("zroot", "web-data"),
+            PathBuf::from("/zroot/keel/volumes/web-data")
+        );
     }
 
     #[test]
     fn jail_record_round_trips_through_yaml() {
-        let record = JailRecord { spec: sample_spec("web-1"), epair_ordinal: 3, deleting: false };
+        let record = JailRecord {
+            spec: sample_spec("web-1"),
+            epair_ordinal: 3,
+            deleting: false,
+        };
         let yaml = serde_yaml::to_string(&record).unwrap();
         let parsed: JailRecord = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, record);

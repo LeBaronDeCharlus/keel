@@ -115,7 +115,9 @@ impl JailTemplate {
         JailSpec {
             api_version: "keel/v1".to_string(),
             kind: "Jail".to_string(),
-            metadata: Metadata { name: name.to_string() },
+            metadata: Metadata {
+                name: name.to_string(),
+            },
             spec: Spec {
                 image: self.image.clone(),
                 command: self.command.clone(),
@@ -226,7 +228,10 @@ spec:
     memory: "512M"
   restartPolicy: Always
 "#;
-        assert!(serde_yaml::from_str::<JailSpec>(yaml).is_err(), "expected an extra, unrecognized field to be rejected at parse time");
+        assert!(
+            serde_yaml::from_str::<JailSpec>(yaml).is_err(),
+            "expected an extra, unrecognized field to be rejected at parse time"
+        );
     }
 
     #[test]
@@ -249,7 +254,10 @@ spec:
     memory: "512M"
   restartPolicy: Always
 "#;
-        assert!(serde_yaml::from_str::<JailSpec>(yaml).is_err(), "expected an extra, unrecognized field to be rejected at parse time");
+        assert!(
+            serde_yaml::from_str::<JailSpec>(yaml).is_err(),
+            "expected an extra, unrecognized field to be rejected at parse time"
+        );
     }
 
     #[test]
@@ -443,7 +451,10 @@ spec:
     fn to_jail_spec_always_starts_at_generation_zero() {
         let service: ServiceSpec = serde_yaml::from_str(SERVICE_EXAMPLE_YAML).unwrap();
         let jail = service.spec.template.to_jail_spec("web-0", "10.0.60.2/24");
-        assert_eq!(jail.spec.generation, 0, "the control plane sets a real generation separately, same as replicate_to");
+        assert_eq!(
+            jail.spec.generation, 0,
+            "the control plane sets a real generation separately, same as replicate_to"
+        );
     }
 }
 

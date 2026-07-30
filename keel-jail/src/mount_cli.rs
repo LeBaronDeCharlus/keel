@@ -53,7 +53,15 @@ impl MountManager for CliMountManager {
         if self.is_mounted(target)? {
             return Ok(());
         }
-        Self::run_checked("mount", &["-t", "nullfs", &source.to_string_lossy(), &target.to_string_lossy()])
+        Self::run_checked(
+            "mount",
+            &[
+                "-t",
+                "nullfs",
+                &source.to_string_lossy(),
+                &target.to_string_lossy(),
+            ],
+        )
     }
 
     fn unmount(&self, target: &Path) -> Result<(), MountError> {

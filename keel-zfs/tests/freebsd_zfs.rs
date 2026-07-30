@@ -9,21 +9,27 @@ use keel_zfs::{CliZfsManager, ZfsManager};
 fn dataset_exists_reports_true_for_the_test_base_and_false_for_garbage() {
     let zfs = CliZfsManager::new();
     assert_eq!(zfs.dataset_exists("zroot/keel/base/test").unwrap(), true);
-    assert_eq!(zfs.dataset_exists("zroot/keel/does-not-exist").unwrap(), false);
+    assert_eq!(
+        zfs.dataset_exists("zroot/keel/does-not-exist").unwrap(),
+        false
+    );
 }
 
 #[test]
 fn destroy_dataset_removes_a_dataset_created_for_the_test() {
     let zfs = CliZfsManager::new();
     let scratch = "zroot/keel/jails/destroy-test-scratch";
-    let _ = std::process::Command::new("zfs").args(["destroy", scratch]).output();
+    let _ = std::process::Command::new("zfs")
+        .args(["destroy", scratch])
+        .output();
     std::process::Command::new("zfs")
         .args(["create", scratch])
         .output()
         .expect("zfs create should run");
 
     assert_eq!(zfs.dataset_exists(scratch).unwrap(), true);
-    zfs.destroy_dataset(scratch).expect("destroy_dataset should succeed");
+    zfs.destroy_dataset(scratch)
+        .expect("destroy_dataset should succeed");
     assert_eq!(zfs.dataset_exists(scratch).unwrap(), false);
 }
 
@@ -52,10 +58,12 @@ fn clone_from_base_creates_a_usable_clone() {
     let target = "zroot/keel/jails/clone-test-scratch";
     let _ = zfs.destroy_dataset(target);
 
-    zfs.clone_from_base("zroot/keel/base/test", target).expect("clone_from_base should succeed");
+    zfs.clone_from_base("zroot/keel/base/test", target)
+        .expect("clone_from_base should succeed");
     assert_eq!(zfs.dataset_exists(target).unwrap(), true);
 
-    zfs.destroy_dataset(target).expect("cleanup destroy should succeed");
+    zfs.destroy_dataset(target)
+        .expect("cleanup destroy should succeed");
 }
 
 #[test]
@@ -66,11 +74,15 @@ fn clone_from_base_reuses_existing_snapshot_on_second_call() {
     let _ = zfs.destroy_dataset(target_a);
     let _ = zfs.destroy_dataset(target_b);
 
-    zfs.clone_from_base("zroot/keel/base/test", target_a).expect("first clone should succeed");
-    zfs.clone_from_base("zroot/keel/base/test", target_b).expect("second clone should succeed and reuse the snapshot");
+    zfs.clone_from_base("zroot/keel/base/test", target_a)
+        .expect("first clone should succeed");
+    zfs.clone_from_base("zroot/keel/base/test", target_b)
+        .expect("second clone should succeed and reuse the snapshot");
 
-    zfs.destroy_dataset(target_a).expect("cleanup a should succeed");
-    zfs.destroy_dataset(target_b).expect("cleanup b should succeed");
+    zfs.destroy_dataset(target_a)
+        .expect("cleanup a should succeed");
+    zfs.destroy_dataset(target_b)
+        .expect("cleanup b should succeed");
 }
 
 // Milestone 17: persistent volumes.
@@ -86,7 +98,8 @@ fn create_volume_creates_a_quota_scoped_dataset_and_is_idempotent() {
     let dataset = "zroot/keel/volumes/create-volume-test-scratch";
     let _ = zfs.destroy_dataset(dataset);
 
-    zfs.create_volume(dataset, "64M").expect("create_volume should succeed");
+    zfs.create_volume(dataset, "64M")
+        .expect("create_volume should succeed");
     assert_eq!(zfs.dataset_exists(dataset).unwrap(), true);
 
     let output = std::process::Command::new("zfs")
@@ -97,9 +110,11 @@ fn create_volume_creates_a_quota_scoped_dataset_and_is_idempotent() {
 
     // Idempotent: a second call against an already-existing dataset must
     // not fail (and must not need to touch the quota again).
-    zfs.create_volume(dataset, "64M").expect("create_volume should be idempotent");
+    zfs.create_volume(dataset, "64M")
+        .expect("create_volume should be idempotent");
 
-    zfs.destroy_dataset(dataset).expect("cleanup destroy should succeed");
+    zfs.destroy_dataset(dataset)
+        .expect("cleanup destroy should succeed");
 }
 
 #[test]
@@ -114,23 +129,33 @@ fn destroy_dataset_on_a_still_mounted_volume_returns_busy_not_command_failed() {
     let zfs = CliZfsManager::new();
     let dataset = "zroot/keel/volumes/busy-test-scratch";
     let mount_target = std::path::Path::new("/tmp/keel-busy-test-scratch-mount");
-    let _ = std::process::Command::new("umount").arg(mount_target).output();
+    let _ = std::process::Command::new("umount")
+        .arg(mount_target)
+        .output();
     let _ = zfs.destroy_dataset(dataset);
     std::fs::create_dir_all(mount_target).unwrap();
 
-    zfs.create_volume(dataset, "64M").expect("create_volume should succeed");
+    zfs.create_volume(dataset, "64M")
+        .expect("create_volume should succeed");
     let mountpoint = format!("/{dataset}");
     let mount_status = std::process::Command::new("mount")
         .args(["-t", "nullfs", &mountpoint, &mount_target.to_string_lossy()])
         .status()
         .expect("mount should run");
-    assert!(mount_status.success(), "expected the nullfs mount to succeed");
+    assert!(
+        mount_status.success(),
+        "expected the nullfs mount to succeed"
+    );
 
     match zfs.destroy_dataset(dataset) {
         Err(keel_zfs::ZfsError::Busy(d)) => assert_eq!(d, dataset),
         other => panic!("expected Busy for a still-mounted dataset, got: {other:?}"),
     }
 
-    std::process::Command::new("umount").arg(mount_target).status().expect("umount should run");
-    zfs.destroy_dataset(dataset).expect("destroy should succeed once unmounted");
+    std::process::Command::new("umount")
+        .arg(mount_target)
+        .status()
+        .expect("umount should run");
+    zfs.destroy_dataset(dataset)
+        .expect("destroy should succeed once unmounted");
 }

@@ -62,7 +62,15 @@ pub fn spawn(
         loop {
             let client_config = reloading_tls.client_config();
             if !registered {
-                match register_once(&control_plane_addr, &node_id, &advertise_addr, &replicate_addr, capacity_cpu, capacity_memory, &client_config) {
+                match register_once(
+                    &control_plane_addr,
+                    &node_id,
+                    &advertise_addr,
+                    &replicate_addr,
+                    capacity_cpu,
+                    capacity_memory,
+                    &client_config,
+                ) {
                     Ok(pod_cidr) => {
                         pod_cidr_slot.set(pod_cidr);
                         registered = true;
@@ -70,10 +78,20 @@ pub fn spawn(
                     Err(e) => eprintln!("keel-agentd: registration failed: {e}"),
                 }
             } else {
-                match heartbeat_once(&control_plane_addr, &node_id, &commands, &client_config, &state_dir) {
+                match heartbeat_once(
+                    &control_plane_addr,
+                    &node_id,
+                    &commands,
+                    &client_config,
+                    &state_dir,
+                ) {
                     Ok(entries) => {
                         service_vips.set_all(&entries);
-                        crate::proxy::reconcile_services(&entries, &mut proxied_services, &commands);
+                        crate::proxy::reconcile_services(
+                            &entries,
+                            &mut proxied_services,
+                            &commands,
+                        );
                     }
                     Err(e) => {
                         eprintln!("keel-agentd: heartbeat failed: {e}");
@@ -84,7 +102,9 @@ pub fn spawn(
 
             match fetch_nodes(&control_plane_addr, &client_config) {
                 Ok(peers) => reconcile_routes(&node_id, &peers, &mut installed_routes, &commands),
-                Err(e) => eprintln!("keel-agentd: failed to fetch peer list for route reconciliation: {e}"),
+                Err(e) => eprintln!(
+                    "keel-agentd: failed to fetch peer list for route reconciliation: {e}"
+                ),
             }
 
             thread::sleep(heartbeat_interval);
@@ -104,13 +124,22 @@ fn register_once(
     let body = format!(
         "id: {node_id}\naddr: {advertise_addr}\nreplicate_addr: {replicate_addr}\ncapacity_cpu: {capacity_cpu}\ncapacity_memory: {capacity_memory}\n"
     );
-    let response_body = send_request(control_plane_addr, "POST", "/nodes/register", &body, client_config)?;
-    let response: keel_controlplane::wire::RegisterResponse = serde_yaml::from_slice(&response_body)
-        .map_err(|e| format!("malformed registration response: {e}"))?;
-    response
-        .pod_cidr
-        .parse()
-        .map_err(|e| format!("control plane returned invalid pod_cidr '{}': {e}", response.pod_cidr))
+    let response_body = send_request(
+        control_plane_addr,
+        "POST",
+        "/nodes/register",
+        &body,
+        client_config,
+    )?;
+    let response: keel_controlplane::wire::RegisterResponse =
+        serde_yaml::from_slice(&response_body)
+            .map_err(|e| format!("malformed registration response: {e}"))?;
+    response.pod_cidr.parse().map_err(|e| {
+        format!(
+            "control plane returned invalid pod_cidr '{}': {e}",
+            response.pod_cidr
+        )
+    })
 }
 
 fn heartbeat_once(
@@ -124,20 +153,27 @@ fn heartbeat_once(
     commands
         .send(crate::worker::Command::CommittedResources(resources_tx))
         .map_err(|_| "worker is not running".to_string())?;
-    let (committed_cpu, committed_memory) = resources_rx.recv().map_err(|_| "worker did not respond".to_string())?;
+    let (committed_cpu, committed_memory) = resources_rx
+        .recv()
+        .map_err(|_| "worker did not respond".to_string())?;
 
     let (jails_tx, jails_rx) = std::sync::mpsc::channel();
     commands
         .send(crate::worker::Command::Get(None, jails_tx))
         .map_err(|_| "worker is not running".to_string())?;
-    let statuses = jails_rx.recv().map_err(|_| "worker did not respond".to_string())?;
+    let statuses = jails_rx
+        .recv()
+        .map_err(|_| "worker did not respond".to_string())?;
     let jails: Vec<keel_controlplane::wire::JailHealth> = statuses
         .into_iter()
-        .map(|s| keel_controlplane::wire::JailHealth { name: s.record.spec.metadata.name, running: s.running })
+        .map(|s| keel_controlplane::wire::JailHealth {
+            name: s.record.spec.metadata.name,
+            running: s.running,
+        })
         .collect();
 
-    let ingress_records =
-        crate::ingress_store::load_all(state_dir).map_err(|e| format!("failed to load ingress records: {e}"))?;
+    let ingress_records = crate::ingress_store::load_all(state_dir)
+        .map_err(|e| format!("failed to load ingress records: {e}"))?;
     let ingresses: Vec<keel_controlplane::wire::IngressHealth> = ingress_records
         .into_iter()
         .map(|r| keel_controlplane::wire::IngressHealth {
@@ -149,13 +185,28 @@ fn heartbeat_once(
         })
         .collect();
 
-    let heartbeat = keel_controlplane::wire::Heartbeat { committed_cpu, committed_memory, jails, ingresses };
-    let body = serde_yaml::to_string(&heartbeat).map_err(|e| format!("failed to serialize heartbeat: {e}"))?;
-    let response_body = send_request(control_plane_addr, "POST", &format!("/nodes/{node_id}/heartbeat"), &body, client_config)?;
+    let heartbeat = keel_controlplane::wire::Heartbeat {
+        committed_cpu,
+        committed_memory,
+        jails,
+        ingresses,
+    };
+    let body = serde_yaml::to_string(&heartbeat)
+        .map_err(|e| format!("failed to serialize heartbeat: {e}"))?;
+    let response_body = send_request(
+        control_plane_addr,
+        "POST",
+        &format!("/nodes/{node_id}/heartbeat"),
+        &body,
+        client_config,
+    )?;
     serde_yaml::from_slice(&response_body).map_err(|e| format!("malformed heartbeat response: {e}"))
 }
 
-fn fetch_nodes(control_plane_addr: &str, client_config: &Arc<rustls::ClientConfig>) -> Result<Vec<NodeStatus>, String> {
+fn fetch_nodes(
+    control_plane_addr: &str,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<Vec<NodeStatus>, String> {
     let body = send_request(control_plane_addr, "GET", "/nodes", "", client_config)?;
     serde_yaml::from_slice(&body).map_err(|e| format!("malformed /nodes response: {e}"))
 }
@@ -170,7 +221,10 @@ fn reconcile_routes(
 
     for pod_cidr in to_remove {
         let (tx, rx) = std::sync::mpsc::channel();
-        if commands.send(crate::worker::Command::RemoveRoute(pod_cidr.clone(), tx)).is_err() {
+        if commands
+            .send(crate::worker::Command::RemoveRoute(pod_cidr.clone(), tx))
+            .is_err()
+        {
             return;
         }
         match rx.recv() {
@@ -189,9 +243,20 @@ fn reconcile_routes(
         // `ServerName`), not a bare IP. `route(8)` only accepts a bare IP as
         // a gateway, so it must be stripped here before it reaches
         // `NetManager::add_route`.
-        let gateway = gateway_addr.rsplit_once(':').map(|(host, _port)| host).unwrap_or(&gateway_addr).to_string();
+        let gateway = gateway_addr
+            .rsplit_once(':')
+            .map(|(host, _port)| host)
+            .unwrap_or(&gateway_addr)
+            .to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        if commands.send(crate::worker::Command::AddRoute(pod_cidr.clone(), gateway.clone(), tx)).is_err() {
+        if commands
+            .send(crate::worker::Command::AddRoute(
+                pod_cidr.clone(),
+                gateway.clone(),
+                tx,
+            ))
+            .is_err()
+        {
             return;
         }
         match rx.recv() {
@@ -200,20 +265,35 @@ fn reconcile_routes(
                     installed_routes.insert(peer.id.clone(), pod_cidr);
                 }
             }
-            Ok(Err(e)) => eprintln!("keel-agentd: failed to add route for {pod_cidr} via {gateway}: {e}"),
+            Ok(Err(e)) => {
+                eprintln!("keel-agentd: failed to add route for {pod_cidr} via {gateway}: {e}")
+            }
             Err(_) => eprintln!("keel-agentd: reconciler worker did not respond to AddRoute"),
         }
     }
 }
 
-fn send_request(addr: &str, method: &str, path: &str, body: &str, client_config: &Arc<rustls::ClientConfig>) -> Result<Vec<u8>, String> {
+fn send_request(
+    addr: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<Vec<u8>, String> {
     let server_name = tls::server_name_from_addr(addr)?;
-    let tcp_stream = TcpStream::connect(addr).map_err(|e| format!("failed to connect to {addr}: {e}"))?;
-    let conn = rustls::ClientConnection::new(Arc::clone(client_config), server_name).map_err(|e| e.to_string())?;
+    let tcp_stream =
+        TcpStream::connect(addr).map_err(|e| format!("failed to connect to {addr}: {e}"))?;
+    let conn = rustls::ClientConnection::new(Arc::clone(client_config), server_name)
+        .map_err(|e| e.to_string())?;
     let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
 
-    let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-    stream.write_all(request.as_bytes()).map_err(|e| format!("failed to send request: {e}"))?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("failed to send request: {e}"))?;
     stream.sock.shutdown(std::net::Shutdown::Write).ok();
 
     // Read until the peer closes the connection. rustls surfaces a plain TCP
@@ -236,9 +316,14 @@ fn send_request(addr: &str, method: &str, path: &str, body: &str, client_config:
 
     let mut headers = [httparse::EMPTY_HEADER; 16];
     let mut parsed = httparse::Response::new(&mut headers);
-    let header_len = match parsed.parse(&response).map_err(|e| format!("malformed response: {e}"))? {
+    let header_len = match parsed
+        .parse(&response)
+        .map_err(|e| format!("malformed response: {e}"))?
+    {
         httparse::Status::Complete(len) => len,
-        httparse::Status::Partial => return Err("incomplete response from control plane".to_string()),
+        httparse::Status::Partial => {
+            return Err("incomplete response from control plane".to_string())
+        }
     };
     let status = parsed.code.unwrap_or(0);
     let content_length = parsed
@@ -250,7 +335,9 @@ fn send_request(addr: &str, method: &str, path: &str, body: &str, client_config:
         .ok_or_else(|| "response missing Content-Length header".to_string())?;
     let actual = response.len() - header_len;
     if actual != content_length {
-        return Err(format!("truncated response: expected {content_length} bytes, got {actual}"));
+        return Err(format!(
+            "truncated response: expected {content_length} bytes, got {actual}"
+        ));
     }
     if (200..300).contains(&status) {
         Ok(response[header_len..].to_vec())
@@ -292,13 +379,21 @@ mod tests {
             node_status("node-2", "10.0.0.2", "10.0.2.0/24", NodeState::Alive),
         ];
         let (to_add, to_remove) = diff_routes("node-1", &peers, &HashMap::new());
-        assert_eq!(to_add, vec![("10.0.2.0/24".to_string(), "10.0.0.2".to_string())]);
+        assert_eq!(
+            to_add,
+            vec![("10.0.2.0/24".to_string(), "10.0.0.2".to_string())]
+        );
         assert!(to_remove.is_empty());
     }
 
     #[test]
     fn an_already_installed_peer_with_the_same_pod_cidr_is_not_re_added() {
-        let peers = vec![node_status("node-2", "10.0.0.2", "10.0.2.0/24", NodeState::Alive)];
+        let peers = vec![node_status(
+            "node-2",
+            "10.0.0.2",
+            "10.0.2.0/24",
+            NodeState::Alive,
+        )];
         let mut installed = HashMap::new();
         installed.insert("node-2".to_string(), "10.0.2.0/24".to_string());
         let (to_add, to_remove) = diff_routes("node-1", &peers, &installed);
@@ -308,7 +403,12 @@ mod tests {
 
     #[test]
     fn a_dead_peer_that_was_installed_is_removed() {
-        let peers = vec![node_status("node-2", "10.0.0.2", "10.0.2.0/24", NodeState::Dead)];
+        let peers = vec![node_status(
+            "node-2",
+            "10.0.0.2",
+            "10.0.2.0/24",
+            NodeState::Dead,
+        )];
         let mut installed = HashMap::new();
         installed.insert("node-2".to_string(), "10.0.2.0/24".to_string());
         let (to_add, to_remove) = diff_routes("node-1", &peers, &installed);
@@ -334,7 +434,10 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("keel-agentd-registration-test-controlplane-{}-{id}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-agentd-registration-test-controlplane-{}-{id}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -394,8 +497,13 @@ mod tests {
 
     fn node_client_config() -> std::sync::Arc<rustls::ClientConfig> {
         std::sync::Arc::new(
-            crate::tls::load_client_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            crate::tls::load_client_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         )
     }
 
@@ -457,7 +565,10 @@ mod tests {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .expect("response missing Content-Length header");
         let actual = response.len() - header_len;
-        assert_eq!(actual, content_length, "truncated response: expected {content_length} bytes, got {actual}");
+        assert_eq!(
+            actual, content_length,
+            "truncated response: expected {content_length} bytes, got {actual}"
+        );
         String::from_utf8_lossy(&response).to_string()
     }
 
@@ -466,17 +577,28 @@ mod tests {
     /// larger than the body it actually writes before dropping the raw TCP
     /// connection without a clean TLS shutdown (no `close_notify`) --
     /// simulating an on-path RST or a control plane that crashes mid-write.
-    fn start_fake_control_plane_with_truncated_body(claimed_body: &'static str, actual_body: &'static str) -> String {
+    fn start_fake_control_plane_with_truncated_body(
+        claimed_body: &'static str,
+        actual_body: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server_config = std::sync::Arc::new(
-            crate::tls::load_server_config(&fixture("fixture-node.crt"), &fixture("fixture-node.key"), &fixture("ca.crt"), &fixture("crl.pem"))
-                .unwrap(),
+            crate::tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
         );
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(std::sync::Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(std::sync::Arc::clone(&server_config))
+                else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut buf = [0u8; 4096];
                 loop {
@@ -513,7 +635,8 @@ mod tests {
             "127.0.0.1:0".to_string(),
             control_plane_addr.clone(),
             Duration::from_millis(50),
-            std::env::temp_dir().join("keel-agentd-registration-test-heartbeat_populates_the_service_vip_slot"),
+            std::env::temp_dir()
+                .join("keel-agentd-registration-test-heartbeat_populates_the_service_vip_slot"),
             1.0,
             1_073_741_824,
             node_reloading_tls(),
@@ -525,7 +648,13 @@ mod tests {
         // Apply a Service on the real control plane so the next heartbeat's
         // proxy table is non-empty, then wait a few ticks for it to land.
         let apply_body = "apiVersion: keel/v1\nkind: Service\nmetadata:\n  name: hugo-site\nspec:\n  replicas: 1\n  port: 8080\n  template:\n    image: base/test\n    command: [\"/bin/true\"]\n    network:\n      vnet: true\n      bridge: keel0\n    resources:\n      cpu: \"1\"\n      memory: \"128M\"\n    restartPolicy: Always\n";
-        let _ = send_request(&control_plane_addr, "PUT", "/services/hugo-site", apply_body, &client_config);
+        let _ = send_request(
+            &control_plane_addr,
+            "PUT",
+            "/services/hugo-site",
+            apply_body,
+            &client_config,
+        );
 
         let mut found = None;
         for _ in 0..40 {
@@ -535,14 +664,18 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        assert!(found.is_some(), "expected 'hugo-site' to appear in the ServiceVipSlot within the timeout");
+        assert!(
+            found.is_some(),
+            "expected 'hugo-site' to appear in the ServiceVipSlot within the timeout"
+        );
     }
 
     #[test]
     fn registers_and_then_keeps_heartbeating() {
         let control_plane_addr = start_test_control_plane();
         let zfs = keel_zfs::FakeZfsManager::new();
-        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-registers_and_then_keeps_heartbeating");
+        let state_dir = std::env::temp_dir()
+            .join("keel-agentd-registration-test-registers_and_then_keeps_heartbeating");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -578,9 +711,18 @@ mod tests {
 
         thread::sleep(Duration::from_millis(200));
         let body = get_nodes(&control_plane_addr);
-        assert!(body.contains("node-1"), "expected node-1 to have registered, got: {body}");
-        assert!(body.contains("Alive"), "expected node-1 to be Alive, got: {body}");
-        assert!(body.contains("capacity_cpu: 4"), "expected reported capacity in body: {body}");
+        assert!(
+            body.contains("node-1"),
+            "expected node-1 to have registered, got: {body}"
+        );
+        assert!(
+            body.contains("Alive"),
+            "expected node-1 to be Alive, got: {body}"
+        );
+        assert!(
+            body.contains("capacity_cpu: 4"),
+            "expected reported capacity in body: {body}"
+        );
     }
 
     #[test]
@@ -588,7 +730,9 @@ mod tests {
         let control_plane_addr = start_test_control_plane();
         let zfs = keel_zfs::FakeZfsManager::new();
         zfs.seed_dataset("zroot/keel/base/14.2-web");
-        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-heartbeats_report_the_reconcilers_committed_resources");
+        let state_dir = std::env::temp_dir().join(
+            "keel-agentd-registration-test-heartbeats_report_the_reconcilers_committed_resources",
+        );
         let reconciler = crate::Reconciler::new(
             keel_jail::FakeJailRuntime::new(),
             zfs.clone(),
@@ -602,7 +746,8 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
+        let (_worker_handle, commands) =
+            crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let (apply_tx, apply_rx) = mpsc::channel();
         commands
@@ -610,7 +755,9 @@ mod tests {
                 keel_spec::JailSpec {
                     api_version: "keel/v1".to_string(),
                     kind: "Jail".to_string(),
-                    metadata: keel_spec::Metadata { name: "web-1".to_string() },
+                    metadata: keel_spec::Metadata {
+                        name: "web-1".to_string(),
+                    },
                     spec: keel_spec::Spec {
                         image: "base/14.2-web".to_string(),
                         command: vec!["/usr/local/bin/myapp".to_string()],
@@ -619,7 +766,10 @@ mod tests {
                             bridge: "keel0".to_string(),
                             address: "10.0.0.5/24".to_string(),
                         },
-                        resources: keel_spec::ResourcesSpec { cpu: "2".to_string(), memory: "512M".to_string() },
+                        resources: keel_spec::ResourcesSpec {
+                            cpu: "2".to_string(),
+                            memory: "512M".to_string(),
+                        },
                         restart_policy: keel_spec::RestartPolicy::Always,
                         volumes: vec![],
                         replicate_to: None,
@@ -649,23 +799,37 @@ mod tests {
 
         thread::sleep(Duration::from_millis(200));
         let body = get_nodes(&control_plane_addr);
-        assert!(body.contains("committed_cpu: 2"), "expected committed_cpu from the applied jail, got: {body}");
-        assert!(body.contains("committed_memory: 536870912"), "expected committed_memory from the applied jail, got: {body}");
+        assert!(
+            body.contains("committed_cpu: 2"),
+            "expected committed_cpu from the applied jail, got: {body}"
+        );
+        assert!(
+            body.contains("committed_memory: 536870912"),
+            "expected committed_memory from the applied jail, got: {body}"
+        );
     }
 
     #[test]
     fn heartbeats_report_ingress_health_gathered_from_the_ingress_store() {
-        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-heartbeats_report_ingress_health");
+        let state_dir = std::env::temp_dir()
+            .join("keel-agentd-registration-test-heartbeats_report_ingress_health");
         let _ = std::fs::remove_dir_all(&state_dir);
         let record = crate::IngressRecord {
             spec: keel_spec::IngressSpec {
                 api_version: "keel/v1".to_string(),
                 kind: "Ingress".to_string(),
-                metadata: keel_spec::Metadata { name: "blog".to_string() },
+                metadata: keel_spec::Metadata {
+                    name: "blog".to_string(),
+                },
                 spec: keel_spec::IngressSpecBody {
                     host: "example.com".to_string(),
-                    backend: keel_spec::IngressBackend { service: "hugo-site".to_string(), port: 8080 },
-                    tls: keel_spec::IngressTls { email: "admin@example.com".to_string() },
+                    backend: keel_spec::IngressBackend {
+                        service: "hugo-site".to_string(),
+                        port: 8080,
+                    },
+                    tls: keel_spec::IngressTls {
+                        email: "admin@example.com".to_string(),
+                    },
                 },
             },
             cert_expires_at_unix: Some(1_800_000_000),
@@ -688,7 +852,8 @@ mod tests {
             crate::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
+        let (_worker_handle, commands) =
+            crate::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let _handle = spawn(
             "node-1".to_string(),
@@ -707,9 +872,15 @@ mod tests {
 
         thread::sleep(Duration::from_millis(200));
         let body = get_nodes(&control_plane_addr);
-        assert!(body.contains("backend_service: hugo-site"), "expected reported ingress health, got: {body}");
+        assert!(
+            body.contains("backend_service: hugo-site"),
+            "expected reported ingress health, got: {body}"
+        );
         assert!(body.contains("host: example.com"), "got: {body}");
-        assert!(body.contains("cert_expires_at_unix: 1800000000"), "got: {body}");
+        assert!(
+            body.contains("cert_expires_at_unix: 1800000000"),
+            "got: {body}"
+        );
     }
 
     #[test]
@@ -718,12 +889,21 @@ mod tests {
         let client_config = node_client_config();
 
         let service_yaml = "apiVersion: keel/v1\nkind: Service\nmetadata:\n  name: web\nspec:\n  replicas: 1\n  port: 9999\n  template:\n    image: base/14.2-web\n    command: [\"/usr/local/bin/myapp\"]\n    network:\n      vnet: true\n      bridge: keel0\n    resources:\n      cpu: \"1\"\n      memory: \"256M\"\n    restartPolicy: Always\n";
-        send_request(&control_plane_addr, "PUT", "/services/web", service_yaml, &client_config).unwrap();
+        send_request(
+            &control_plane_addr,
+            "PUT",
+            "/services/web",
+            service_yaml,
+            &client_config,
+        )
+        .unwrap();
 
         let net = keel_net::FakeNetManager::new();
         net.ensure_bridge_exists("keel0").unwrap();
         let zfs = keel_zfs::FakeZfsManager::new();
-        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-a_heartbeat_aliases_and_proxies_an_applied_service");
+        let state_dir = std::env::temp_dir().join(
+            "keel-agentd-registration-test-a_heartbeat_aliases_and_proxies_an_applied_service",
+        );
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),
@@ -779,11 +959,19 @@ mod tests {
         // reflects a jail's `attach_jail` gateway, a value `add_alias`
         // deliberately never touches (see keel-net's own
         // `a_bridges_gateway_and_its_service_alias_coexist_independently`).
-        let svc_body = send_request(&control_plane_addr, "GET", "/services", "", &client_config).unwrap();
+        let svc_body =
+            send_request(&control_plane_addr, "GET", "/services", "", &client_config).unwrap();
         let services: Vec<keel_controlplane::wire::ServiceSummary> =
             serde_yaml::from_slice(&svc_body).expect("malformed /services response");
-        let vip = &services.iter().find(|s| s.name == "web").expect("expected the 'web' service to be listed").vip;
-        assert!(net.has_alias("keel0", vip), "expected keel0 to have the service's VIP ({vip}) aliased");
+        let vip = &services
+            .iter()
+            .find(|s| s.name == "web")
+            .expect("expected the 'web' service to be listed")
+            .vip;
+        assert!(
+            net.has_alias("keel0", vip),
+            "expected keel0 to have the service's VIP ({vip}) aliased"
+        );
     }
 
     #[test]
@@ -843,7 +1031,10 @@ mod tests {
 
         thread::sleep(Duration::from_millis(200));
         let body = get_nodes(&control_plane_addr);
-        assert!(!body.contains("node-1"), "expected node-1 to never register with a wrong-CA certificate, got: {body}");
+        assert!(
+            !body.contains("node-1"),
+            "expected node-1 to never register with a wrong-CA certificate, got: {body}"
+        );
     }
 
     #[test]
@@ -886,7 +1077,10 @@ mod tests {
         );
 
         thread::sleep(Duration::from_millis(200));
-        assert!(pod_cidr_slot.get().is_some(), "expected the registration loop to have stored a pod_cidr by now");
+        assert!(
+            pod_cidr_slot.get().is_some(),
+            "expected the registration loop to have stored a pod_cidr by now"
+        );
     }
 
     fn start_fake_control_plane_with_revoked_cert() -> String {
@@ -904,7 +1098,10 @@ mod tests {
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let Ok(conn) = rustls::ServerConnection::new(std::sync::Arc::clone(&server_config)) else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(std::sync::Arc::clone(&server_config))
+                else {
+                    continue;
+                };
                 let mut tls_stream = rustls::StreamOwned::new(conn, stream);
                 let mut buf = [0u8; 4096];
                 let _ = tls_stream.read(&mut buf);
@@ -917,7 +1114,10 @@ mod tests {
     fn send_request_to_a_peer_presenting_a_revoked_certificate_fails() {
         let addr = start_fake_control_plane_with_revoked_cert();
         let result = send_request(&addr, "GET", "/nodes", "", &node_client_config());
-        assert!(result.is_err(), "expected a revoked peer certificate to fail the connection, got: {result:?}");
+        assert!(
+            result.is_err(),
+            "expected a revoked peer certificate to fail the connection, got: {result:?}"
+        );
     }
 
     #[test]
@@ -940,7 +1140,8 @@ mod tests {
 
         let net = keel_net::FakeNetManager::new();
         let zfs = keel_zfs::FakeZfsManager::new();
-        let state_dir = std::env::temp_dir().join("keel-agentd-registration-test-route_reconciliation_adds_a_route_for_a_peer");
+        let state_dir = std::env::temp_dir()
+            .join("keel-agentd-registration-test-route_reconciliation_adds_a_route_for_a_peer");
         let (_worker_handle, commands) = crate::worker::spawn(
             crate::Reconciler::new(
                 keel_jail::FakeJailRuntime::new(),

@@ -34,7 +34,10 @@ mod tests {
     }
 
     fn test_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("keel-controlplane-store-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-store-test-{}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&dir);
         dir.join(format!("{name}.yaml"))
     }
@@ -42,7 +45,10 @@ mod tests {
     #[test]
     fn save_then_load_or_default_roundtrips() {
         let path = test_path("save_then_load_or_default_roundtrips");
-        let value = Scratch { names: vec!["a".to_string(), "b".to_string()], count: 2 };
+        let value = Scratch {
+            names: vec!["a".to_string(), "b".to_string()],
+            count: 2,
+        };
         save(&path, &value).unwrap();
         let loaded: Scratch = load_or_default(&path);
         assert_eq!(loaded, value);
@@ -58,10 +64,16 @@ mod tests {
 
     #[test]
     fn save_creates_the_parent_directory_if_missing() {
-        let dir = std::env::temp_dir().join(format!("keel-controlplane-store-test-missing-parent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keel-controlplane-store-test-missing-parent-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("scratch.yaml");
-        let value = Scratch { names: vec![], count: 0 };
+        let value = Scratch {
+            names: vec![],
+            count: 0,
+        };
         save(&path, &value).unwrap();
         let loaded: Scratch = load_or_default(&path);
         assert_eq!(loaded, value);
@@ -70,8 +82,18 @@ mod tests {
     #[test]
     fn save_overwrites_a_previous_value_rather_than_merging() {
         let path = test_path("save_overwrites_a_previous_value_rather_than_merging");
-        save(&path, &Scratch { names: vec!["old".to_string()], count: 1 }).unwrap();
-        let new_value = Scratch { names: vec!["new".to_string()], count: 2 };
+        save(
+            &path,
+            &Scratch {
+                names: vec!["old".to_string()],
+                count: 1,
+            },
+        )
+        .unwrap();
+        let new_value = Scratch {
+            names: vec!["new".to_string()],
+            count: 2,
+        };
         save(&path, &new_value).unwrap();
         let loaded: Scratch = load_or_default(&path);
         assert_eq!(loaded, new_value);

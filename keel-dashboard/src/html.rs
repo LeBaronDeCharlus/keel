@@ -14,7 +14,10 @@ const RENEWAL_THRESHOLD_SECS: i64 = 30 * 24 * 60 * 60;
 /// this escaping is cheap insurance against that upstream invariant
 /// rather than a load-bearing security boundary.
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 pub fn render(snapshot: &Snapshot, now_unix: i64) -> String {
@@ -114,12 +117,23 @@ fn render_services(services: &[ServiceSnapshot]) -> String {
             .map(|replicas| {
                 replicas
                     .iter()
-                    .map(|r| format!("{} ({}@{})", escape_html(&r.name), escape_html(&r.node), escape_html(&r.address)))
+                    .map(|r| {
+                        format!(
+                            "{} ({}@{})",
+                            escape_html(&r.name),
+                            escape_html(&r.node),
+                            escape_html(&r.address)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             })
             .unwrap_or_default();
-        let actual_replicas = service.detail.as_ref().map(|replicas| replicas.len()).unwrap_or(0);
+        let actual_replicas = service
+            .detail
+            .as_ref()
+            .map(|replicas| replicas.len())
+            .unwrap_or(0);
         rows.push_str(&format!(
             "<tr><td>{name}</td><td>{actual}/{desired}</td><td>{vip}:{port}</td><td>{placement}</td>{stale}</tr>",
             name = escape_html(&s.name),
@@ -168,7 +182,9 @@ mod tests {
     use crate::snapshot::{NodeSnapshot, ServiceSnapshot};
     use keel_agentd::wire::VolumeStatus;
     use keel_agentd::{BackoffStatus, JailStatus};
-    use keel_controlplane::wire::{IngressHealth, NodeState, NodeStatus, ServiceReplica, ServiceSummary};
+    use keel_controlplane::wire::{
+        IngressHealth, NodeState, NodeStatus, ServiceReplica, ServiceSummary,
+    };
 
     fn sample_node_status() -> NodeStatus {
         NodeStatus {
@@ -196,12 +212,21 @@ mod tests {
             spec: keel_spec::JailSpec {
                 api_version: "keel/v1".to_string(),
                 kind: "Jail".to_string(),
-                metadata: keel_spec::Metadata { name: name.to_string() },
+                metadata: keel_spec::Metadata {
+                    name: name.to_string(),
+                },
                 spec: keel_spec::Spec {
                     image: "base/14.2-web".to_string(),
                     command: vec!["/usr/local/bin/myapp".to_string()],
-                    network: keel_spec::NetworkSpec { vnet: true, bridge: "keel0".to_string(), address: "10.0.0.5/24".to_string() },
-                    resources: keel_spec::ResourcesSpec { cpu: "1".to_string(), memory: "512M".to_string() },
+                    network: keel_spec::NetworkSpec {
+                        vnet: true,
+                        bridge: "keel0".to_string(),
+                        address: "10.0.0.5/24".to_string(),
+                    },
+                    resources: keel_spec::ResourcesSpec {
+                        cpu: "1".to_string(),
+                        memory: "512M".to_string(),
+                    },
                     restart_policy: keel_spec::RestartPolicy::Always,
                     volumes: vec![],
                     replicate_to: None,
@@ -217,11 +242,20 @@ mod tests {
     fn renders_a_running_jail_as_running() {
         let node = NodeSnapshot {
             status: sample_node_status(),
-            jails: vec![JailStatus { record: jail_record("web-0"), running: true, backoff: BackoffStatus::default() }],
+            jails: vec![JailStatus {
+                record: jail_record("web-0"),
+                running: true,
+                backoff: BackoffStatus::default(),
+            }],
             volumes: vec![],
             data_stale: false,
         };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("web-0"), "got: {html}");
         assert!(html.contains("running"), "got: {html}");
@@ -234,12 +268,20 @@ mod tests {
             jails: vec![JailStatus {
                 record: jail_record("web-0"),
                 running: false,
-                backoff: BackoffStatus { retry_in_secs: Some(4), current_delay_secs: Some(8) },
+                backoff: BackoffStatus {
+                    retry_in_secs: Some(4),
+                    current_delay_secs: Some(8),
+                },
             }],
             volumes: vec![],
             data_stale: false,
         };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("crash-looping"), "got: {html}");
     }
@@ -248,11 +290,20 @@ mod tests {
     fn renders_a_freshly_applied_non_running_jail_as_not_running_not_crash_looping() {
         let node = NodeSnapshot {
             status: sample_node_status(),
-            jails: vec![JailStatus { record: jail_record("web-0"), running: false, backoff: BackoffStatus::default() }],
+            jails: vec![JailStatus {
+                record: jail_record("web-0"),
+                running: false,
+                backoff: BackoffStatus::default(),
+            }],
             volumes: vec![],
             data_stale: false,
         };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(!html.contains("crash-looping"), "got: {html}");
     }
@@ -262,10 +313,17 @@ mod tests {
         let node = NodeSnapshot {
             status: sample_node_status(),
             jails: vec![],
-            volumes: vec![VolumeStatus { name: "web-data".to_string() }],
+            volumes: vec![VolumeStatus {
+                name: "web-data".to_string(),
+            }],
             data_stale: false,
         };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("web-data"), "got: {html}");
     }
@@ -273,7 +331,12 @@ mod tests {
     #[test]
     fn renders_a_service_with_desired_and_actual_replica_counts() {
         let service = ServiceSnapshot {
-            summary: ServiceSummary { name: "web".to_string(), desired_replicas: 3, vip: "10.0.250.7".to_string(), port: 8080 },
+            summary: ServiceSummary {
+                name: "web".to_string(),
+                desired_replicas: 3,
+                vip: "10.0.250.7".to_string(),
+                port: 8080,
+            },
             detail: Some(vec![ServiceReplica {
                 name: "web-0".to_string(),
                 node: "node-1".to_string(),
@@ -281,7 +344,12 @@ mod tests {
             }]),
             data_stale: false,
         };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![service], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![],
+            services: vec![service],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("10.0.250.7"), "got: {html}");
         assert!(html.contains("web-0"), "got: {html}");
@@ -291,8 +359,18 @@ mod tests {
     fn renders_a_cert_expiry_warning_inside_the_thirty_day_threshold() {
         let mut node_status = sample_node_status();
         node_status.ingresses[0].cert_expires_at_unix = Some(1_000_000_000 + 20 * 24 * 60 * 60);
-        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let node = NodeSnapshot {
+            status: node_status,
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("expiry-warning"), "got: {html}");
     }
@@ -301,30 +379,60 @@ mod tests {
     fn does_not_render_a_cert_expiry_warning_outside_the_threshold() {
         let mut node_status = sample_node_status();
         node_status.ingresses[0].cert_expires_at_unix = Some(1_000_000_000 + 60 * 24 * 60 * 60);
-        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let node = NodeSnapshot {
+            status: node_status,
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(!html.contains("expiry-warning"), "got: {html}");
     }
 
     #[test]
     fn renders_a_stale_banner_when_the_snapshot_is_stale() {
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: true, stale_as_of_unix: Some(1_000_000_000) };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![],
+            services: vec![],
+            stale: true,
+            stale_as_of_unix: Some(1_000_000_000),
+        };
         let html = render(&snapshot, 1_000_000_500);
         assert!(html.contains("control plane unreachable"), "got: {html}");
     }
 
     #[test]
     fn does_not_render_a_stale_banner_when_the_snapshot_is_fresh() {
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(!html.contains("control plane unreachable"), "got: {html}");
     }
 
     #[test]
     fn renders_a_stale_marker_cell_for_a_stale_node() {
-        let node = NodeSnapshot { status: sample_node_status(), jails: vec![], volumes: vec![], data_stale: true };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let node = NodeSnapshot {
+            status: sample_node_status(),
+            jails: vec![],
+            volumes: vec![],
+            data_stale: true,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("<td>stale</td>"), "got: {html}");
     }
@@ -332,11 +440,21 @@ mod tests {
     #[test]
     fn renders_a_stale_marker_cell_for_a_stale_service() {
         let service = ServiceSnapshot {
-            summary: ServiceSummary { name: "web".to_string(), desired_replicas: 3, vip: "10.0.250.7".to_string(), port: 8080 },
+            summary: ServiceSummary {
+                name: "web".to_string(),
+                desired_replicas: 3,
+                vip: "10.0.250.7".to_string(),
+                port: 8080,
+            },
             detail: None,
             data_stale: true,
         };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![service], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![],
+            services: vec![service],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("<td>stale</td>"), "got: {html}");
     }
@@ -345,8 +463,18 @@ mod tests {
     fn renders_none_for_an_ingress_with_no_cert_expiry() {
         let mut node_status = sample_node_status();
         node_status.ingresses[0].cert_expires_at_unix = None;
-        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let node = NodeSnapshot {
+            status: node_status,
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("<td>none</td>"), "got: {html}");
     }
@@ -356,17 +484,35 @@ mod tests {
         let mut node_status = sample_node_status();
         node_status.id = "<script>alert(1)</script>".to_string();
         node_status.ingresses[0].host = "a & b".to_string();
-        let node = NodeSnapshot { status: node_status, jails: vec![], volumes: vec![], data_stale: false };
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![node], services: vec![], stale: false, stale_as_of_unix: None };
+        let node = NodeSnapshot {
+            status: node_status,
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(!html.contains("<script>alert(1)</script>"), "got: {html}");
-        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "got: {html}");
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "got: {html}"
+        );
         assert!(html.contains("a &amp; b"), "got: {html}");
     }
 
     #[test]
     fn renders_a_js_fetch_poll_loop_instead_of_a_meta_refresh() {
-        let snapshot = crate::snapshot::Snapshot { nodes: vec![], services: vec![], stale: false, stale_as_of_unix: None };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("fetch('/api/snapshot')"), "got: {html}");
         assert!(!html.contains("http-equiv=\"refresh\""), "got: {html}");

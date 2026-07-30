@@ -48,24 +48,31 @@ mod tests {
     fn is_mounted_is_false_until_mount_nullfs() {
         let mounts = FakeMountManager::new();
         let target = Path::new("/zroot/keel/jails/web-1/data");
-        assert_eq!(mounts.is_mounted(target).unwrap(), false);
-        mounts.mount_nullfs(Path::new("/zroot/keel/volumes/web-data"), target).unwrap();
-        assert_eq!(mounts.is_mounted(target).unwrap(), true);
+        assert!(!mounts.is_mounted(target).unwrap());
+        mounts
+            .mount_nullfs(Path::new("/zroot/keel/volumes/web-data"), target)
+            .unwrap();
+        assert!(mounts.is_mounted(target).unwrap());
     }
 
     #[test]
     fn unmount_makes_is_mounted_false() {
         let mounts = FakeMountManager::new();
         let target = Path::new("/zroot/keel/jails/web-1/data");
-        mounts.mount_nullfs(Path::new("/zroot/keel/volumes/web-data"), target).unwrap();
+        mounts
+            .mount_nullfs(Path::new("/zroot/keel/volumes/web-data"), target)
+            .unwrap();
         mounts.unmount(target).unwrap();
-        assert_eq!(mounts.is_mounted(target).unwrap(), false);
+        assert!(!mounts.is_mounted(target).unwrap());
     }
 
     #[test]
     fn unmount_on_a_never_mounted_target_returns_not_mounted() {
         let mounts = FakeMountManager::new();
         let target = Path::new("/zroot/keel/jails/web-1/data");
-        assert!(matches!(mounts.unmount(target), Err(MountError::NotMounted(_))));
+        assert!(matches!(
+            mounts.unmount(target),
+            Err(MountError::NotMounted(_))
+        ));
     }
 }

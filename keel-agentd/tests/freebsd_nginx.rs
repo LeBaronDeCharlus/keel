@@ -20,6 +20,8 @@ fn write_test_and_reload_round_trip_against_a_real_running_nginx_jail() {
 #[ignore]
 fn test_config_fails_on_a_deliberately_malformed_config() {
     let controller = JexecNginxController::new("zroot".to_string());
-    controller.write_config("keel-ingress", "this is not valid nginx config {{{").unwrap();
+    controller
+        .write_config("keel-ingress", "this is not valid nginx config {{{")
+        .unwrap();
     assert!(controller.test_config("keel-ingress").is_err());
 }

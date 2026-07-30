@@ -3,7 +3,7 @@ use std::env;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod tls;
@@ -119,17 +119,38 @@ fn resolve_target(
 fn jails_path(target: &Target, suffix: &str) -> String {
     match target {
         Target::Socket(_) => suffix.to_string(),
-        Target::ControlPlane { node: Some(node), .. } => format!("/nodes/{node}{suffix}"),
+        Target::ControlPlane {
+            node: Some(node), ..
+        } => format!("/nodes/{node}{suffix}"),
         Target::ControlPlane { node: None, .. } => suffix.to_string(),
     }
 }
 
-fn dispatch(target: &Target, method: &str, path: &str, body: &str) -> Result<(u16, String), String> {
+fn dispatch(
+    target: &Target,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<(u16, String), String> {
     match target {
         Target::Socket(socket) => send_request(socket, method, path, body),
-        Target::ControlPlane { addr, tls_ca_file, tls_cert_file, tls_key_file, tls_crl_file, .. } => {
-            send_request_tcp(addr, method, path, body, tls_ca_file, tls_cert_file, tls_key_file, tls_crl_file)
-        }
+        Target::ControlPlane {
+            addr,
+            tls_ca_file,
+            tls_cert_file,
+            tls_key_file,
+            tls_crl_file,
+            ..
+        } => send_request_tcp(
+            addr,
+            method,
+            path,
+            body,
+            tls_ca_file,
+            tls_cert_file,
+            tls_key_file,
+            tls_crl_file,
+        ),
     }
 }
 
@@ -148,12 +169,16 @@ fn success_body(result: Result<(u16, String), String>) -> Result<String, String>
 }
 
 fn run_apply(target: &Target, args: &[String]) -> Result<String, String> {
-    let index = args.iter().position(|a| a == "-f").ok_or("apply requires -f FILE")?;
+    let index = args
+        .iter()
+        .position(|a| a == "-f")
+        .ok_or("apply requires -f FILE")?;
     let file = args.get(index + 1).ok_or("apply requires -f FILE")?;
     let yaml = std::fs::read_to_string(file).map_err(|e| format!("failed to read {file}: {e}"))?;
     let kind = keel_spec::sniff_kind(&yaml).map_err(|e| format!("invalid spec: {e}"))?;
     if kind == "Service" {
-        let spec = keel_spec::parse_and_validate_service(&yaml).map_err(|e| format!("invalid spec: {e}"))?;
+        let spec = keel_spec::parse_and_validate_service(&yaml)
+            .map_err(|e| format!("invalid spec: {e}"))?;
         let path = jails_path(target, &format!("/services/{}", spec.metadata.name));
         success_body(dispatch(target, "PUT", &path, &yaml)).map(|_| String::new())
     } else if kind == "Ingress" {
@@ -161,11 +186,13 @@ fn run_apply(target: &Target, args: &[String]) -> Result<String, String> {
         // milestone's Non-Goals, `Ingress` is never routed through a
         // control plane, so the `--node`-aware path-prefixing `jails_path`
         // exists for doesn't apply here.
-        let spec = keel_spec::parse_and_validate_ingress(&yaml).map_err(|e| format!("invalid spec: {e}"))?;
+        let spec = keel_spec::parse_and_validate_ingress(&yaml)
+            .map_err(|e| format!("invalid spec: {e}"))?;
         let path = format!("/ingress/{}", spec.metadata.name);
         success_body(dispatch(target, "PUT", &path, &yaml)).map(|_| String::new())
     } else {
-        let spec = keel_spec::parse_and_validate(&yaml).map_err(|e| format!("invalid spec: {e}"))?;
+        let spec =
+            keel_spec::parse_and_validate(&yaml).map_err(|e| format!("invalid spec: {e}"))?;
         let path = jails_path(target, &format!("/jails/{}", spec.metadata.name));
         success_body(dispatch(target, "PUT", &path, &yaml)).map(|_| String::new())
     }
@@ -206,7 +233,11 @@ fn run_force_repin(target: &Target, args: &[String]) -> Result<String, String> {
 /// and the only one available at all against a plain single-node
 /// `keel-agentd` predating `Service`/`Ingress` support, which has neither a
 /// `/services` nor an `/ingress` route.
-fn get_or_delete_with_service_fallback(target: &Target, method: &str, name: &str) -> Result<String, String> {
+fn get_or_delete_with_service_fallback(
+    target: &Target,
+    method: &str,
+    name: &str,
+) -> Result<String, String> {
     let jail_path = jails_path(target, &format!("/jails/{name}"));
     let (status, body) = dispatch(target, method, &jail_path, "")?;
     if status != 404 {
@@ -226,16 +257,27 @@ fn get_or_delete_with_service_fallback(target: &Target, method: &str, name: &str
     }
 }
 
-fn send_request(socket: &PathBuf, method: &str, path: &str, body: &str) -> Result<(u16, String), String> {
+fn send_request(
+    socket: &PathBuf,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<(u16, String), String> {
     let mut stream = UnixStream::connect(socket)
         .map_err(|e| format!("failed to connect to {}: {e}", socket.display()))?;
-    let request =
-        format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-    stream.write_all(request.as_bytes()).map_err(|e| format!("failed to send request: {e}"))?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("failed to send request: {e}"))?;
     stream.shutdown(std::net::Shutdown::Write).ok();
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).map_err(|e| format!("failed to read response: {e}"))?;
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| format!("failed to read response: {e}"))?;
     parse_response(&response)
 }
 
@@ -246,22 +288,29 @@ fn send_request_tcp(
     method: &str,
     path: &str,
     body: &str,
-    tls_ca_file: &PathBuf,
-    tls_cert_file: &PathBuf,
-    tls_key_file: &PathBuf,
-    tls_crl_file: &PathBuf,
+    tls_ca_file: &Path,
+    tls_cert_file: &Path,
+    tls_key_file: &Path,
+    tls_crl_file: &Path,
 ) -> Result<(u16, String), String> {
     let client_config = std::sync::Arc::new(
         tls::load_client_config(tls_cert_file, tls_key_file, tls_ca_file, tls_crl_file)
             .map_err(|e| format!("failed to load TLS client config: {e}"))?,
     );
     let server_name = tls::server_name_from_addr(addr).map_err(|e| e.to_string())?;
-    let tcp_stream = TcpStream::connect(addr).map_err(|e| format!("failed to connect to {addr}: {e}"))?;
-    let conn = rustls::ClientConnection::new(client_config, server_name).map_err(|e| e.to_string())?;
+    let tcp_stream =
+        TcpStream::connect(addr).map_err(|e| format!("failed to connect to {addr}: {e}"))?;
+    let conn =
+        rustls::ClientConnection::new(client_config, server_name).map_err(|e| e.to_string())?;
     let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
 
-    let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-    stream.write_all(request.as_bytes()).map_err(|e| format!("failed to send request: {e}"))?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("failed to send request: {e}"))?;
     stream.sock.shutdown(std::net::Shutdown::Write).ok();
 
     // Read until the peer closes the connection. rustls surfaces a plain TCP
@@ -290,7 +339,10 @@ fn send_request_tcp(
 fn parse_response(response: &[u8]) -> Result<(u16, String), String> {
     let mut headers = [httparse::EMPTY_HEADER; 16];
     let mut parsed = httparse::Response::new(&mut headers);
-    let header_len = match parsed.parse(response).map_err(|e| format!("malformed response: {e}"))? {
+    let header_len = match parsed
+        .parse(response)
+        .map_err(|e| format!("malformed response: {e}"))?
+    {
         httparse::Status::Complete(len) => len,
         httparse::Status::Partial => return Err("incomplete response from server".to_string()),
     };
@@ -304,7 +356,9 @@ fn parse_response(response: &[u8]) -> Result<(u16, String), String> {
         .ok_or_else(|| "response missing Content-Length header".to_string())?;
     let actual = response.len() - header_len;
     if actual != content_length {
-        return Err(format!("truncated response: expected {content_length} bytes, got {actual}"));
+        return Err(format!(
+            "truncated response: expected {content_length} bytes, got {actual}"
+        ));
     }
     let response_body = String::from_utf8_lossy(&response[header_len..]).to_string();
     Ok((status, response_body))
@@ -341,17 +395,20 @@ mod tests {
             keel_agentd::ServiceVipSlot::new(),
         )
         .unwrap();
-        let (_worker_handle, commands) = keel_agentd::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
+        let (_worker_handle, commands) =
+            keel_agentd::worker::spawn(reconciler, zfs, "zroot".to_string(), None);
 
         let service_vips = keel_agentd::ServiceVipSlot::new();
         let proxy_entries: Vec<_> = known_services
             .iter()
-            .map(|(n, vip, port)| keel_controlplane::wire::ServiceProxyEntry {
-                name: n.to_string(),
-                vip: vip.to_string(),
-                port: *port,
-                replicas: vec![],
-            })
+            .map(
+                |(n, vip, port)| keel_controlplane::wire::ServiceProxyEntry {
+                    name: n.to_string(),
+                    vip: vip.to_string(),
+                    port: *port,
+                    replicas: vec![],
+                },
+            )
             .collect();
         service_vips.set_all(&proxy_entries);
 
@@ -360,11 +417,18 @@ mod tests {
         // constraint `keelctl/tests/cli.rs`'s helper works around.
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let socket_path = std::env::temp_dir().join(format!("kam-{}-{}.sock", std::process::id(), id));
+        let socket_path =
+            std::env::temp_dir().join(format!("kam-{}-{}.sock", std::process::id(), id));
         let _ = std::fs::remove_file(&socket_path);
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         std::thread::spawn(move || {
-            keel_agentd::http::run(listener, commands, keel_agentd::PodCidrSlot::new(), service_vips, replica_targets)
+            keel_agentd::http::run(
+                listener,
+                commands,
+                keel_agentd::PodCidrSlot::new(),
+                service_vips,
+                replica_targets,
+            )
         });
         socket_path
     }
@@ -385,9 +449,16 @@ mod tests {
         // handler's "does not name a currently-known Service" 400 -- NOT
         // with a JailSpec YAML-parse error, which is what falling into the
         // Jail else-branch would produce instead.
-        let result = run_apply(&target, &["-f".to_string(), path.to_string_lossy().to_string()]);
-        let err = result.expect_err("expected the ingress backend-service validation to reject this spec");
-        assert!(err.contains("hugo-site"), "expected the Service-not-found message, got: {err}");
+        let result = run_apply(
+            &target,
+            &["-f".to_string(), path.to_string_lossy().to_string()],
+        );
+        let err = result
+            .expect_err("expected the ingress backend-service validation to reject this spec");
+        assert!(
+            err.contains("hugo-site"),
+            "expected the Service-not-found message, got: {err}"
+        );
     }
 
     #[test]
@@ -409,28 +480,51 @@ mod tests {
             "apiVersion: keel/v1\nkind: Ingress\nmetadata:\n  name: blog\nspec:\n  host: example.com\n  backend:\n    service: hugo-site\n    port: 8080\n  tls:\n    email: admin@example.com\n",
         )
         .unwrap();
-        run_apply(&target, &["-f".to_string(), path.to_string_lossy().to_string()])
-            .expect("apply of a valid Ingress spec against a known Service should succeed");
+        run_apply(
+            &target,
+            &["-f".to_string(), path.to_string_lossy().to_string()],
+        )
+        .expect("apply of a valid Ingress spec against a known Service should succeed");
 
         // 'blog' is neither a jail nor a service name, so this only
         // succeeds if the third fallback leg (bare /ingress/blog) is
         // reached and returns the applied Ingress.
-        let get_result = run_get(&target, &["blog".to_string()]).expect("get should fall back to /ingress/blog");
-        assert!(get_result.contains("host: example.com"), "got: {get_result}");
+        let get_result =
+            run_get(&target, &["blog".to_string()]).expect("get should fall back to /ingress/blog");
+        assert!(
+            get_result.contains("host: example.com"),
+            "got: {get_result}"
+        );
 
-        run_delete(&target, &["blog".to_string()]).expect("delete should fall back to /ingress/blog");
+        run_delete(&target, &["blog".to_string()])
+            .expect("delete should fall back to /ingress/blog");
 
         // After delete, all three routes 404; the surfaced error must be
         // the original jail-not-found message (the documented behavior when
         // all fallback legs are exhausted).
         let err_after_delete = run_get(&target, &["blog".to_string()]).unwrap_err();
-        assert!(err_after_delete.contains("not found"), "got: {err_after_delete}");
+        assert!(
+            err_after_delete.contains("not found"),
+            "got: {err_after_delete}"
+        );
     }
 
     #[test]
     fn no_control_plane_flags_yields_socket_target() {
-        let target = resolve_target(PathBuf::from("/var/run/keel-agentd.sock"), None, None, None, None, None, None).unwrap();
-        assert_eq!(target, Target::Socket(PathBuf::from("/var/run/keel-agentd.sock")));
+        let target = resolve_target(
+            PathBuf::from("/var/run/keel-agentd.sock"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            target,
+            Target::Socket(PathBuf::from("/var/run/keel-agentd.sock"))
+        );
     }
 
     #[test]
@@ -493,8 +587,15 @@ mod tests {
 
     #[test]
     fn extract_flag_finds_and_removes_a_flag_and_its_value() {
-        let mut args = vec!["get".to_string(), "--node".to_string(), "node-1".to_string()];
-        assert_eq!(extract_flag(&mut args, "--node"), Some("node-1".to_string()));
+        let mut args = vec![
+            "get".to_string(),
+            "--node".to_string(),
+            "node-1".to_string(),
+        ];
+        assert_eq!(
+            extract_flag(&mut args, "--node"),
+            Some("node-1".to_string())
+        );
         assert_eq!(args, vec!["get".to_string()]);
     }
 

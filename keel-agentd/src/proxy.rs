@@ -56,16 +56,32 @@ fn replica_socket_addrs(entry: &ServiceProxyEntry) -> Vec<SocketAddr> {
 /// second, independently-owned `NetManager`, mirroring how
 /// `reconcile_routes` already reaches the reconciler's `NetManager` for
 /// pod_cidr routes.
-pub fn reconcile_services(desired: &[ServiceProxyEntry], proxied: &mut HashMap<String, ProxiedService>, commands: &Sender<worker::Command>) {
-    let desired_names: std::collections::HashSet<&str> = desired.iter().map(|e| e.name.as_str()).collect();
+pub fn reconcile_services(
+    desired: &[ServiceProxyEntry],
+    proxied: &mut HashMap<String, ProxiedService>,
+    commands: &Sender<worker::Command>,
+) {
+    let desired_names: std::collections::HashSet<&str> =
+        desired.iter().map(|e| e.name.as_str()).collect();
 
-    let gone: Vec<String> = proxied.keys().filter(|name| !desired_names.contains(name.as_str())).cloned().collect();
+    let gone: Vec<String> = proxied
+        .keys()
+        .filter(|name| !desired_names.contains(name.as_str()))
+        .cloned()
+        .collect();
     for name in gone {
         if let Some(service) = proxied.remove(&name) {
             service.stop.store(true, Ordering::Relaxed);
             let _ = service.listener_thread.join();
             let (tx, rx) = std::sync::mpsc::channel();
-            if commands.send(worker::Command::RemoveServiceAlias(service.bridge.clone(), service.vip.clone(), tx)).is_ok() {
+            if commands
+                .send(worker::Command::RemoveServiceAlias(
+                    service.bridge.clone(),
+                    service.vip.clone(),
+                    tx,
+                ))
+                .is_ok()
+            {
                 let _ = rx.recv();
             }
         }
@@ -79,7 +95,14 @@ pub fn reconcile_services(desired: &[ServiceProxyEntry], proxied: &mut HashMap<S
             }
             None => {
                 let (tx, rx) = std::sync::mpsc::channel();
-                if commands.send(worker::Command::AddServiceAlias(PROXY_BRIDGE.to_string(), entry.vip.clone(), tx)).is_ok() {
+                if commands
+                    .send(worker::Command::AddServiceAlias(
+                        PROXY_BRIDGE.to_string(),
+                        entry.vip.clone(),
+                        tx,
+                    ))
+                    .is_ok()
+                {
                     if let Ok(Err(e)) = rx.recv() {
                         eprintln!("keel-agentd: failed to alias VIP {} on {PROXY_BRIDGE} for service '{}': {e}", entry.vip, entry.name);
                         continue;
@@ -93,7 +116,9 @@ pub fn reconcile_services(desired: &[ServiceProxyEntry], proxied: &mut HashMap<S
                         continue;
                     }
                 };
-                listener.set_nonblocking(true).expect("set_nonblocking never fails on a freshly bound listener");
+                listener
+                    .set_nonblocking(true)
+                    .expect("set_nonblocking never fails on a freshly bound listener");
 
                 let replicas = Arc::new(Mutex::new(addrs));
                 let stop = Arc::new(AtomicBool::new(false));
@@ -102,18 +127,31 @@ pub fn reconcile_services(desired: &[ServiceProxyEntry], proxied: &mut HashMap<S
                 let thread_replicas = Arc::clone(&replicas);
                 let thread_stop = Arc::clone(&stop);
                 let thread_counter = Arc::clone(&counter);
-                let listener_thread = thread::spawn(move || accept_loop(listener, thread_replicas, thread_counter, thread_stop));
+                let listener_thread = thread::spawn(move || {
+                    accept_loop(listener, thread_replicas, thread_counter, thread_stop)
+                });
 
                 proxied.insert(
                     entry.name.clone(),
-                    ProxiedService { replicas, stop, listener_thread, bridge: PROXY_BRIDGE.to_string(), vip: entry.vip.clone() },
+                    ProxiedService {
+                        replicas,
+                        stop,
+                        listener_thread,
+                        bridge: PROXY_BRIDGE.to_string(),
+                        vip: entry.vip.clone(),
+                    },
                 );
             }
         }
     }
 }
 
-fn accept_loop(listener: TcpListener, replicas: Arc<Mutex<Vec<SocketAddr>>>, counter: Arc<AtomicUsize>, stop: Arc<AtomicBool>) {
+fn accept_loop(
+    listener: TcpListener,
+    replicas: Arc<Mutex<Vec<SocketAddr>>>,
+    counter: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+) {
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -121,13 +159,19 @@ fn accept_loop(listener: TcpListener, replicas: Arc<Mutex<Vec<SocketAddr>>>, cou
                 let counter = Arc::clone(&counter);
                 thread::spawn(move || handle_connection(stream, &replicas, &counter));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(ACCEPT_POLL_INTERVAL),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(ACCEPT_POLL_INTERVAL)
+            }
             Err(_) => thread::sleep(ACCEPT_POLL_INTERVAL),
         }
     }
 }
 
-fn handle_connection(mut incoming: TcpStream, replicas: &Arc<Mutex<Vec<SocketAddr>>>, counter: &Arc<AtomicUsize>) {
+fn handle_connection(
+    mut incoming: TcpStream,
+    replicas: &Arc<Mutex<Vec<SocketAddr>>>,
+    counter: &Arc<AtomicUsize>,
+) {
     let snapshot = replicas.lock().unwrap().clone();
     if snapshot.is_empty() {
         return; // dropping `incoming` closes the connection with no reply.
@@ -136,9 +180,15 @@ fn handle_connection(mut incoming: TcpStream, replicas: &Arc<Mutex<Vec<SocketAdd
     let attempts = 2.min(snapshot.len());
     for attempt in 0..attempts {
         let target = snapshot[(start + attempt) % snapshot.len()];
-        let Ok(mut outgoing) = TcpStream::connect_timeout(&target, RELAY_CONNECT_TIMEOUT) else { continue };
-        let Ok(mut incoming_clone) = incoming.try_clone() else { return };
-        let Ok(mut outgoing_clone) = outgoing.try_clone() else { return };
+        let Ok(mut outgoing) = TcpStream::connect_timeout(&target, RELAY_CONNECT_TIMEOUT) else {
+            continue;
+        };
+        let Ok(mut incoming_clone) = incoming.try_clone() else {
+            return;
+        };
+        let Ok(mut outgoing_clone) = outgoing.try_clone() else {
+            return;
+        };
         let to_replica = thread::spawn(move || {
             let _ = std::io::copy(&mut incoming_clone, &mut outgoing_clone);
         });
@@ -161,7 +211,9 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    fn test_reconciler(name: &str) -> crate::Reconciler<FakeJailRuntime, FakeZfsManager, FakeNetManager, FakeMountManager> {
+    fn test_reconciler(
+        name: &str,
+    ) -> crate::Reconciler<FakeJailRuntime, FakeZfsManager, FakeNetManager, FakeMountManager> {
         crate::Reconciler::new(
             FakeJailRuntime::new(),
             FakeZfsManager::new(),
@@ -178,7 +230,13 @@ mod tests {
     }
 
     fn spawn_test_worker(name: &str) -> mpsc::Sender<worker::Command> {
-        worker::spawn(test_reconciler(name), FakeZfsManager::new(), "zroot".to_string(), None).1
+        worker::spawn(
+            test_reconciler(name),
+            FakeZfsManager::new(),
+            "zroot".to_string(),
+            None,
+        )
+        .1
     }
 
     // Binds a plain TCP listener standing in for a replica, echoing
@@ -238,7 +296,8 @@ mod tests {
 
     #[test]
     fn a_new_service_gets_aliased_and_relays_a_connection_to_its_replica() {
-        let commands = spawn_test_worker("a_new_service_gets_aliased_and_relays_a_connection_to_its_replica");
+        let commands =
+            spawn_test_worker("a_new_service_gets_aliased_and_relays_a_connection_to_its_replica");
         let mut proxied = std::collections::HashMap::new();
 
         // The proxy binds its OWN listener on <vip>:<port>, and every
@@ -256,7 +315,11 @@ mod tests {
             name: "web".to_string(),
             vip: "127.0.0.1".to_string(),
             port: vip_port,
-            replicas: vec![ServiceReplica { name: "web-0".to_string(), node: "node-1".to_string(), address: bracketed(replica_addr) }],
+            replicas: vec![ServiceReplica {
+                name: "web-0".to_string(),
+                node: "node-1".to_string(),
+                address: bracketed(replica_addr),
+            }],
         };
 
         reconcile_services(&[entry], &mut proxied, &commands);
@@ -265,7 +328,8 @@ mod tests {
         // Give the accept-loop thread a moment to actually bind and start polling.
         std::thread::sleep(Duration::from_millis(100));
 
-        let mut client = TcpStream::connect(("127.0.0.1", vip_port)).expect("expected the proxy's listener to be bound");
+        let mut client = TcpStream::connect(("127.0.0.1", vip_port))
+            .expect("expected the proxy's listener to be bound");
         client.write_all(b"ping").unwrap();
         let mut buf = [0u8; 4];
         client.read_exact(&mut buf).unwrap();
@@ -360,7 +424,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         let buf = client_thread.join().unwrap();
-        assert_eq!(&buf, b"ping", "expected failover to the live second replica to still succeed");
+        assert_eq!(
+            &buf, b"ping",
+            "expected failover to the live second replica to still succeed"
+        );
         assert!(
             elapsed < Duration::from_secs(5),
             "expected RELAY_CONNECT_TIMEOUT to bound the black-holed first attempt well under the OS's ~75s default connect timeout, took {elapsed:?}"
@@ -369,14 +436,20 @@ mod tests {
 
     #[test]
     fn a_service_with_no_replicas_refuses_the_connection_immediately() {
-        let commands = spawn_test_worker("a_service_with_no_replicas_refuses_the_connection_immediately");
+        let commands =
+            spawn_test_worker("a_service_with_no_replicas_refuses_the_connection_immediately");
         let mut proxied = std::collections::HashMap::new();
 
         let probe = TcpListener::bind("127.0.0.1:0").unwrap();
         let vip_port = probe.local_addr().unwrap().port();
         drop(probe);
 
-        let entry = ServiceProxyEntry { name: "web".to_string(), vip: "127.0.0.1".to_string(), port: vip_port, replicas: vec![] };
+        let entry = ServiceProxyEntry {
+            name: "web".to_string(),
+            vip: "127.0.0.1".to_string(),
+            port: vip_port,
+            replicas: vec![],
+        };
         reconcile_services(&[entry], &mut proxied, &commands);
         std::thread::sleep(Duration::from_millis(100));
 
@@ -386,7 +459,10 @@ mod tests {
         // No replica to relay to -> the connection is dropped without ever
         // echoing anything back.
         let result = client.read_exact(&mut buf);
-        assert!(result.is_err(), "expected the connection to be closed without a reply, got: {result:?}");
+        assert!(
+            result.is_err(),
+            "expected the connection to be closed without a reply, got: {result:?}"
+        );
     }
 
     #[test]
@@ -404,7 +480,11 @@ mod tests {
             name: "web".to_string(),
             vip: "127.0.0.1".to_string(),
             port: vip_port,
-            replicas: vec![ServiceReplica { name: "web-0".to_string(), node: "node-1".to_string(), address: bracketed(replica_addr) }],
+            replicas: vec![ServiceReplica {
+                name: "web-0".to_string(),
+                node: "node-1".to_string(),
+                address: bracketed(replica_addr),
+            }],
         };
         reconcile_services(&[entry], &mut proxied, &commands);
         std::thread::sleep(Duration::from_millis(100));

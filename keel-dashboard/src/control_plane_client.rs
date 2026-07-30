@@ -30,17 +30,26 @@ pub struct TlsControlPlaneClient {
 
 impl TlsControlPlaneClient {
     pub fn new(addr: String, client_config: Arc<rustls::ClientConfig>) -> Self {
-        Self { addr, client_config }
+        Self {
+            addr,
+            client_config,
+        }
     }
 
     fn request(&self, method: &str, path: &str) -> Result<(u16, String), String> {
-        let server_name = crate::tls::server_name_from_addr(&self.addr).map_err(|e| e.to_string())?;
-        let tcp_stream = TcpStream::connect(&self.addr).map_err(|e| format!("failed to connect to {}: {e}", self.addr))?;
-        let conn = rustls::ClientConnection::new(Arc::clone(&self.client_config), server_name).map_err(|e| e.to_string())?;
+        let server_name =
+            crate::tls::server_name_from_addr(&self.addr).map_err(|e| e.to_string())?;
+        let tcp_stream = TcpStream::connect(&self.addr)
+            .map_err(|e| format!("failed to connect to {}: {e}", self.addr))?;
+        let conn = rustls::ClientConnection::new(Arc::clone(&self.client_config), server_name)
+            .map_err(|e| e.to_string())?;
         let mut stream = rustls::StreamOwned::new(conn, tcp_stream);
 
-        let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
-        stream.write_all(request.as_bytes()).map_err(|e| format!("failed to send request: {e}"))?;
+        let request =
+            format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| format!("failed to send request: {e}"))?;
         stream.sock.shutdown(std::net::Shutdown::Write).ok();
 
         let mut response = Vec::new();
@@ -68,7 +77,10 @@ impl TlsControlPlaneClient {
 fn parse_response(response: &[u8]) -> Result<(u16, String), String> {
     let mut headers = [httparse::EMPTY_HEADER; 16];
     let mut parsed = httparse::Response::new(&mut headers);
-    let header_len = match parsed.parse(response).map_err(|e| format!("malformed response: {e}"))? {
+    let header_len = match parsed
+        .parse(response)
+        .map_err(|e| format!("malformed response: {e}"))?
+    {
         httparse::Status::Complete(len) => len,
         httparse::Status::Partial => return Err("incomplete response from server".to_string()),
     };
@@ -82,9 +94,14 @@ fn parse_response(response: &[u8]) -> Result<(u16, String), String> {
         .ok_or_else(|| "response missing Content-Length header".to_string())?;
     let actual = response.len() - header_len;
     if actual != content_length {
-        return Err(format!("truncated response: expected {content_length} bytes, got {actual}"));
+        return Err(format!(
+            "truncated response: expected {content_length} bytes, got {actual}"
+        ));
     }
-    Ok((status, String::from_utf8_lossy(&response[header_len..]).to_string()))
+    Ok((
+        status,
+        String::from_utf8_lossy(&response[header_len..]).to_string(),
+    ))
 }
 
 impl ControlPlaneClient for TlsControlPlaneClient {
@@ -140,19 +157,31 @@ impl FakeControlPlaneClient {
     }
 
     pub fn set_jails(&self, node_id: &str, jails: Vec<JailStatus>) {
-        self.jails.lock().unwrap().insert(node_id.to_string(), jails);
+        self.jails
+            .lock()
+            .unwrap()
+            .insert(node_id.to_string(), jails);
     }
 
     pub fn fail_jails(&self, node_id: &str) {
-        self.failing_jail_nodes.lock().unwrap().insert(node_id.to_string());
+        self.failing_jail_nodes
+            .lock()
+            .unwrap()
+            .insert(node_id.to_string());
     }
 
     pub fn set_volumes(&self, node_id: &str, volumes: Vec<VolumeStatus>) {
-        self.volumes.lock().unwrap().insert(node_id.to_string(), volumes);
+        self.volumes
+            .lock()
+            .unwrap()
+            .insert(node_id.to_string(), volumes);
     }
 
     pub fn fail_volumes(&self, node_id: &str) {
-        self.failing_volume_nodes.lock().unwrap().insert(node_id.to_string());
+        self.failing_volume_nodes
+            .lock()
+            .unwrap()
+            .insert(node_id.to_string());
     }
 
     pub fn set_services(&self, services: Vec<ServiceSummary>) {
@@ -164,11 +193,17 @@ impl FakeControlPlaneClient {
     }
 
     pub fn set_service(&self, name: &str, replicas: Vec<ServiceReplica>) {
-        self.service_details.lock().unwrap().insert(name.to_string(), replicas);
+        self.service_details
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), replicas);
     }
 
     pub fn fail_service(&self, name: &str) {
-        self.failing_services.lock().unwrap().insert(name.to_string());
+        self.failing_services
+            .lock()
+            .unwrap()
+            .insert(name.to_string());
     }
 }
 
@@ -184,14 +219,28 @@ impl ControlPlaneClient for FakeControlPlaneClient {
         if self.failing_jail_nodes.lock().unwrap().contains(node_id) {
             return Err(format!("simulated failure fetching jails for '{node_id}'"));
         }
-        Ok(self.jails.lock().unwrap().get(node_id).cloned().unwrap_or_default())
+        Ok(self
+            .jails
+            .lock()
+            .unwrap()
+            .get(node_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn fetch_volumes(&self, node_id: &str) -> Result<Vec<VolumeStatus>, String> {
         if self.failing_volume_nodes.lock().unwrap().contains(node_id) {
-            return Err(format!("simulated failure fetching volumes for '{node_id}'"));
+            return Err(format!(
+                "simulated failure fetching volumes for '{node_id}'"
+            ));
         }
-        Ok(self.volumes.lock().unwrap().get(node_id).cloned().unwrap_or_default())
+        Ok(self
+            .volumes
+            .lock()
+            .unwrap()
+            .get(node_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn fetch_services(&self) -> Result<Vec<ServiceSummary>, String> {
@@ -205,7 +254,12 @@ impl ControlPlaneClient for FakeControlPlaneClient {
         if self.failing_services.lock().unwrap().contains(name) {
             return Err(format!("simulated failure fetching service '{name}'"));
         }
-        self.service_details.lock().unwrap().get(name).cloned().ok_or_else(|| format!("no such service '{name}'"))
+        self.service_details
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("no such service '{name}'"))
     }
 }
 
