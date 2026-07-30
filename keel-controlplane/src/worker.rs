@@ -180,6 +180,7 @@ pub enum Command {
     PendingFencesForNode(String, Sender<Vec<String>>),
     RemovePendingFence(String, Sender<()>),
     PrepareForceRepin(String, Sender<Result<ForceRepinPrep, ForceRepinError>>),
+    PrepareDrainRepin(String, Sender<Result<ForceRepinPrep, ForceRepinError>>),
     Cordon(String, Sender<Result<(), UnknownNode>>),
     Uncordon(String, Sender<Result<(), UnknownNode>>),
 }
@@ -647,102 +648,29 @@ fn handle_command(
             let _ = reply.send(());
         }
         Command::PrepareForceRepin(replica_name, reply) => {
-            let now = Instant::now();
-            let result = (|| {
-                let old_node_id = placements
-                    .get(&replica_name)
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| ForceRepinError::NotPlaced(replica_name.clone()))?;
-                // Checked before the primary-aliveness check below: a
-                // non-stateful replica (no recorded standby at all) must
-                // report NotStateful regardless of whether its sole node
-                // happens to be Alive or Dead, rather than reporting
-                // PrimaryStillAlive first and never surfacing NotStateful for
-                // an Alive-but-stateless replica.
-                let standby_node_id = standbys
-                    .get(&replica_name)
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
-                if registry.resolve(&old_node_id, now).is_ok() {
-                    return Err(ForceRepinError::PrimaryStillAlive(old_node_id));
-                }
-                // No aliveness check here on purpose (see last_known_addr's
-                // own doc comment): the whole point of the immediate fencing
-                // push is attempting to reach a node the check just above
-                // called Dead, in case it's actually alive and only failing
-                // to heartbeat to the control plane specifically.
-                let old_node_last_known_addr = registry.last_known_addr(&old_node_id);
-                // Deliberately Registry::resolve(), not replicate_addr(): this
-                // is the address the control plane forwards the readiness
-                // GET and the provisioning PUT to (this node's normal HTTP
-                // API), not a replication target embedded in a spec. Do not
-                // "fix" this to replicate_addr() by symmetry with
-                // fresh_standby_addr below -- they serve different purposes.
-                let standby_addr = registry
-                    .resolve(&standby_node_id, now)
-                    .map_err(ForceRepinError::StandbyUnresolvable)?;
-
-                let service_name = services::owner_of(&replica_name, placements, services)
-                    .and_then(|owner| match owner {
-                        Owner::Service(name) => Some(name),
-                        Owner::Unmanaged => None,
-                    })
-                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
-                let template = services
-                    .get(&service_name)
-                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?
-                    .template
-                    .clone();
-
-                let alive_nodes: Vec<scheduler::NodeResources> = registry
-                    .list(now)
-                    .into_iter()
-                    .filter(|s| is_schedulable(s, cordoned))
-                    .map(|s| scheduler::NodeResources {
-                        id: s.id,
-                        capacity_cpu: s.capacity_cpu,
-                        capacity_memory: s.capacity_memory,
-                        committed_cpu: s.committed_cpu,
-                        committed_memory: s.committed_memory,
-                    })
-                    .collect();
-                let mut exclude = std::collections::HashSet::new();
-                exclude.insert(old_node_id.clone());
-                exclude.insert(standby_node_id.clone());
-                let fresh_standby_node_id = services::pick_node_for_service(alive_nodes, &exclude)
-                    .ok()
-                    .filter(|id| !exclude.contains(id))
-                    .ok_or(ForceRepinError::NoFreshStandby)?;
-                // replicate_addr(), not resolve(): this value is embedded
-                // into the promoted primary's spec.spec.replicate_to, telling
-                // its replication loop where to connect -- it must be the
-                // fresh standby's replication-listener address (Task 8b),
-                // not its main HTTP address.
-                let fresh_standby_addr = registry
-                    .replicate_addr(&fresh_standby_node_id)
-                    .ok_or(ForceRepinError::NoFreshStandby)?;
-
-                let pod_cidr = registry
-                    .pod_cidr(&standby_node_id)
-                    .ok_or(ForceRepinError::NoFreeAddress)?;
-                let address =
-                    addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses)
-                        .ok_or(ForceRepinError::NoFreeAddress)?;
-                let next_generation = placements.generation(&replica_name) + 1;
-
-                Ok(ForceRepinPrep {
-                    old_node_id,
-                    old_node_last_known_addr,
-                    standby_node_id,
-                    standby_addr,
-                    template,
-                    fresh_standby_node_id,
-                    fresh_standby_addr,
-                    address,
-                    prefix_len: pod_cidr.prefix_len(),
-                    next_generation,
-                })
-            })();
+            let result = prepare_repin(
+                &replica_name,
+                false,
+                registry,
+                placements,
+                standbys,
+                services,
+                used_addresses,
+                cordoned,
+            );
+            let _ = reply.send(result);
+        }
+        Command::PrepareDrainRepin(replica_name, reply) => {
+            let result = prepare_repin(
+                &replica_name,
+                true,
+                registry,
+                placements,
+                standbys,
+                services,
+                used_addresses,
+                cordoned,
+            );
             let _ = reply.send(result);
         }
         Command::Cordon(node_id, reply) => {
@@ -766,6 +694,117 @@ fn handle_command(
             let _ = reply.send(result);
         }
     }
+}
+
+/// Shared by `PrepareForceRepin` and `PrepareDrainRepin`: computes everything
+/// needed to promote a stateful replica's standby and re-place its primary
+/// elsewhere. The two differ only in whether a still-`Alive` primary is
+/// tolerated -- `allow_alive_primary` is the split-brain guard from
+/// `PrepareForceRepin`, kept for the ordinary (non-drain) path, and bypassed
+/// for `drain` since drain fences the old primary synchronously as part of
+/// the same operation (Task 6) rather than leaving it running independently.
+#[allow(clippy::too_many_arguments)]
+fn prepare_repin(
+    replica_name: &str,
+    allow_alive_primary: bool,
+    registry: &Registry,
+    placements: &Placements,
+    standbys: &Standbys,
+    services: &Services,
+    used_addresses: &UsedAddresses,
+    cordoned: &Cordoned,
+) -> Result<ForceRepinPrep, ForceRepinError> {
+    let now = Instant::now();
+    let old_node_id = placements
+        .get(replica_name)
+        .map(|s| s.to_string())
+        .ok_or_else(|| ForceRepinError::NotPlaced(replica_name.to_string()))?;
+    // Checked before the primary-aliveness check below: a non-stateful
+    // replica (no recorded standby at all) must report NotStateful
+    // regardless of whether its sole node happens to be Alive or Dead,
+    // rather than reporting PrimaryStillAlive first and never surfacing
+    // NotStateful for an Alive-but-stateless replica.
+    let standby_node_id = standbys
+        .get(replica_name)
+        .map(|s| s.to_string())
+        .ok_or_else(|| ForceRepinError::NotStateful(replica_name.to_string()))?;
+    if !allow_alive_primary && registry.resolve(&old_node_id, now).is_ok() {
+        return Err(ForceRepinError::PrimaryStillAlive(old_node_id));
+    }
+    // No aliveness check here on purpose (see last_known_addr's own doc
+    // comment): the whole point of the immediate fencing push is attempting
+    // to reach a node the check just above called Dead, in case it's
+    // actually alive and only failing to heartbeat to the control plane
+    // specifically.
+    let old_node_last_known_addr = registry.last_known_addr(&old_node_id);
+    // Deliberately Registry::resolve(), not replicate_addr(): this is the
+    // address the control plane forwards the readiness GET and the
+    // provisioning PUT to (this node's normal HTTP API), not a replication
+    // target embedded in a spec. Do not "fix" this to replicate_addr() by
+    // symmetry with fresh_standby_addr below -- they serve different
+    // purposes.
+    let standby_addr = registry
+        .resolve(&standby_node_id, now)
+        .map_err(ForceRepinError::StandbyUnresolvable)?;
+
+    let service_name = services::owner_of(replica_name, placements, services)
+        .and_then(|owner| match owner {
+            Owner::Service(name) => Some(name),
+            Owner::Unmanaged => None,
+        })
+        .ok_or_else(|| ForceRepinError::NotStateful(replica_name.to_string()))?;
+    let template = services
+        .get(&service_name)
+        .ok_or_else(|| ForceRepinError::NotStateful(replica_name.to_string()))?
+        .template
+        .clone();
+
+    let alive_nodes: Vec<scheduler::NodeResources> = registry
+        .list(now)
+        .into_iter()
+        .filter(|s| is_schedulable(s, cordoned))
+        .map(|s| scheduler::NodeResources {
+            id: s.id,
+            capacity_cpu: s.capacity_cpu,
+            capacity_memory: s.capacity_memory,
+            committed_cpu: s.committed_cpu,
+            committed_memory: s.committed_memory,
+        })
+        .collect();
+    let mut exclude = std::collections::HashSet::new();
+    exclude.insert(old_node_id.clone());
+    exclude.insert(standby_node_id.clone());
+    let fresh_standby_node_id = services::pick_node_for_service(alive_nodes, &exclude)
+        .ok()
+        .filter(|id| !exclude.contains(id))
+        .ok_or(ForceRepinError::NoFreshStandby)?;
+    // replicate_addr(), not resolve(): this value is embedded into the
+    // promoted primary's spec.spec.replicate_to, telling its replication
+    // loop where to connect -- it must be the fresh standby's
+    // replication-listener address (Task 8b), not its main HTTP address.
+    let fresh_standby_addr = registry
+        .replicate_addr(&fresh_standby_node_id)
+        .ok_or(ForceRepinError::NoFreshStandby)?;
+
+    let pod_cidr = registry
+        .pod_cidr(&standby_node_id)
+        .ok_or(ForceRepinError::NoFreeAddress)?;
+    let address = addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses)
+        .ok_or(ForceRepinError::NoFreeAddress)?;
+    let next_generation = placements.generation(replica_name) + 1;
+
+    Ok(ForceRepinPrep {
+        old_node_id,
+        old_node_last_known_addr,
+        standby_node_id,
+        standby_addr,
+        template,
+        fresh_standby_node_id,
+        fresh_standby_addr,
+        address,
+        prefix_len: pod_cidr.prefix_len(),
+        next_generation,
+    })
 }
 
 /// The exact health filter `GET /services/<name>` (`Command::DiscoverService`)
@@ -2803,6 +2842,17 @@ mod tests {
         rx.recv().unwrap()
     }
 
+    fn prepare_drain_repin(
+        commands: &Sender<Command>,
+        replica_name: &str,
+    ) -> Result<ForceRepinPrep, ForceRepinError> {
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::PrepareDrainRepin(replica_name.to_string(), tx))
+            .unwrap();
+        rx.recv().unwrap()
+    }
+
     #[test]
     fn prepare_force_repin_on_an_unplaced_name_returns_not_placed() {
         let commands = spawn(
@@ -2875,6 +2925,105 @@ mod tests {
         assert_eq!(
             prepare_force_repin(&commands, "db-0"),
             Err(ForceRepinError::PrimaryStillAlive("node-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn prepare_force_repin_still_refuses_against_a_still_alive_primary() {
+        // Unchanged regression: the ordinary (non-drain) path keeps refusing,
+        // even after PrepareForceRepin's body is refactored to share
+        // prepare_repin with PrepareDrainRepin.
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
+        apply_service_with_template(&commands, "db", 1, stateful_template());
+        record_placement(&commands, "db-0", "node-1");
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
+        rx.recv().unwrap();
+
+        assert!(matches!(
+            prepare_force_repin(&commands, "db-0"),
+            Err(ForceRepinError::PrimaryStillAlive(_))
+        ));
+    }
+
+    #[test]
+    fn prepare_drain_repin_succeeds_against_a_still_alive_primary() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
+        // node-3 needs a real advertised replicate_addr, same as the
+        // existing force-repin happy-path test, so a fresh standby can be
+        // picked for the promoted primary's spec.
+        register_node_with_replicate_addr(
+            &commands,
+            "node-3",
+            "10.0.0.3",
+            "10.0.0.3",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
+        apply_service_with_template(&commands, "db", 1, stateful_template());
+        record_placement(&commands, "db-0", "node-1");
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
+        rx.recv().unwrap();
+
+        let prep = prepare_drain_repin(&commands, "db-0").unwrap();
+        assert_eq!(prep.old_node_id, "node-1");
+        assert_eq!(prep.standby_node_id, "node-2");
+    }
+
+    #[test]
+    fn prepare_drain_repin_still_refuses_a_non_stateful_name() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        apply_service(&commands, "web", 1);
+        record_placement(&commands, "web-0", "node-1");
+
+        assert_eq!(
+            prepare_drain_repin(&commands, "web-0"),
+            Err(ForceRepinError::NotStateful("web-0".to_string()))
         );
     }
 
