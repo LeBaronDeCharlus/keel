@@ -563,3 +563,21 @@ fn force_repin_on_an_unplaced_name_prints_the_control_planes_404_message() {
         "got stderr: {stderr}"
     );
 }
+
+#[test]
+fn cordon_an_unknown_node_prints_the_control_planes_404_message() {
+    let control_plane_addr = start_test_control_plane_with_node("node-1", "10.0.0.1:7621");
+    let (ok, _stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["cordon", "ghost"]);
+    assert!(!ok, "expected cordon on an unknown node to fail");
+    assert!(stderr.contains("unknown node"), "got stderr: {stderr}");
+}
+
+#[test]
+fn cordon_then_uncordon_a_known_node_round_trips_successfully() {
+    let control_plane_addr = start_test_control_plane_with_node("node-1", "10.0.0.1:7621");
+    let (ok, _stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["cordon", "node-1"]);
+    assert!(ok, "cordon failed: {stderr}");
+
+    let (ok, _stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["uncordon", "node-1"]);
+    assert!(ok, "uncordon failed: {stderr}");
+}
