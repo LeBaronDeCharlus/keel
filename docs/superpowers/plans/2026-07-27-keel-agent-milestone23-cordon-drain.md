@@ -237,7 +237,7 @@ cargo clippy -p keel-controlplane --all-targets -- -D warnings
 - Produces: `fn handle_cordon(node_id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>)`; `fn handle_uncordon(node_id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>)`.
 - Consumes: `Command::Cordon`/`Command::Uncordon` (Task 1).
 
-- [ ] **Step 1: Write the failing integration tests**
+- [x] **Step 1: Write the failing integration tests**
 
 Following this file's existing `send_request(&cp_addr, ...)` test harness pattern (e.g. `http.rs:1391-1412`):
 
@@ -283,7 +283,7 @@ fn cordoning_an_already_cordoned_node_is_a_no_op_success() {
 
 (`register_test_node` is a small helper if one doesn't already exist — check for an existing equivalent in this file's test module first, e.g. around the node-registration tests near `http.rs:1645`, before adding a new one.)
 
-- [ ] **Step 2: Add the route entries and handlers**
+- [x] **Step 2: Add the route entries and handlers**
 
 ```rust
 ("POST", ["nodes", id, "cordon"]) => handle_cordon(id, commands),
@@ -316,7 +316,7 @@ fn handle_uncordon(node_id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) 
 }
 ```
 
-- [ ] **Step 3: Verification**
+- [x] **Step 3: Verification**
 
 ```bash
 cargo test -p keel-controlplane
