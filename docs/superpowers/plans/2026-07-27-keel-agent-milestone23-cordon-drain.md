@@ -856,8 +856,8 @@ This milestone adds no new `kind`, no new `Spec` field, and no new validation ru
 
 ### Task 10: Full workspace verification and real 3-node VM verification
 
-- [ ] `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean.
-- [ ] Update `README.md`'s roadmap/milestone list per this project's standing convention (every prior milestone gets an entry once implemented and verified — follow the exact style of the Milestone 19-22 entries).
+- [x] `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean.
+- [x] Update `README.md`'s roadmap/milestone list per this project's standing convention (every prior milestone gets an entry once implemented and verified — follow the exact style of the Milestone 19-22 entries).
 - [ ] **Real 3-node VM verification** (per this project's standing discipline of never assuming FreeBSD-specific behavior holds until proven on real hardware):
   1. Stand up a 3-node cluster running a mix of a plain `kind: Jail`, a stateless `Service`, and a stateful `Service` with its standby on a second node.
   2. `keelctl cordon` one node hosting all three kinds; confirm nothing already running is disturbed, and a fresh `apply` of a new replica lands only on the other two nodes.
