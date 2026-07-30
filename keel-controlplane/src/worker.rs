@@ -2940,6 +2940,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2972,6 +2973,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -3014,6 +3016,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
