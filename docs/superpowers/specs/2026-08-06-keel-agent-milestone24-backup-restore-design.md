@@ -1,6 +1,6 @@
 # Milestone 24: Cluster Backup and Restore (Sub-Project 12)
 
-Status: Draft
+Status: Implemented
 
 Date: 2026-08-06
 
@@ -224,6 +224,19 @@ real verification on the FreeBSD VM(s) already used for prior milestones:
   down as part of restoring to the backup's point in time.
 - Attempt `restore` on an unknown ID and confirm a 404 with no side
   effects on any node.
+
+**Real-VM verification (2026-08-07): done, all four cases above confirmed**,
+plus a full 3-node cluster-wide backup and restore (`node-1`/`node-2`/`node-3`
+on separate FreeBSD 15.1 VMs, distinct volume data on each, restored
+byte-identical and independently per node). Found and fixed one real bug
+invisible to every fake-backed test: every backup leaves a permanent ZFS
+snapshot on the volume it backs up (no retention exists yet), so restoring
+a volume that had ever been backed up before always failed on real ZFS
+with `cannot destroy ...: filesystem has children` (a plain, non-recursive
+`zfs destroy`). Fixed by adding `ZfsManager::destroy_dataset_recursive`
+(`zfs destroy -r`), used only by restore's pre-receive cleanup, and by
+making `FakeZfsManager::destroy_dataset` accurately model real ZFS's
+snapshot-blocks-destroy behavior so this class of bug can't hide again.
 
 ## Rollout / Sequencing
 
