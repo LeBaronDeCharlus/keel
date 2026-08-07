@@ -1,4 +1,5 @@
 pub mod backoff;
+pub mod backup;
 pub mod capacity;
 pub mod http;
 pub mod ingress_record;

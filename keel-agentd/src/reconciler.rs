@@ -102,6 +102,14 @@ impl<J: JailRuntime, Z: ZfsManager, N: NetManager, M: MountManager> Reconciler<J
         })
     }
 
+    pub fn pool(&self) -> &str {
+        &self.pool
+    }
+
+    pub fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
+    }
+
     pub fn apply(&mut self, spec: JailSpec) -> Result<(), ReconcileError> {
         keel_spec::validate_name(&spec.metadata.name)?;
         keel_spec::validate_image(&spec.spec.image)?;
