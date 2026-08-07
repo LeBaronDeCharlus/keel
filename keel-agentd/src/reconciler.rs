@@ -2030,6 +2030,9 @@ mod tests {
         fn create_volume(&self, dataset: &str, quota: &str) -> Result<(), keel_zfs::ZfsError> {
             self.inner.create_volume(dataset, quota)
         }
+        fn set_quota(&self, dataset: &str, quota: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.set_quota(dataset, quota)
+        }
         fn destroy_dataset(&self, dataset: &str) -> Result<(), keel_zfs::ZfsError> {
             self.inner.destroy_dataset(dataset)
         }
