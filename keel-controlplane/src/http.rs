@@ -395,40 +395,12 @@ fn handle_backup_create(
         Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
     };
 
-    let mut node_results = std::collections::HashMap::new();
-    for node in nodes {
-        let result = if node.status != wire::NodeState::Alive {
-            wire::BackupComponentResult {
-                success: false,
-                error: Some("node was not Alive when backup create ran".to_string()),
-            }
-        } else {
-            match forward(
-                &node.addr,
-                "POST",
-                &format!("/backup/{id}"),
-                &[],
-                client_config,
-            ) {
-                Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
-                    success: true,
-                    error: None,
-                },
-                Ok((status, body)) => wire::BackupComponentResult {
-                    success: false,
-                    error: Some(format!(
-                        "status {status}: {}",
-                        String::from_utf8_lossy(&body)
-                    )),
-                },
-                Err(e) => wire::BackupComponentResult {
-                    success: false,
-                    error: Some(e),
-                },
-            }
-        };
-        node_results.insert(node.id, result);
-    }
+    let node_results = fanout_backup_or_restore(
+        nodes,
+        &format!("/backup/{id}"),
+        "node was not Alive when backup create ran",
+        client_config,
+    );
 
     let manifest = wire::BackupManifest {
         id,
@@ -490,40 +462,12 @@ fn handle_restore(
         Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
     };
 
-    let mut node_results = std::collections::HashMap::new();
-    for node in nodes {
-        let result = if node.status != wire::NodeState::Alive {
-            wire::BackupComponentResult {
-                success: false,
-                error: Some("node was not reachable during restore".to_string()),
-            }
-        } else {
-            match forward(
-                &node.addr,
-                "POST",
-                &format!("/restore/{id}"),
-                &[],
-                client_config,
-            ) {
-                Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
-                    success: true,
-                    error: None,
-                },
-                Ok((status, body)) => wire::BackupComponentResult {
-                    success: false,
-                    error: Some(format!(
-                        "status {status}: {}",
-                        String::from_utf8_lossy(&body)
-                    )),
-                },
-                Err(e) => wire::BackupComponentResult {
-                    success: false,
-                    error: Some(e),
-                },
-            }
-        };
-        node_results.insert(node.id, result);
-    }
+    let node_results = fanout_backup_or_restore(
+        nodes,
+        &format!("/restore/{id}"),
+        "node was not reachable during restore",
+        client_config,
+    );
 
     let (cp_tx, cp_rx) = mpsc::channel();
     if commands
@@ -550,6 +494,50 @@ fn handle_restore(
         nodes: node_results,
     };
     yaml_response(200, &manifest)
+}
+
+/// Shared by `handle_backup_create` and `handle_restore`: for each known
+/// node, skip it with `not_alive_message` if it isn't `Alive`, otherwise
+/// forward a `POST` to `path` on that node and classify the outcome into a
+/// `BackupComponentResult`. The two callers differ only in the path
+/// (`/backup/{id}` vs `/restore/{id}`) and the skip message, exactly the
+/// kind of shared per-node logic `execute_repin` above already factors out
+/// for `handle_force_repin` and `drain_stateful_replica`.
+fn fanout_backup_or_restore(
+    nodes: Vec<NodeStatus>,
+    path: &str,
+    not_alive_message: &str,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> std::collections::HashMap<String, wire::BackupComponentResult> {
+    let mut results = std::collections::HashMap::new();
+    for node in nodes {
+        let result = if node.status != wire::NodeState::Alive {
+            wire::BackupComponentResult {
+                success: false,
+                error: Some(not_alive_message.to_string()),
+            }
+        } else {
+            match forward(&node.addr, "POST", path, &[], client_config) {
+                Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
+                    success: true,
+                    error: None,
+                },
+                Ok((status, body)) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(format!(
+                        "status {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    )),
+                },
+                Err(e) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(e),
+                },
+            }
+        };
+        results.insert(node.id, result);
+    }
+    results
 }
 
 /// Shared by `handle_force_repin` and `drain`'s stateful-replica case
