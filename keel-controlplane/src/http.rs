@@ -503,6 +503,12 @@ fn handle_restore(
 /// (`/backup/{id}` vs `/restore/{id}`) and the skip message, exactly the
 /// kind of shared per-node logic `execute_repin` above already factors out
 /// for `handle_force_repin` and `drain_stateful_replica`.
+///
+/// Unlike every other forwarding call site, this one uses
+/// `BACKUP_FANOUT_READ_TIMEOUT` rather than `FORWARD_READ_TIMEOUT`: a node
+/// answers `/backup/<id>` and `/restore/<id>` only once the whole
+/// operation is done, which is minutes of `zfs send`/`receive` on real
+/// data, not seconds.
 fn fanout_backup_or_restore(
     nodes: Vec<NodeStatus>,
     path: &str,
@@ -517,7 +523,14 @@ fn fanout_backup_or_restore(
                 error: Some(not_alive_message.to_string()),
             }
         } else {
-            match forward(&node.addr, "POST", path, &[], client_config) {
+            match forward_with_timeout(
+                &node.addr,
+                "POST",
+                path,
+                &[],
+                client_config,
+                BACKUP_FANOUT_READ_TIMEOUT,
+            ) {
                 Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
                     success: true,
                     error: None,
@@ -1405,6 +1418,12 @@ fn handle_list(commands: &Sender<Command>) -> (u16, Vec<u8>) {
 
 const FORWARD_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const FORWARD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Far larger than `FORWARD_READ_TIMEOUT` because a node's `/backup/<id>`
+/// and `/restore/<id>` send no response bytes at all until the whole
+/// operation has finished -- a state-dir copy plus a full `zfs
+/// send`/`receive` per volume, which on real data routinely takes minutes,
+/// not the seconds an ordinary jail/service call takes.
+const BACKUP_FANOUT_READ_TIMEOUT: Duration = Duration::from_secs(1800);
 
 fn handle_forward(
     id: &str,
@@ -1432,12 +1451,33 @@ fn handle_forward(
     }
 }
 
+/// The ordinary, short-read-timeout forward used by every regular
+/// jail/service/node call. Long-running endpoints (backup/restore) go
+/// through `forward_with_timeout` directly with their own budget.
 fn forward(
     addr: &str,
     method: &str,
     path: &str,
     body: &[u8],
     client_config: &Arc<rustls::ClientConfig>,
+) -> Result<(u16, Vec<u8>), String> {
+    forward_with_timeout(
+        addr,
+        method,
+        path,
+        body,
+        client_config,
+        FORWARD_READ_TIMEOUT,
+    )
+}
+
+fn forward_with_timeout(
+    addr: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    client_config: &Arc<rustls::ClientConfig>,
+    read_timeout: Duration,
 ) -> Result<(u16, Vec<u8>), String> {
     let socket_addr = addr
         .to_socket_addrs()
@@ -1446,7 +1486,7 @@ fn forward(
         .ok_or_else(|| "could not resolve address".to_string())?;
     let tcp_stream = TcpStream::connect_timeout(&socket_addr, FORWARD_CONNECT_TIMEOUT)
         .map_err(|e| e.to_string())?;
-    tcp_stream.set_read_timeout(Some(FORWARD_READ_TIMEOUT)).ok();
+    tcp_stream.set_read_timeout(Some(read_timeout)).ok();
     let server_name = tls::server_name_from_addr(addr)?;
     let conn = rustls::ClientConnection::new(Arc::clone(client_config), server_name)
         .map_err(|e| e.to_string())?;
@@ -2253,6 +2293,72 @@ mod tests {
         let cp_addr = start_test_server();
         let (status, _) = send_request(&cp_addr, "DELETE", "/nodes/missing/volumes/web-data", "");
         assert_eq!(status, 404);
+    }
+
+    /// A "node" that completes the TLS handshake and reads the request but
+    /// never writes a single response byte, so the only thing that can end
+    /// the client's read loop is its own read timeout.
+    fn start_fake_remote_tls_agentd_that_never_responds() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
+        );
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
+                }
+                // Keep the connection open (and silent) so the client's read
+                // never sees EOF -- only its timeout can break the loop.
+                held.push(tls_stream);
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn forward_with_timeout_applies_the_read_timeout_it_was_given() {
+        // The production backup/restore fanout passes a 30-minute budget
+        // (BACKUP_FANOUT_READ_TIMEOUT) instead of the 5s FORWARD_READ_TIMEOUT
+        // every other call site uses; no test can wait 30 minutes to observe
+        // that, so what's proven here is the plumbing: the timeout that gets
+        // applied to the socket is the one passed in, not the constant.
+        let node_addr = start_fake_remote_tls_agentd_that_never_responds();
+        let started = std::time::Instant::now();
+        let result = forward_with_timeout(
+            &node_addr,
+            "POST",
+            "/backup/test-id",
+            &[],
+            &client_tls_config(),
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            result.is_err(),
+            "expected a silent node to time out, got: {result:?}"
+        );
+        assert!(
+            elapsed < FORWARD_READ_TIMEOUT,
+            "expected the 200ms timeout passed in to apply, not the {FORWARD_READ_TIMEOUT:?} default; timed out after {elapsed:?}"
+        );
     }
 
     #[test]
