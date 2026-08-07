@@ -254,7 +254,16 @@ fn run_backup(target: &Target, args: &[String]) -> Result<String, String> {
 }
 
 fn run_restore(target: &Target, args: &[String]) -> Result<String, String> {
-    let id = args.first().ok_or("restore requires a backup id")?;
+    // `--yes` may appear before or after the id (`restore --yes ID` and
+    // `restore ID --yes` are both documented forms), so the id lookup must
+    // skip it regardless of position rather than blindly taking
+    // `args.first()` -- otherwise `restore --yes ID` would treat `--yes`
+    // itself as the id, and a flag-only `restore --yes` (no id at all) would
+    // slip past the "requires a backup id" check instead of triggering it.
+    let id = args
+        .iter()
+        .find(|a| *a != "--yes")
+        .ok_or("restore requires a backup id")?;
     if !args.iter().any(|a| a == "--yes") {
         return Err("restore is destructive; pass --yes to confirm".to_string());
     }
@@ -669,5 +678,20 @@ mod tests {
     fn run_drain_with_no_node_argument_is_a_usage_error() {
         let target = Target::Socket(PathBuf::from("/var/run/keel-agentd.sock"));
         assert!(run_drain(&target, &[]).is_err());
+    }
+
+    #[test]
+    fn run_restore_with_only_the_yes_flag_and_no_id_is_a_usage_error() {
+        // Regression test: `args.first()` used to grab "--yes" itself as the
+        // id whenever no real id followed it, so this flag-only invocation
+        // slipped past the "requires a backup id" check and went on to
+        // dispatch a malformed `POST /restore/--yes` instead of failing with
+        // a clear usage error. An unroutable socket path proves dispatch is
+        // never reached: if it were, this would fail with a connection
+        // error rather than the expected message below.
+        let target = Target::Socket(PathBuf::from("/nonexistent/keel-agentd.sock"));
+        let err = run_restore(&target, &["--yes".to_string()])
+            .expect_err("restore with only --yes and no id must fail");
+        assert_eq!(err, "restore requires a backup id");
     }
 }

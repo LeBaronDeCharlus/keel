@@ -630,6 +630,18 @@ fn backup_create_list_and_restore_round_trip_through_the_control_plane() {
         restore_stdout.contains("success: true"),
         "expected a successful restore manifest, got: {restore_stdout}"
     );
+
+    // `--yes` before the id must work identically to `--yes` after it: the
+    // id lookup has to skip the flag regardless of its position, rather than
+    // blindly taking the first token (which would send the literal id
+    // "--yes" to the control plane).
+    let (ok, restore_stdout, stderr) =
+        run_keelctl_scheduled(&control_plane_addr, &["restore", "--yes", &id]);
+    assert!(ok, "flag-first restore failed: {stderr}");
+    assert!(
+        restore_stdout.contains("success: true"),
+        "expected a successful restore manifest, got: {restore_stdout}"
+    );
 }
 
 #[test]
