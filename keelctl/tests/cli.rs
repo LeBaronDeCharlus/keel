@@ -630,6 +630,13 @@ fn backup_create_list_and_restore_round_trip_through_the_control_plane() {
         restore_stdout.contains("success: true"),
         "expected a successful restore manifest, got: {restore_stdout}"
     );
+    // Neither side hot-reloads restored state (both read their state dir
+    // only at process startup), so the manifest alone would leave an
+    // operator believing the restore had already taken effect.
+    assert!(
+        restore_stdout.contains("Restart keel-controlplane"),
+        "expected the restart reminder the design doc requires, got: {restore_stdout}"
+    );
 
     // `--yes` before the id must work identically to `--yes` after it: the
     // id lookup has to skip the flag regardless of its position, rather than

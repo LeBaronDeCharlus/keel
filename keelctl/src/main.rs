@@ -267,7 +267,15 @@ fn run_restore(target: &Target, args: &[String]) -> Result<String, String> {
     if !args.iter().any(|a| a == "--yes") {
         return Err("restore is destructive; pass --yes to confirm".to_string());
     }
-    success_body(dispatch(target, "POST", &format!("/restore/{id}"), ""))
+    // Nothing hot-reloads restored state: `Reconciler::new` and the control
+    // plane's `main.rs` read their state dirs only at process startup, so a
+    // `success: true` manifest alone would leave an operator believing the
+    // restore had already taken effect. The design doc's CLI surface calls
+    // for this reminder explicitly.
+    let manifest = success_body(dispatch(target, "POST", &format!("/restore/{id}"), ""))?;
+    Ok(format!(
+        "{manifest}\nRestore complete. Restart keel-controlplane and keel-agentd on every restored node NOW, before running any other command against this cluster, to load the restored state.\n"
+    ))
 }
 
 /// Tries `/jails/<name>` first; on a `404`, retries against
