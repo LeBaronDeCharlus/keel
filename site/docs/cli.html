@@ -122,6 +122,50 @@ keelctl --control-plane-addr 10.0.0.2:7620 --node node-4 delete-volume web-data<
     </div>
   </section>
 
+  <section id="force-repin">
+    <div class="container">
+      <h2>keelctl force-repin NAME</h2>
+      <p>Promotes a stateful replica's standby to primary (<code>POST /replicas/&lt;name&gt;/force-repin</code>), for the case where the current primary's node is genuinely down and its replicated data needs to keep serving from where it was continuously replicated to. Refuses if the current primary still resolves as alive, if the replica isn't stateful (no recorded standby), or if the standby hasn't finished a first full replication yet. See the <a href="architecture.html#replication">Architecture</a> page for how the standby is chosen and kept in sync in the first place.</p>
+      <pre>keelctl --control-plane-addr 10.0.0.2:7620 force-repin db-0</pre>
+    </div>
+  </section>
+
+  <section id="cordon">
+    <div class="container">
+      <h2>keelctl cordon / uncordon NODE</h2>
+      <p>Marks a node unschedulable (<code>cordon</code>) or schedulable again (<code>uncordon</code>), with zero disruption to whatever is already running there. Neither verb touches existing placements; a cordoned node keeps serving everything it already hosts, it just stops being picked for anything new.</p>
+      <pre>keelctl --control-plane-addr 10.0.0.2:7620 cordon node-3
+keelctl --control-plane-addr 10.0.0.2:7620 uncordon node-3</pre>
+    </div>
+  </section>
+
+  <section id="drain">
+    <div class="container">
+      <h2>keelctl drain NODE</h2>
+      <p>Actively empties a node of everything it hosts, so it becomes safe to take down for maintenance. Refuses upfront against a node that's already <code>Dead</code> (use <code>force-repin</code> instead) or one hosting a live <code>Ingress</code> (no automated cross-node <code>Ingress</code> migration exists yet). Migrates each placement off by kind: stateless service replicas are removed and left to the next heartbeat's self-healing, stateful replicas are force-repinned to a fresh standby, and plain jails are re-placed elsewhere before the old copy is deleted. Draining doesn't cordon the node as a side effect; run <code>cordon</code> first if the node should also stay unschedulable afterward.</p>
+      <pre>keelctl --control-plane-addr 10.0.0.2:7620 cordon node-3
+keelctl --control-plane-addr 10.0.0.2:7620 drain node-3</pre>
+    </div>
+  </section>
+
+  <section id="backup">
+    <div class="container">
+      <h2>keelctl backup create / backup list</h2>
+      <p><code>backup create</code> triggers a point-in-time, cluster-wide backup: the control plane's own state, every node's agent state, and every node's volume data (<code>POST /backup</code>), printing a manifest of which nodes and volumes succeeded, failed, or were skipped. <code>backup list</code> reads back every saved manifest (<code>GET /backup</code>). Both are always sent to the control plane directly, never <code>--node</code>-scoped, since a cluster backup is never a per-node operation from the operator's perspective. See the <a href="architecture.html#backup-restore">Architecture</a> page for what actually gets captured and where.</p>
+      <pre>keelctl --control-plane-addr 10.0.0.2:7620 backup create
+keelctl --control-plane-addr 10.0.0.2:7620 backup list</pre>
+    </div>
+  </section>
+
+  <section id="restore">
+    <div class="container">
+      <h2>keelctl restore ID --yes</h2>
+      <p>The destructive mirror of <code>backup create</code>: tears down every jail on every reachable node, wipes and replaces state directories, and restores volume data from the named backup (<code>POST /restore/&lt;id&gt;</code>). Refuses to run without the explicit <code>--yes</code> flag, checked locally before any network call, and the control plane 404s on an unknown id before touching any node's live state. Prints a reminder on success that both the control plane and every restored node's <code>keel-agentd</code> need an operator-triggered restart afterward, since neither hot-reloads restored state.</p>
+      <pre>keelctl --control-plane-addr 10.0.0.2:7620 backup list          # find the id to restore
+keelctl --control-plane-addr 10.0.0.2:7620 restore 2026-08-07T09-56-20Z --yes</pre>
+    </div>
+  </section>
+
   <section id="errors">
     <div class="container">
       <h2>Errors</h2>

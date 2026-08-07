@@ -143,6 +143,54 @@
       <p>Cross-node <code>Ingress</code> routing (an <code>Ingress</code> on one node fronting a <code>Service</code> whose replicas are scheduled elsewhere) is out of scope for this milestone; see the <a href="architecture.html#ingress">Architecture</a> page.</p>
     </div>
   </section>
+
+  <section id="replication">
+    <div class="container">
+      <h2>Replication and force re-pin</h2>
+      <p>See the <a href="architecture.html#replication">Architecture</a> page for how the standby/replication mechanism these routes expose actually works.</p>
+      <table>
+        <thead><tr><th>Method &amp; path</th><th>Body</th><th>Success</th><th>Errors</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /replica-targets/&lt;name&gt;</code></td><td>none</td><td>200, YAML <code>{replica_name, ready: true}</code>; served by whichever node is currently that replica's standby</td><td>404 no replica target by that name, 409 not yet ready (no full replication completed)</td></tr>
+          <tr><td><code>DELETE /replica-targets/&lt;name&gt;</code></td><td>none</td><td>200, the replica target's tracked state removed from the standby node</td><td>None (idempotent)</td></tr>
+          <tr><td><code>POST /replicas/&lt;name&gt;/force-repin</code></td><td>none</td><td>200; the standby is promoted to primary, <code>Placements</code>/<code>Standbys</code> updated, and the old primary's node is marked to fence any resurrected copy of this replica</td><td>404 no known placement for <code>&lt;name&gt;</code>, 400 not a stateful replica with a standby, 409 the current primary still resolves as alive, 503 the standby isn't ready yet or no fresh standby is available</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="cordon-drain">
+    <div class="container">
+      <h2>Cordon and drain</h2>
+      <p>See the <a href="architecture.html#cordon-drain">Architecture</a> page for the full migration behavior <code>drain</code> triggers.</p>
+      <table>
+        <thead><tr><th>Method &amp; path</th><th>Body</th><th>Success</th><th>Errors</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /nodes/&lt;id&gt;/cordon</code></td><td>none</td><td>200; the node is marked unschedulable, no disruption to what's already running there</td><td>404 unknown node</td></tr>
+          <tr><td><code>POST /nodes/&lt;id&gt;/uncordon</code></td><td>none</td><td>200; the node is marked schedulable again</td><td>404 unknown node</td></tr>
+          <tr><td><code>POST /nodes/&lt;id&gt;/drain</code></td><td>none</td><td>200; every placement the node hosts is migrated off by kind (stateless replicas rescheduled by the next heartbeat, stateful replicas force-repinned to a fresh standby, plain jails re-placed and only then deleted from the old node)</td><td>404 unknown node, 409 the node is already <code>Dead</code> (use <code>force-repin</code> instead) or hosts a live <code>Ingress</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="backup-restore">
+    <div class="container">
+      <h2>Backup and restore</h2>
+      <p>Cluster-wide backup/restore is triggered only against the control plane; see the <a href="architecture.html#backup-restore">Architecture</a> page for the fanout mechanism and what each side actually copies.</p>
+      <table>
+        <thead><tr><th>Method &amp; path</th><th>Body</th><th>Success</th><th>Errors</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /backup</code> (control plane)</td><td>none</td><td>200, YAML manifest: <code>id</code>, <code>controlplane: {success, error}</code>, <code>nodes: {&lt;id&gt;: {success, error}}</code> for every currently-known node</td><td>None (partial failure is reported in the manifest body, never as a non-2xx for the overall call)</td></tr>
+          <tr><td><code>GET /backup</code> (control plane)</td><td>none</td><td>200, YAML list of every saved manifest, sorted by id</td><td>None</td></tr>
+          <tr><td><code>POST /restore/&lt;id&gt;</code> (control plane)</td><td>none</td><td>200, the same manifest shape as <code>backup create</code>, reporting per-node restore outcome</td><td>404 unknown backup id, 409 the backup's own control-plane state was never captured successfully (refused before touching any node)</td></tr>
+          <tr><td><code>POST /backup/&lt;id&gt;</code> (per node)</td><td>none</td><td>200, YAML <code>{volumes, failed_volumes}</code>; called by the control plane's fanout, not normally by an operator directly</td><td>500 with a message naming which volumes failed if any did (the volumes that did succeed remain valid on disk regardless)</td></tr>
+          <tr><td><code>POST /restore/&lt;id&gt;</code> (per node)</td><td>none</td><td>200; every jail on the node torn down, agent state and volume data restored from the backup</td><td>404 unknown backup id on this node (refused before tearing anything down)</td></tr>
+        </tbody>
+      </table>
+      <p>Restore is destructive and never runs without <code>keelctl restore &lt;id&gt; --yes</code>'s explicit confirmation flag. Neither the control plane nor a restored node hot-reloads the restored files: both require an operator-triggered restart afterward, which <code>keelctl</code> prints a reminder for on every successful restore.</p>
+    </div>
+  </section>
 </main>
 <footer class="site-footer">
   <div class="container">

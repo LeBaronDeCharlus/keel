@@ -51,15 +51,19 @@
   <section class="status">
     <div class="container">
       <div class="status-banner">
-        <strong>Sub-projects 1-7</strong> are complete: single-node jail reconciliation,
-        the multi-node control plane, resource-aware scheduling, mutual-TLS
-        hardening with certificate revocation/rotation, cross-node overlay
-        networking, service discovery with a per-node virtual-IP proxy
-        for load balancing across a service's replicas, and persistent
-        storage: a jail can declare named ZFS-backed volumes that survive
-        its own deletion, and a <code>kind: Service</code> can declare them
-        too, with each stateful replica pinned to its own node for life.
-        <a href="journey.html">See the full journey &rarr;</a>
+        <strong>Sub-projects 1-7, 9, 10, and 12</strong> are complete: single-node jail
+        reconciliation, the multi-node control plane, resource-aware scheduling,
+        mutual-TLS hardening with certificate revocation/rotation, cross-node
+        overlay networking, service discovery with a per-node virtual-IP proxy
+        for load balancing across a service's replicas, persistent storage
+        (named ZFS-backed volumes, node-pinned stateful services, and
+        cross-node failover via <code>zfs send</code>/<code>receive</code>
+        replication plus an operator <code>force-repin</code> verb), automatic
+        HTTPS via ACME/DNS-01, a read-only operational dashboard, and
+        cluster-wide backup/restore. Cordon/drain (sub-project 11) is
+        code-complete, real-VM verification pending; bhyve VM workloads
+        (sub-project 8) are designed but shelved for lack of nested-virt
+        hardware. <a href="journey.html">See the full journey &rarr;</a>
       </div>
     </div>
   </section>
@@ -96,6 +100,14 @@
         <div class="card">
           <h3>Persistent volumes</h3>
           <p>A jail can declare named volumes backed by their own ZFS datasets, created on first use and surviving the jail's own deletion, mounted back in on re-apply with the data intact.</p>
+        </div>
+        <div class="card">
+          <h3>Automatic HTTPS</h3>
+          <p>A <code>kind: Ingress</code> spec gets a real, auto-renewing Let's Encrypt certificate via ACME's DNS-01 challenge, no inbound reachability needed for issuance, proxied through a single per-node nginx jail.</p>
+        </div>
+        <div class="card">
+          <h3>Cluster backup and restore</h3>
+          <p>One command backs up the control plane's state, every node's agent state, and every node's volume data; one command restores it all back, with partial failure reported clearly, never silently swallowed.</p>
         </div>
       </div>
     </div>
