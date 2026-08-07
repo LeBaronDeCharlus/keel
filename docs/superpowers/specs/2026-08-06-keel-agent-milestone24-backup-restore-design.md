@@ -173,6 +173,25 @@ plane responds 404 if `<id>` doesn't match a backup it knows about.
   before the restored state takes effect (see the Restore flow's steps 3
   and 4).
 
+## Known Limitations
+
+A backup or restore runs on `keel-agentd`'s single reconciler worker
+thread, and holds it for the whole operation - a state-dir copy plus a
+full `zfs send`/`receive` per volume. While that's in flight the node
+sends no heartbeats, so the control plane's 15-second liveness window
+expires and the node shows up as `Dead` in `keelctl get nodes` and in the
+dashboard for the entire duration of a large backup, even though it is
+perfectly healthy and doing exactly what it was asked to do. (A node
+marked `Dead` mid-backup is also skipped by any *other* cluster-wide
+operation that fans out only to Alive nodes while it's busy.) This is a
+known limitation, not a bug: nothing is lost or corrupted, and the node
+resumes heartbeating as soon as the operation completes. A future
+milestone could remove it by moving the ZFS I/O off the worker thread
+(e.g. a dedicated backup thread the worker hands the job to, with the HTTP
+handler polling for completion), which is a large enough change to the
+agent's concurrency model to deserve its own task rather than being folded
+into this one.
+
 ## Error Handling
 
 - A node that is not Alive when `backup create` runs is recorded in the
