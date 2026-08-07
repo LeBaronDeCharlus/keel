@@ -58,9 +58,11 @@ fn main() -> ExitCode {
         Some((cmd, rest)) if cmd == "cordon" => run_cordon(&target, rest),
         Some((cmd, rest)) if cmd == "uncordon" => run_uncordon(&target, rest),
         Some((cmd, rest)) if cmd == "drain" => run_drain(&target, rest),
+        Some((cmd, rest)) if cmd == "backup" => run_backup(&target, rest),
+        Some((cmd, rest)) if cmd == "restore" => run_restore(&target, rest),
         _ => {
             eprintln!(
-                "usage: keelctl <apply -f FILE|get [name]|delete NAME|delete-volume NAME|force-repin NAME|cordon NODE|uncordon NODE|drain NODE> [--socket PATH|--control-plane-addr ADDR --node ID]"
+                "usage: keelctl <apply -f FILE|get [name]|delete NAME|delete-volume NAME|force-repin NAME|cordon NODE|uncordon NODE|drain NODE|backup create|backup list|restore ID --yes> [--socket PATH|--control-plane-addr ADDR --node ID]"
             );
             return ExitCode::FAILURE;
         }
@@ -241,6 +243,22 @@ fn run_drain(target: &Target, args: &[String]) -> Result<String, String> {
     let node = args.first().ok_or("drain requires a node id")?;
     let path = format!("/nodes/{node}/drain");
     success_body(dispatch(target, "POST", &path, "")).map(|_| String::new())
+}
+
+fn run_backup(target: &Target, args: &[String]) -> Result<String, String> {
+    match args.split_first() {
+        Some((cmd, _)) if cmd == "create" => success_body(dispatch(target, "POST", "/backup", "")),
+        Some((cmd, _)) if cmd == "list" => success_body(dispatch(target, "GET", "/backup", "")),
+        _ => Err("backup requires a subcommand: create|list".to_string()),
+    }
+}
+
+fn run_restore(target: &Target, args: &[String]) -> Result<String, String> {
+    let id = args.first().ok_or("restore requires a backup id")?;
+    if !args.iter().any(|a| a == "--yes") {
+        return Err("restore is destructive; pass --yes to confirm".to_string());
+    }
+    success_body(dispatch(target, "POST", &format!("/restore/{id}"), ""))
 }
 
 /// Tries `/jails/<name>` first; on a `404`, retries against
