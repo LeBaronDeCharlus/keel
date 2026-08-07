@@ -1,4 +1,5 @@
 use crate::tls;
+use crate::wire;
 use crate::wire::{Heartbeat, NodeRegistration, NodeState, NodeStatus, RegisterResponse};
 use crate::worker::{
     Command, ForceRepinError, ForceRepinPrep, PlacementKind, ReplicaAction, ScheduleOrResolveError,
@@ -238,6 +239,9 @@ fn route(
         ("POST", ["replicas", name, "force-repin"]) => {
             handle_force_repin(name, commands, client_config)
         }
+        ("POST", ["backup"]) => handle_backup_create(commands, client_config),
+        ("GET", ["backup"]) => handle_backup_list(commands),
+        ("POST", ["restore", id]) => handle_restore(id, commands, client_config),
         ("POST", ["nodes", id, "cordon"]) => handle_cordon(id, commands),
         ("POST", ["nodes", id, "uncordon"]) => handle_uncordon(id, commands),
         ("POST", ["nodes", id, "drain"]) => handle_drain(id, commands, client_config),
@@ -355,6 +359,197 @@ fn handle_force_repin(
         Ok(body) => (200, body),
         Err(response) => response,
     }
+}
+
+fn handle_backup_create(
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
+    let id = crate::backup::generate_backup_id();
+
+    let (cp_tx, cp_rx) = mpsc::channel();
+    if commands
+        .send(Command::BackupControlPlaneState(id.clone(), cp_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let controlplane = match cp_rx.recv() {
+        Ok(Ok(())) => wire::BackupComponentResult {
+            success: true,
+            error: None,
+        },
+        Ok(Err(e)) => wire::BackupComponentResult {
+            success: false,
+            error: Some(e.to_string()),
+        },
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let (list_tx, list_rx) = mpsc::channel();
+    if commands.send(Command::List(list_tx)).is_err() {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let nodes = match list_rx.recv() {
+        Ok(nodes) => nodes,
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let mut node_results = std::collections::HashMap::new();
+    for node in nodes {
+        let result = if node.status != wire::NodeState::Alive {
+            wire::BackupComponentResult {
+                success: false,
+                error: Some("node was not Alive when backup create ran".to_string()),
+            }
+        } else {
+            match forward(
+                &node.addr,
+                "POST",
+                &format!("/backup/{id}"),
+                &[],
+                client_config,
+            ) {
+                Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
+                    success: true,
+                    error: None,
+                },
+                Ok((status, body)) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(format!(
+                        "status {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    )),
+                },
+                Err(e) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(e),
+                },
+            }
+        };
+        node_results.insert(node.id, result);
+    }
+
+    let manifest = wire::BackupManifest {
+        id,
+        controlplane,
+        nodes: node_results,
+    };
+    let (save_tx, save_rx) = mpsc::channel();
+    if commands
+        .send(Command::SaveBackupManifest(manifest.clone(), save_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match save_rx.recv() {
+        Ok(Ok(())) => yaml_response(200, &manifest),
+        Ok(Err(e)) => error_response(
+            500,
+            format!("backup completed but failed to write manifest: {e}"),
+        ),
+        Err(_) => error_response(500, "control plane worker did not respond".to_string()),
+    }
+}
+
+fn handle_backup_list(commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (tx, rx) = mpsc::channel();
+    if commands.send(Command::ListBackupManifests(tx)).is_err() {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match rx.recv() {
+        Ok(manifests) => yaml_response(200, &manifests),
+        Err(_) => error_response(500, "control plane worker did not respond".to_string()),
+    }
+}
+
+fn handle_restore(
+    id: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
+    let (get_tx, get_rx) = mpsc::channel();
+    if commands
+        .send(Command::GetBackupManifest(id.to_string(), get_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match get_rx.recv() {
+        Ok(Some(_)) => {}
+        Ok(None) => return error_response(404, format!("no backup '{id}' found")),
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    }
+
+    let (list_tx, list_rx) = mpsc::channel();
+    if commands.send(Command::List(list_tx)).is_err() {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let nodes = match list_rx.recv() {
+        Ok(nodes) => nodes,
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let mut node_results = std::collections::HashMap::new();
+    for node in nodes {
+        let result = if node.status != wire::NodeState::Alive {
+            wire::BackupComponentResult {
+                success: false,
+                error: Some("node was not reachable during restore".to_string()),
+            }
+        } else {
+            match forward(
+                &node.addr,
+                "POST",
+                &format!("/restore/{id}"),
+                &[],
+                client_config,
+            ) {
+                Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
+                    success: true,
+                    error: None,
+                },
+                Ok((status, body)) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(format!(
+                        "status {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    )),
+                },
+                Err(e) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(e),
+                },
+            }
+        };
+        node_results.insert(node.id, result);
+    }
+
+    let (cp_tx, cp_rx) = mpsc::channel();
+    if commands
+        .send(Command::RestoreControlPlaneState(id.to_string(), cp_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let controlplane = match cp_rx.recv() {
+        Ok(Ok(())) => wire::BackupComponentResult {
+            success: true,
+            error: None,
+        },
+        Ok(Err(e)) => wire::BackupComponentResult {
+            success: false,
+            error: Some(e.to_string()),
+        },
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let manifest = wire::BackupManifest {
+        id: id.to_string(),
+        controlplane,
+        nodes: node_results,
+    };
+    yaml_response(200, &manifest)
 }
 
 /// Shared by `handle_force_repin` and `drain`'s stateful-replica case
@@ -3437,6 +3632,56 @@ mod tests {
         assert!(
             node_1_deletes.lock().unwrap().is_empty(),
             "expected the old node's copy to be left alone since the new placement never succeeded"
+        );
+    }
+
+    #[test]
+    fn backup_create_fans_out_to_every_alive_node_and_the_result_is_listable() {
+        let (cp_addr, _commands) = start_test_server_with_commands();
+        let node_b = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-b", &node_b);
+
+        let (status, body) = send_request(&cp_addr, "POST", "/backup", "");
+        assert_eq!(status, 200, "got: {body}");
+        assert!(body.contains("success: true"), "got: {body}");
+        assert!(body.contains("node-b"), "got: {body}");
+
+        let (status, list_body) = send_request(&cp_addr, "GET", "/backup", "");
+        assert_eq!(status, 200);
+        assert!(
+            list_body.contains("id:"),
+            "expected the just-created backup to appear in the list, got: {list_body}"
+        );
+    }
+
+    #[test]
+    fn restore_on_an_unknown_backup_id_returns_404() {
+        let (cp_addr, _commands) = start_test_server_with_commands();
+
+        let (status, body) = send_request(&cp_addr, "POST", "/restore/unknown-id", "");
+        assert_eq!(status, 404, "got: {body}");
+    }
+
+    #[test]
+    fn backup_then_restore_round_trips_through_the_control_plane_and_every_alive_node() {
+        let (cp_addr, _commands) = start_test_server_with_commands();
+        let node_b = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-b", &node_b);
+
+        let (status, create_body) = send_request(&cp_addr, "POST", "/backup", "");
+        assert_eq!(status, 200, "got: {create_body}");
+        let id = create_body
+            .lines()
+            .find_map(|line| line.strip_prefix("id: "))
+            .expect("expected an 'id: <value>' line in the manifest")
+            .trim()
+            .to_string();
+
+        let (status, restore_body) = send_request(&cp_addr, "POST", &format!("/restore/{id}"), "");
+        assert_eq!(status, 200, "got: {restore_body}");
+        assert!(
+            restore_body.contains("success: true"),
+            "got: {restore_body}"
         );
     }
 }
