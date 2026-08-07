@@ -55,9 +55,12 @@ fn main() -> ExitCode {
         Some((cmd, rest)) if cmd == "delete" => run_delete(&target, rest),
         Some((cmd, rest)) if cmd == "delete-volume" => run_delete_volume(&target, rest),
         Some((cmd, rest)) if cmd == "force-repin" => run_force_repin(&target, rest),
+        Some((cmd, rest)) if cmd == "cordon" => run_cordon(&target, rest),
+        Some((cmd, rest)) if cmd == "uncordon" => run_uncordon(&target, rest),
+        Some((cmd, rest)) if cmd == "drain" => run_drain(&target, rest),
         _ => {
             eprintln!(
-                "usage: keelctl <apply -f FILE|get [name]|delete NAME|delete-volume NAME|force-repin NAME> [--socket PATH|--control-plane-addr ADDR --node ID]"
+                "usage: keelctl <apply -f FILE|get [name]|delete NAME|delete-volume NAME|force-repin NAME|cordon NODE|uncordon NODE|drain NODE> [--socket PATH|--control-plane-addr ADDR --node ID]"
             );
             return ExitCode::FAILURE;
         }
@@ -219,6 +222,24 @@ fn run_delete_volume(target: &Target, args: &[String]) -> Result<String, String>
 fn run_force_repin(target: &Target, args: &[String]) -> Result<String, String> {
     let name = args.first().ok_or("force-repin requires a replica name")?;
     let path = jails_path(target, &format!("/replicas/{name}/force-repin"));
+    success_body(dispatch(target, "POST", &path, "")).map(|_| String::new())
+}
+
+fn run_cordon(target: &Target, args: &[String]) -> Result<String, String> {
+    let node = args.first().ok_or("cordon requires a node id")?;
+    let path = format!("/nodes/{node}/cordon");
+    success_body(dispatch(target, "POST", &path, "")).map(|_| String::new())
+}
+
+fn run_uncordon(target: &Target, args: &[String]) -> Result<String, String> {
+    let node = args.first().ok_or("uncordon requires a node id")?;
+    let path = format!("/nodes/{node}/uncordon");
+    success_body(dispatch(target, "POST", &path, "")).map(|_| String::new())
+}
+
+fn run_drain(target: &Target, args: &[String]) -> Result<String, String> {
+    let node = args.first().ok_or("drain requires a node id")?;
+    let path = format!("/nodes/{node}/drain");
     success_body(dispatch(target, "POST", &path, "")).map(|_| String::new())
 }
 
@@ -612,5 +633,23 @@ mod tests {
         // removal-index-out-of-bounds instead of a clean usage error.
         let mut args = vec!["get".to_string(), "--node".to_string()];
         assert_eq!(extract_flag(&mut args, "--node"), None);
+    }
+
+    #[test]
+    fn run_cordon_with_no_node_argument_is_a_usage_error() {
+        let target = Target::Socket(PathBuf::from("/var/run/keel-agentd.sock"));
+        assert!(run_cordon(&target, &[]).is_err());
+    }
+
+    #[test]
+    fn run_uncordon_with_no_node_argument_is_a_usage_error() {
+        let target = Target::Socket(PathBuf::from("/var/run/keel-agentd.sock"));
+        assert!(run_uncordon(&target, &[]).is_err());
+    }
+
+    #[test]
+    fn run_drain_with_no_node_argument_is_a_usage_error() {
+        let target = Target::Socket(PathBuf::from("/var/run/keel-agentd.sock"));
+        assert!(run_drain(&target, &[]).is_err());
     }
 }

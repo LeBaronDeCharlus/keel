@@ -186,6 +186,11 @@ impl Registry {
                     committed_cpu: record.committed_cpu,
                     committed_memory: record.committed_memory,
                     ingresses: record.ingresses.clone(),
+                    // `Registry` has no notion of `Cordoned` (that state
+                    // lives in `worker.rs`, threaded through
+                    // `Command::List`'s handler) -- this defaults to `false`
+                    // here and is overwritten by the caller.
+                    cordoned: false,
                 }
             })
             .collect();

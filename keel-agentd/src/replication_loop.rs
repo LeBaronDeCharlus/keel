@@ -352,10 +352,6 @@ mod tests {
             .unwrap();
         rt_rx.recv().unwrap().unwrap();
 
-        // 200ms interval: ticks land at ~200ms and ~400ms. Asserting at
-        // 450ms falls comfortably after the second tick's send completes
-        // but well before the third (~600ms), so exactly two successful
-        // sends have happened.
         let _handle = spawn(
             "db-2".to_string(),
             "db-2-data".to_string(),
@@ -365,19 +361,39 @@ mod tests {
             Duration::from_millis(200),
             test_reloading_tls(),
         );
-        std::thread::sleep(Duration::from_millis(450));
 
+        // Poll for the steady-state invariant (rather than sleeping a fixed
+        // guess at wall time and hoping exactly two ticks landed) so this
+        // isn't sensitive to CI-runner scheduling jitter -- a fixed sleep
+        // here was observed to flake under load. "keel-repl-2" existing
+        // alone isn't a safe trigger either: `zfs.snapshot()` creates it
+        // *before* the tick's send even starts, well before the pruning of
+        // "keel-repl-1" that only happens once the send is confirmed, so
+        // polling on that alone raced ahead of the prune. Waiting for both
+        // "keel-repl-2 exists" and "keel-repl-1 gone" together only
+        // observes the state once the second tick has fully completed.
         let dataset = "zroot/keel/volumes/db-2-data";
         let mut discard = Vec::new();
-        assert!(
-            matches!(zfs.send_snapshot(dataset, "keel-repl-1", None, &mut discard), Err(keel_zfs::ZfsError::NotFound(_))),
-            "expected the first tick's snapshot to have been pruned after the second tick's successful send"
-        );
-        assert!(
-            zfs.send_snapshot(dataset, "keel-repl-2", None, &mut discard)
-                .is_ok(),
-            "expected the second tick's snapshot to still exist as the current incremental base"
-        );
+        let mut attempts = 0;
+        loop {
+            let repl_2_exists = zfs
+                .send_snapshot(dataset, "keel-repl-2", None, &mut discard)
+                .is_ok();
+            let repl_1_gone = matches!(
+                zfs.send_snapshot(dataset, "keel-repl-1", None, &mut discard),
+                Err(keel_zfs::ZfsError::NotFound(_))
+            );
+            if repl_2_exists && repl_1_gone {
+                break;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 300,
+                "expected the first tick's snapshot to have been pruned after the second tick's successful send \
+                 (repl-2 exists: {repl_2_exists}, repl-1 gone: {repl_1_gone})"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

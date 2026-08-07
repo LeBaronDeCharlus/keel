@@ -1,4 +1,5 @@
 use crate::addresses::{self, UsedAddresses};
+use crate::cordoned::Cordoned;
 use crate::pending_fences::PendingFences;
 use crate::placements::Placements;
 use crate::registry::{PodCidrCollision, Registry, ResolveError, UnknownNode};
@@ -89,6 +90,13 @@ pub enum ReplicaAction {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementKind {
+    PlainJail,
+    StatelessService,
+    StatefulService,
+}
+
 pub enum Command {
     Register(
         String,
@@ -115,6 +123,7 @@ pub enum Command {
     ResolvePlacement(String, Sender<Result<(String, String), PlacementError>>),
     RecordPlacement(String, String, Sender<()>),
     RemovePlacement(String, Sender<()>),
+    NodePlacements(String, Sender<Vec<(String, PlacementKind)>>),
     OwnerOf(String, Sender<Option<Owner>>),
     ApplyService(
         String,
@@ -179,8 +188,12 @@ pub enum Command {
     PendingFencesForNode(String, Sender<Vec<String>>),
     RemovePendingFence(String, Sender<()>),
     PrepareForceRepin(String, Sender<Result<ForceRepinPrep, ForceRepinError>>),
+    PrepareDrainRepin(String, Sender<Result<ForceRepinPrep, ForceRepinError>>),
+    Cordon(String, Sender<Result<(), UnknownNode>>),
+    Uncordon(String, Sender<Result<(), UnknownNode>>),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     mut registry: Registry,
     mut placements: Placements,
@@ -188,6 +201,7 @@ pub fn spawn(
     mut used_addresses: UsedAddresses,
     mut standbys: Standbys,
     mut pending_fences: PendingFences,
+    mut cordoned: Cordoned,
     state_dir: PathBuf,
 ) -> (JoinHandle<()>, Sender<Command>) {
     let (tx, rx) = mpsc::channel::<Command>();
@@ -201,6 +215,7 @@ pub fn spawn(
                     &mut used_addresses,
                     &mut standbys,
                     &mut pending_fences,
+                    &mut cordoned,
                     &state_dir,
                     command,
                 );
@@ -253,6 +268,16 @@ fn persist_pending_fences(pending_fences: &PendingFences, state_dir: &Path) {
     }
 }
 
+fn persist_cordoned(cordoned: &Cordoned, state_dir: &Path) {
+    if let Err(e) = crate::store::save(&state_dir.join("cordoned.yaml"), cordoned) {
+        eprintln!("keel-controlplane: failed to persist cordoned state: {e}");
+    }
+}
+
+fn is_schedulable(status: &wire::NodeStatus, cordoned: &Cordoned) -> bool {
+    status.status == NodeState::Alive && !cordoned.is_cordoned(&status.id)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     registry: &mut Registry,
@@ -261,6 +286,7 @@ fn handle_command(
     used_addresses: &mut UsedAddresses,
     standbys: &mut Standbys,
     pending_fences: &mut PendingFences,
+    cordoned: &mut Cordoned,
     state_dir: &Path,
     command: Command,
 ) {
@@ -288,7 +314,11 @@ fn handle_command(
             let _ = reply.send(result);
         }
         Command::List(reply) => {
-            let _ = reply.send(registry.list(Instant::now()));
+            let mut statuses = registry.list(Instant::now());
+            for s in &mut statuses {
+                s.cordoned = cordoned.is_cordoned(&s.id);
+            }
+            let _ = reply.send(statuses);
         }
         Command::Resolve(id, reply) => {
             let result = registry.resolve(&id, Instant::now());
@@ -305,7 +335,7 @@ fn handle_command(
                 let nodes: Vec<scheduler::NodeResources> = registry
                     .list(now)
                     .into_iter()
-                    .filter(|status| status.status == NodeState::Alive)
+                    .filter(|status| is_schedulable(status, cordoned))
                     .map(|status| scheduler::NodeResources {
                         id: status.id,
                         capacity_cpu: status.capacity_cpu,
@@ -345,6 +375,30 @@ fn handle_command(
             persist_placements(placements, state_dir);
             let _ = reply.send(());
         }
+        Command::NodePlacements(node_id, reply) => {
+            let result = placements
+                .iter()
+                .filter(|(_, placed_node)| *placed_node == node_id)
+                .map(|(name, _)| {
+                    let kind = match services::owner_of(name, placements, services) {
+                        Some(Owner::Service(service_name)) => {
+                            let stateful = services
+                                .get(&service_name)
+                                .map(|r| !r.template.volumes.is_empty())
+                                .unwrap_or(false);
+                            if stateful {
+                                PlacementKind::StatefulService
+                            } else {
+                                PlacementKind::StatelessService
+                            }
+                        }
+                        _ => PlacementKind::PlainJail,
+                    };
+                    (name.to_string(), kind)
+                })
+                .collect();
+            let _ = reply.send(result);
+        }
         Command::OwnerOf(name, reply) => {
             let _ = reply.send(services::owner_of(&name, placements, services));
         }
@@ -377,7 +431,7 @@ fn handle_command(
             let mut alive_nodes: Vec<scheduler::NodeResources> = registry
                 .list(now)
                 .into_iter()
-                .filter(|s| s.status == NodeState::Alive)
+                .filter(|s| is_schedulable(s, cordoned))
                 .map(|s| scheduler::NodeResources {
                     id: s.id,
                     capacity_cpu: s.capacity_cpu,
@@ -630,105 +684,163 @@ fn handle_command(
             let _ = reply.send(());
         }
         Command::PrepareForceRepin(replica_name, reply) => {
-            let now = Instant::now();
-            let result = (|| {
-                let old_node_id = placements
-                    .get(&replica_name)
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| ForceRepinError::NotPlaced(replica_name.clone()))?;
-                // Checked before the primary-aliveness check below: a
-                // non-stateful replica (no recorded standby at all) must
-                // report NotStateful regardless of whether its sole node
-                // happens to be Alive or Dead, rather than reporting
-                // PrimaryStillAlive first and never surfacing NotStateful for
-                // an Alive-but-stateless replica.
-                let standby_node_id = standbys
-                    .get(&replica_name)
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
-                if registry.resolve(&old_node_id, now).is_ok() {
-                    return Err(ForceRepinError::PrimaryStillAlive(old_node_id));
-                }
-                // No aliveness check here on purpose (see last_known_addr's
-                // own doc comment): the whole point of the immediate fencing
-                // push is attempting to reach a node the check just above
-                // called Dead, in case it's actually alive and only failing
-                // to heartbeat to the control plane specifically.
-                let old_node_last_known_addr = registry.last_known_addr(&old_node_id);
-                // Deliberately Registry::resolve(), not replicate_addr(): this
-                // is the address the control plane forwards the readiness
-                // GET and the provisioning PUT to (this node's normal HTTP
-                // API), not a replication target embedded in a spec. Do not
-                // "fix" this to replicate_addr() by symmetry with
-                // fresh_standby_addr below -- they serve different purposes.
-                let standby_addr = registry
-                    .resolve(&standby_node_id, now)
-                    .map_err(ForceRepinError::StandbyUnresolvable)?;
-
-                let service_name = services::owner_of(&replica_name, placements, services)
-                    .and_then(|owner| match owner {
-                        Owner::Service(name) => Some(name),
-                        Owner::Unmanaged => None,
-                    })
-                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?;
-                let template = services
-                    .get(&service_name)
-                    .ok_or_else(|| ForceRepinError::NotStateful(replica_name.clone()))?
-                    .template
-                    .clone();
-
-                let alive_nodes: Vec<scheduler::NodeResources> = registry
-                    .list(now)
-                    .into_iter()
-                    .filter(|s| s.status == NodeState::Alive)
-                    .map(|s| scheduler::NodeResources {
-                        id: s.id,
-                        capacity_cpu: s.capacity_cpu,
-                        capacity_memory: s.capacity_memory,
-                        committed_cpu: s.committed_cpu,
-                        committed_memory: s.committed_memory,
-                    })
-                    .collect();
-                let mut exclude = std::collections::HashSet::new();
-                exclude.insert(old_node_id.clone());
-                exclude.insert(standby_node_id.clone());
-                let fresh_standby_node_id = services::pick_node_for_service(alive_nodes, &exclude)
-                    .ok()
-                    .filter(|id| !exclude.contains(id))
-                    .ok_or(ForceRepinError::NoFreshStandby)?;
-                // replicate_addr(), not resolve(): this value is embedded
-                // into the promoted primary's spec.spec.replicate_to, telling
-                // its replication loop where to connect -- it must be the
-                // fresh standby's replication-listener address (Task 8b),
-                // not its main HTTP address.
-                let fresh_standby_addr = registry
-                    .replicate_addr(&fresh_standby_node_id)
-                    .ok_or(ForceRepinError::NoFreshStandby)?;
-
-                let pod_cidr = registry
-                    .pod_cidr(&standby_node_id)
-                    .ok_or(ForceRepinError::NoFreeAddress)?;
-                let address =
-                    addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses)
-                        .ok_or(ForceRepinError::NoFreeAddress)?;
-                let next_generation = placements.generation(&replica_name) + 1;
-
-                Ok(ForceRepinPrep {
-                    old_node_id,
-                    old_node_last_known_addr,
-                    standby_node_id,
-                    standby_addr,
-                    template,
-                    fresh_standby_node_id,
-                    fresh_standby_addr,
-                    address,
-                    prefix_len: pod_cidr.prefix_len(),
-                    next_generation,
-                })
-            })();
+            let result = prepare_repin(
+                &replica_name,
+                false,
+                registry,
+                placements,
+                standbys,
+                services,
+                used_addresses,
+                cordoned,
+            );
+            let _ = reply.send(result);
+        }
+        Command::PrepareDrainRepin(replica_name, reply) => {
+            let result = prepare_repin(
+                &replica_name,
+                true,
+                registry,
+                placements,
+                standbys,
+                services,
+                used_addresses,
+                cordoned,
+            );
+            let _ = reply.send(result);
+        }
+        Command::Cordon(node_id, reply) => {
+            let result = if registry.pod_cidr(&node_id).is_some() {
+                cordoned.cordon(node_id);
+                persist_cordoned(cordoned, state_dir);
+                Ok(())
+            } else {
+                Err(UnknownNode(node_id))
+            };
+            let _ = reply.send(result);
+        }
+        Command::Uncordon(node_id, reply) => {
+            let result = if registry.pod_cidr(&node_id).is_some() {
+                cordoned.uncordon(&node_id);
+                persist_cordoned(cordoned, state_dir);
+                Ok(())
+            } else {
+                Err(UnknownNode(node_id))
+            };
             let _ = reply.send(result);
         }
     }
+}
+
+/// Shared by `PrepareForceRepin` and `PrepareDrainRepin`: computes everything
+/// needed to promote a stateful replica's standby and re-place its primary
+/// elsewhere. The two differ only in whether a still-`Alive` primary is
+/// tolerated -- `allow_alive_primary` is the split-brain guard from
+/// `PrepareForceRepin`, kept for the ordinary (non-drain) path, and bypassed
+/// for `drain` since drain fences the old primary synchronously as part of
+/// the same operation (Task 6) rather than leaving it running independently.
+#[allow(clippy::too_many_arguments)]
+fn prepare_repin(
+    replica_name: &str,
+    allow_alive_primary: bool,
+    registry: &Registry,
+    placements: &Placements,
+    standbys: &Standbys,
+    services: &Services,
+    used_addresses: &UsedAddresses,
+    cordoned: &Cordoned,
+) -> Result<ForceRepinPrep, ForceRepinError> {
+    let now = Instant::now();
+    let old_node_id = placements
+        .get(replica_name)
+        .map(|s| s.to_string())
+        .ok_or_else(|| ForceRepinError::NotPlaced(replica_name.to_string()))?;
+    // Checked before the primary-aliveness check below: a non-stateful
+    // replica (no recorded standby at all) must report NotStateful
+    // regardless of whether its sole node happens to be Alive or Dead,
+    // rather than reporting PrimaryStillAlive first and never surfacing
+    // NotStateful for an Alive-but-stateless replica.
+    let standby_node_id = standbys
+        .get(replica_name)
+        .map(|s| s.to_string())
+        .ok_or_else(|| ForceRepinError::NotStateful(replica_name.to_string()))?;
+    if !allow_alive_primary && registry.resolve(&old_node_id, now).is_ok() {
+        return Err(ForceRepinError::PrimaryStillAlive(old_node_id));
+    }
+    // No aliveness check here on purpose (see last_known_addr's own doc
+    // comment): the whole point of the immediate fencing push is attempting
+    // to reach a node the check just above called Dead, in case it's
+    // actually alive and only failing to heartbeat to the control plane
+    // specifically.
+    let old_node_last_known_addr = registry.last_known_addr(&old_node_id);
+    // Deliberately Registry::resolve(), not replicate_addr(): this is the
+    // address the control plane forwards the readiness GET and the
+    // provisioning PUT to (this node's normal HTTP API), not a replication
+    // target embedded in a spec. Do not "fix" this to replicate_addr() by
+    // symmetry with fresh_standby_addr below -- they serve different
+    // purposes.
+    let standby_addr = registry
+        .resolve(&standby_node_id, now)
+        .map_err(ForceRepinError::StandbyUnresolvable)?;
+
+    let service_name = services::owner_of(replica_name, placements, services)
+        .and_then(|owner| match owner {
+            Owner::Service(name) => Some(name),
+            Owner::Unmanaged => None,
+        })
+        .ok_or_else(|| ForceRepinError::NotStateful(replica_name.to_string()))?;
+    let template = services
+        .get(&service_name)
+        .ok_or_else(|| ForceRepinError::NotStateful(replica_name.to_string()))?
+        .template
+        .clone();
+
+    let alive_nodes: Vec<scheduler::NodeResources> = registry
+        .list(now)
+        .into_iter()
+        .filter(|s| is_schedulable(s, cordoned))
+        .map(|s| scheduler::NodeResources {
+            id: s.id,
+            capacity_cpu: s.capacity_cpu,
+            capacity_memory: s.capacity_memory,
+            committed_cpu: s.committed_cpu,
+            committed_memory: s.committed_memory,
+        })
+        .collect();
+    let mut exclude = std::collections::HashSet::new();
+    exclude.insert(old_node_id.clone());
+    exclude.insert(standby_node_id.clone());
+    let fresh_standby_node_id = services::pick_node_for_service(alive_nodes, &exclude)
+        .ok()
+        .filter(|id| !exclude.contains(id))
+        .ok_or(ForceRepinError::NoFreshStandby)?;
+    // replicate_addr(), not resolve(): this value is embedded into the
+    // promoted primary's spec.spec.replicate_to, telling its replication
+    // loop where to connect -- it must be the fresh standby's
+    // replication-listener address (Task 8b), not its main HTTP address.
+    let fresh_standby_addr = registry
+        .replicate_addr(&fresh_standby_node_id)
+        .ok_or(ForceRepinError::NoFreshStandby)?;
+
+    let pod_cidr = registry
+        .pod_cidr(&standby_node_id)
+        .ok_or(ForceRepinError::NoFreeAddress)?;
+    let address = addresses::first_free_address(pod_cidr, &standby_node_id, used_addresses)
+        .ok_or(ForceRepinError::NoFreeAddress)?;
+    let next_generation = placements.generation(replica_name) + 1;
+
+    Ok(ForceRepinPrep {
+        old_node_id,
+        old_node_last_known_addr,
+        standby_node_id,
+        standby_addr,
+        template,
+        fresh_standby_node_id,
+        fresh_standby_addr,
+        address,
+        prefix_len: pod_cidr.prefix_len(),
+        next_generation,
+    })
 }
 
 /// The exact health filter `GET /services/<name>` (`Command::DiscoverService`)
@@ -826,6 +938,38 @@ mod tests {
         dir
     }
 
+    fn test_node_status(id: &str, status: NodeState) -> wire::NodeStatus {
+        wire::NodeStatus {
+            id: id.to_string(),
+            addr: "192.168.64.4".to_string(),
+            pod_cidr: "10.0.4.0/24".to_string(),
+            status,
+            last_seen_secs: 0,
+            capacity_cpu: 0.0,
+            capacity_memory: 0,
+            committed_cpu: 0.0,
+            committed_memory: 0,
+            ingresses: vec![],
+            cordoned: false,
+        }
+    }
+
+    #[test]
+    fn is_schedulable_excludes_dead_and_cordoned_nodes() {
+        let cordoned = {
+            let mut c = Cordoned::new();
+            c.cordon("node-cordoned".to_string());
+            c
+        };
+        let alive_schedulable = test_node_status("node-1", NodeState::Alive);
+        let alive_cordoned = test_node_status("node-cordoned", NodeState::Alive);
+        let dead_uncordoned = test_node_status("node-2", NodeState::Dead);
+
+        assert!(is_schedulable(&alive_schedulable, &cordoned));
+        assert!(!is_schedulable(&alive_cordoned, &cordoned));
+        assert!(!is_schedulable(&dead_uncordoned, &cordoned));
+    }
+
     fn template() -> JailTemplate {
         JailTemplate {
             image: "base/14.2-web".to_string(),
@@ -852,6 +996,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -877,6 +1022,45 @@ mod tests {
     }
 
     #[test]
+    fn list_reports_cordoned_true_for_a_cordoned_node() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            fresh_state_dir(),
+        )
+        .1;
+
+        let (reg_tx, reg_rx) = mpsc::channel();
+        commands
+            .send(Command::Register(
+                "node-1".to_string(),
+                "10.0.0.1".to_string(),
+                None,
+                4.0,
+                8 * 1024 * 1024 * 1024,
+                reg_tx,
+            ))
+            .unwrap();
+        reg_rx.recv().unwrap().unwrap();
+
+        let (cordon_tx, cordon_rx) = mpsc::channel();
+        commands
+            .send(Command::Cordon("node-1".to_string(), cordon_tx))
+            .unwrap();
+        cordon_rx.recv().unwrap().unwrap();
+
+        let (list_tx, list_rx) = mpsc::channel();
+        commands.send(Command::List(list_tx)).unwrap();
+        let statuses = list_rx.recv().unwrap();
+        assert!(statuses.iter().find(|s| s.id == "node-1").unwrap().cordoned);
+    }
+
+    #[test]
     fn heartbeat_command_on_unknown_id_returns_an_error() {
         let commands = spawn(
             Registry::new(test_cluster_cidr()),
@@ -885,6 +1069,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -912,6 +1097,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -952,6 +1138,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -983,6 +1170,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1034,6 +1222,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1051,6 +1240,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1069,6 +1259,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1102,6 +1293,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1185,6 +1377,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1210,6 +1403,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1237,6 +1431,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1272,6 +1467,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1297,6 +1493,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1320,6 +1517,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1369,6 +1567,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1395,6 +1594,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1438,6 +1638,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1481,6 +1682,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1529,6 +1731,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1549,6 +1752,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1683,6 +1887,7 @@ mod tests {
                 UsedAddresses::new(),
                 Standbys::new(),
                 PendingFences::new(),
+                Cordoned::new(),
                 state_dir.clone(),
             )
             .1;
@@ -1716,6 +1921,7 @@ mod tests {
             used_addresses,
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             state_dir,
         )
         .1;
@@ -1746,6 +1952,7 @@ mod tests {
                 UsedAddresses::new(),
                 Standbys::new(),
                 PendingFences::new(),
+                Cordoned::new(),
                 state_dir.clone(),
             )
             .1;
@@ -1924,6 +2131,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -1972,6 +2180,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2004,6 +2213,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2043,6 +2253,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2087,6 +2298,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2123,6 +2335,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2147,6 +2360,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2187,6 +2401,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2219,6 +2434,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2261,6 +2477,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2291,6 +2508,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2313,6 +2531,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2376,6 +2595,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2414,6 +2634,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2436,6 +2657,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2501,6 +2723,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2571,6 +2794,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2627,6 +2851,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2658,6 +2883,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2692,6 +2918,17 @@ mod tests {
         rx.recv().unwrap()
     }
 
+    fn prepare_drain_repin(
+        commands: &Sender<Command>,
+        replica_name: &str,
+    ) -> Result<ForceRepinPrep, ForceRepinError> {
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::PrepareDrainRepin(replica_name.to_string(), tx))
+            .unwrap();
+        rx.recv().unwrap()
+    }
+
     #[test]
     fn prepare_force_repin_on_an_unplaced_name_returns_not_placed() {
         let commands = spawn(
@@ -2701,6 +2938,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2719,6 +2957,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2741,6 +2980,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2765,6 +3005,108 @@ mod tests {
     }
 
     #[test]
+    fn prepare_force_repin_still_refuses_against_a_still_alive_primary() {
+        // Unchanged regression: the ordinary (non-drain) path keeps refusing,
+        // even after PrepareForceRepin's body is refactored to share
+        // prepare_repin with PrepareDrainRepin.
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
+        apply_service_with_template(&commands, "db", 1, stateful_template());
+        record_placement(&commands, "db-0", "node-1");
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
+        rx.recv().unwrap();
+
+        assert!(matches!(
+            prepare_force_repin(&commands, "db-0"),
+            Err(ForceRepinError::PrimaryStillAlive(_))
+        ));
+    }
+
+    #[test]
+    fn prepare_drain_repin_succeeds_against_a_still_alive_primary() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        register_node(&commands, "node-2", "10.0.0.2", 4.0, 8 * 1024 * 1024 * 1024);
+        // node-3 needs a real advertised replicate_addr, same as the
+        // existing force-repin happy-path test, so a fresh standby can be
+        // picked for the promoted primary's spec.
+        register_node_with_replicate_addr(
+            &commands,
+            "node-3",
+            "10.0.0.3",
+            "10.0.0.3",
+            4.0,
+            8 * 1024 * 1024 * 1024,
+        );
+        apply_service_with_template(&commands, "db", 1, stateful_template());
+        record_placement(&commands, "db-0", "node-1");
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::RecordStandby(
+                "db-0".to_string(),
+                "node-2".to_string(),
+                tx,
+            ))
+            .unwrap();
+        rx.recv().unwrap();
+
+        let prep = prepare_drain_repin(&commands, "db-0").unwrap();
+        assert_eq!(prep.old_node_id, "node-1");
+        assert_eq!(prep.standby_node_id, "node-2");
+    }
+
+    #[test]
+    fn prepare_drain_repin_still_refuses_a_non_stateful_name() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        register_node(&commands, "node-1", "10.0.0.1", 4.0, 8 * 1024 * 1024 * 1024);
+        apply_service(&commands, "web", 1);
+        record_placement(&commands, "web-0", "node-1");
+
+        assert_eq!(
+            prepare_drain_repin(&commands, "web-0"),
+            Err(ForceRepinError::NotStateful("web-0".to_string()))
+        );
+    }
+
+    #[test]
     fn prepare_force_repin_happy_path_picks_a_fresh_standby_and_a_free_address() {
         let commands = spawn(
             Registry::new(test_cluster_cidr()),
@@ -2773,6 +3115,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;
@@ -2822,6 +3165,7 @@ mod tests {
             UsedAddresses::new(),
             Standbys::new(),
             PendingFences::new(),
+            Cordoned::new(),
             fresh_state_dir(),
         )
         .1;

@@ -51,11 +51,12 @@ fn render_nodes(nodes: &[NodeSnapshot]) -> String {
     for node in nodes {
         let s = &node.status;
         rows.push_str(&format!(
-            "<tr><td>{id}</td><td>{addr}</td><td>{status:?}</td><td>{committed_cpu:.2}/{capacity_cpu:.2}</td>\
+            "<tr><td>{id}</td><td>{addr}</td><td>{status:?}</td><td>{cordoned}</td><td>{committed_cpu:.2}/{capacity_cpu:.2}</td>\
              <td>{committed_memory}/{capacity_memory}</td><td>{last_seen_secs}s</td>{stale}</tr>",
             id = escape_html(&s.id),
             addr = escape_html(&s.addr),
             status = s.status,
+            cordoned = if s.cordoned { "cordoned" } else { "" },
             committed_cpu = s.committed_cpu,
             capacity_cpu = s.capacity_cpu,
             committed_memory = s.committed_memory,
@@ -65,7 +66,7 @@ fn render_nodes(nodes: &[NodeSnapshot]) -> String {
         ));
     }
     format!(
-        "<h2>Nodes</h2><table><tr><th>ID</th><th>Address</th><th>Status</th><th>CPU (committed/capacity)</th>\
+        "<h2>Nodes</h2><table><tr><th>ID</th><th>Address</th><th>Status</th><th>Cordoned</th><th>CPU (committed/capacity)</th>\
          <th>Memory (committed/capacity)</th><th>Last seen</th><th></th></tr>{rows}</table>"
     )
 }
@@ -204,6 +205,7 @@ mod tests {
                 backend_port: 8080,
                 cert_expires_at_unix: Some(1_000_000_000 + 10 * 24 * 60 * 60),
             }],
+            cordoned: false,
         }
     }
 
@@ -435,6 +437,44 @@ mod tests {
         };
         let html = render(&snapshot, 1_000_000_000);
         assert!(html.contains("<td>stale</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn renders_cordoned_for_a_cordoned_node() {
+        let mut node_status = sample_node_status();
+        node_status.cordoned = true;
+        let node = NodeSnapshot {
+            status: node_status,
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(html.contains("<td>cordoned</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn renders_an_empty_cordoned_cell_for_a_schedulable_node() {
+        let node = NodeSnapshot {
+            status: sample_node_status(),
+            jails: vec![],
+            volumes: vec![],
+            data_stale: false,
+        };
+        let snapshot = crate::snapshot::Snapshot {
+            nodes: vec![node],
+            services: vec![],
+            stale: false,
+            stale_as_of_unix: None,
+        };
+        let html = render(&snapshot, 1_000_000_000);
+        assert!(!html.contains("<td>cordoned</td>"), "got: {html}");
     }
 
     #[test]
