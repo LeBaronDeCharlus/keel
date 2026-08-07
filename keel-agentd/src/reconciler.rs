@@ -2036,6 +2036,9 @@ mod tests {
         fn destroy_dataset(&self, dataset: &str) -> Result<(), keel_zfs::ZfsError> {
             self.inner.destroy_dataset(dataset)
         }
+        fn destroy_dataset_recursive(&self, dataset: &str) -> Result<(), keel_zfs::ZfsError> {
+            self.inner.destroy_dataset_recursive(dataset)
+        }
         fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), keel_zfs::ZfsError> {
             self.inner.snapshot(dataset, snapshot)
         }

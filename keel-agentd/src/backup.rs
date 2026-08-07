@@ -153,7 +153,14 @@ pub fn restore_agent_state<J: JailRuntime, Z: ZfsManager, N: NetManager, M: Moun
             };
             let dataset = record::volume_dataset_path(pool, volume_name);
             if zfs.dataset_exists(&dataset)? {
-                zfs.destroy_dataset(&dataset)?;
+                // Recursive: every backup leaves a permanent snapshot on the
+                // volume it backs up (no retention exists yet), so by the
+                // time a volume is restored, its live dataset almost always
+                // has at least one snapshot from a prior backup — a plain
+                // (non-recursive) destroy fails on real ZFS with "filesystem
+                // has children" in that case. See `destroy_dataset_recursive`'s
+                // doc comment.
+                zfs.destroy_dataset_recursive(&dataset)?;
             }
             let mut file = File::open(entry.path())?;
             zfs.receive_snapshot(&dataset, &mut file)?;
@@ -377,6 +384,30 @@ mod tests {
             "a jail record created after the backup must not survive restore"
         );
         assert!(state_dir.join("web-1.yaml").exists());
+        assert!(zfs.dataset_exists("zroot/keel/volumes/web-1-data").unwrap());
+    }
+
+    #[test]
+    fn restore_agent_state_succeeds_against_a_volume_backed_up_more_than_once() {
+        // Reproduces a bug found during Milestone 24's real FreeBSD VM
+        // verification: every backup leaves a permanent snapshot on the
+        // volume it backs up (no retention exists yet), so a volume that
+        // has been backed up two or more times has multiple snapshots by
+        // the time it's restored. `restore_agent_state` used to call
+        // `zfs.destroy_dataset` (non-recursive) on the live dataset before
+        // receiving, which on real ZFS fails with "filesystem has
+        // children" whenever any snapshot is present -- reliably
+        // reproduced on real hardware, invisible here until
+        // `FakeZfsManager::destroy_dataset` was made to accurately model
+        // that same real-ZFS behavior.
+        let (mut reconciler, zfs) = test_reconciler("restore_after_two_backups");
+        reconciler.apply(stateful_spec("web-1")).unwrap();
+        let _ = reconciler.reconcile(std::time::Instant::now());
+        backup_agent_state(&reconciler, &zfs, "zroot", "backup-1").unwrap();
+        backup_agent_state(&reconciler, &zfs, "zroot", "backup-2").unwrap();
+
+        restore_agent_state(&mut reconciler, &zfs, "zroot", "backup-2").unwrap();
+
         assert!(zfs.dataset_exists("zroot/keel/volumes/web-1-data").unwrap());
     }
 

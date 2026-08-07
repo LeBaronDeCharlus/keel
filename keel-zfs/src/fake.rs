@@ -94,12 +94,49 @@ impl ZfsManager for FakeZfsManager {
         if self.busy.lock().unwrap().contains(dataset) {
             return Err(ZfsError::Busy(dataset.to_string()));
         }
-        if self.datasets.lock().unwrap().remove(dataset) {
-            self.quotas.lock().unwrap().remove(dataset);
-            Ok(())
-        } else {
-            Err(ZfsError::NotFound(dataset.to_string()))
+        if !self.datasets.lock().unwrap().contains(dataset) {
+            return Err(ZfsError::NotFound(dataset.to_string()));
         }
+        // Mirrors real `zfs destroy` (no `-r`): refuses a dataset that
+        // still has snapshots, with the same "filesystem has children"
+        // wording real ZFS uses, so callers that pattern-match on the
+        // message (none do today, but future ones might) see realistic
+        // text. Found missing during Milestone 24's real-VM verification:
+        // this fake previously let a non-recursive destroy succeed
+        // regardless of snapshots, masking a real bug where restore always
+        // failed against a volume that had ever been backed up before.
+        let has_snapshots = self
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with(&format!("{dataset}@")));
+        if has_snapshots {
+            return Err(ZfsError::CommandFailed(
+                format!("zfs destroy {dataset}"),
+                std::process::ExitStatus::from_raw(256),
+                format!("cannot destroy '{dataset}': filesystem has children"),
+            ));
+        }
+        self.datasets.lock().unwrap().remove(dataset);
+        self.quotas.lock().unwrap().remove(dataset);
+        Ok(())
+    }
+
+    fn destroy_dataset_recursive(&self, dataset: &str) -> Result<(), ZfsError> {
+        if self.busy.lock().unwrap().contains(dataset) {
+            return Err(ZfsError::Busy(dataset.to_string()));
+        }
+        if !self.datasets.lock().unwrap().remove(dataset) {
+            return Err(ZfsError::NotFound(dataset.to_string()));
+        }
+        self.quotas.lock().unwrap().remove(dataset);
+        let prefix = format!("{dataset}@");
+        self.snapshots
+            .lock()
+            .unwrap()
+            .retain(|s| !s.starts_with(&prefix));
+        Ok(())
     }
 
     fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), ZfsError> {

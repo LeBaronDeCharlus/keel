@@ -32,6 +32,19 @@ pub trait ZfsManager {
 
     fn destroy_dataset(&self, dataset: &str) -> Result<(), ZfsError>;
 
+    /// Like `destroy_dataset`, but also destroys every snapshot the
+    /// dataset carries (`zfs destroy -r`) instead of failing with
+    /// "filesystem has children" when any exist. Restore needs this: every
+    /// backup leaves a permanent snapshot on the volume it backs up (no
+    /// retention/pruning exists yet), so by the time a volume is restored a
+    /// second or later time, its live dataset always has at least one
+    /// snapshot from a prior backup — a plain `destroy_dataset` reliably
+    /// fails in that case. Confirmed directly against real ZFS during
+    /// Milestone 24's VM verification: `backup create` then `restore`
+    /// against the same volume failed every time with exactly this error
+    /// before this method existed.
+    fn destroy_dataset_recursive(&self, dataset: &str) -> Result<(), ZfsError>;
+
     fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), ZfsError>;
 
     /// Destroys `dataset@snapshot`. Used to prune the previous incremental

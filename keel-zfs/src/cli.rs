@@ -30,6 +30,57 @@ impl CliZfsManager {
             ))
         }
     }
+
+    /// Shared by `destroy_dataset` and `destroy_dataset_recursive`: both are
+    /// a plain `zfs destroy` invocation (with or without `-r`) that needs
+    /// the same busy-retry and not-found-mapping behavior — see
+    /// `destroy_dataset`'s original doc comment (now here) for why.
+    ///
+    /// Immediately after a jail using this dataset as its rootfs is torn
+    /// down (`jail -r`), the kernel can take a brief moment to release
+    /// the mount's last references even though `jail -r` and the
+    /// process's own reaping have both already completed — `zfs
+    /// destroy` fails with "dataset is busy" in that narrow window.
+    /// Reproduced directly against the real VM during Milestone 5
+    /// verification (the busy state reliably clears within well under
+    /// a second). Retry briefly rather than failing a caller (like
+    /// `Reconciler::delete`) that chains this right after destroying
+    /// the owning jail.
+    fn destroy_dataset_with_args(args: &[&str], dataset: &str) -> Result<(), ZfsError> {
+        let mut last_err = None;
+        let mut last_was_busy = false;
+        for _ in 0..10 {
+            match Self::run_checked(args) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // `zfs destroy` on a dataset that doesn't exist prints
+                    // `cannot open '<dataset>': dataset does not exist` and
+                    // exits 1 (verified directly on the real VM) — the same
+                    // condition `Reconciler::delete` already tolerates from
+                    // `FakeZfsManager` (which returns `NotFound` directly),
+                    // for the real case of deleting a record whose
+                    // provisioning failed before this dataset was ever
+                    // cloned. `keel-jail::ProcessJailRuntime::destroy` had
+                    // the identical gap for `jail -r`, fixed in Milestone 8.
+                    if matches!(&e, ZfsError::CommandFailed(_, _, stderr) if stderr.contains("dataset does not exist"))
+                    {
+                        return Err(ZfsError::NotFound(dataset.to_string()));
+                    }
+                    let is_busy = matches!(&e, ZfsError::CommandFailed(_, _, stderr) if stderr.contains("dataset is busy"));
+                    last_was_busy = is_busy;
+                    last_err = Some(e);
+                    if !is_busy {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        if last_was_busy {
+            return Err(ZfsError::Busy(dataset.to_string()));
+        }
+        Err(last_err.unwrap())
+    }
 }
 
 impl Default for CliZfsManager {
@@ -66,49 +117,11 @@ impl ZfsManager for CliZfsManager {
     }
 
     fn destroy_dataset(&self, dataset: &str) -> Result<(), ZfsError> {
-        // Immediately after a jail using this dataset as its rootfs is torn
-        // down (`jail -r`), the kernel can take a brief moment to release
-        // the mount's last references even though `jail -r` and the
-        // process's own reaping have both already completed — `zfs
-        // destroy` fails with "dataset is busy" in that narrow window.
-        // Reproduced directly against the real VM during Milestone 5
-        // verification (the busy state reliably clears within well under
-        // a second). Retry briefly rather than failing a caller (like
-        // `Reconciler::delete`) that chains this right after destroying
-        // the owning jail.
-        let mut last_err = None;
-        let mut last_was_busy = false;
-        for _ in 0..10 {
-            match Self::run_checked(&["destroy", dataset]) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    // `zfs destroy` on a dataset that doesn't exist prints
-                    // `cannot open '<dataset>': dataset does not exist` and
-                    // exits 1 (verified directly on the real VM) — the same
-                    // condition `Reconciler::delete` already tolerates from
-                    // `FakeZfsManager` (which returns `NotFound` directly),
-                    // for the real case of deleting a record whose
-                    // provisioning failed before this dataset was ever
-                    // cloned. `keel-jail::ProcessJailRuntime::destroy` had
-                    // the identical gap for `jail -r`, fixed in Milestone 8.
-                    if matches!(&e, ZfsError::CommandFailed(_, _, stderr) if stderr.contains("dataset does not exist"))
-                    {
-                        return Err(ZfsError::NotFound(dataset.to_string()));
-                    }
-                    let is_busy = matches!(&e, ZfsError::CommandFailed(_, _, stderr) if stderr.contains("dataset is busy"));
-                    last_was_busy = is_busy;
-                    last_err = Some(e);
-                    if !is_busy {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-        }
-        if last_was_busy {
-            return Err(ZfsError::Busy(dataset.to_string()));
-        }
-        Err(last_err.unwrap())
+        Self::destroy_dataset_with_args(&["destroy", dataset], dataset)
+    }
+
+    fn destroy_dataset_recursive(&self, dataset: &str) -> Result<(), ZfsError> {
+        Self::destroy_dataset_with_args(&["destroy", "-r", dataset], dataset)
     }
 
     fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), ZfsError> {
