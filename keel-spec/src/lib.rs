@@ -1,4 +1,5 @@
 pub mod error;
+pub mod fs_copy;
 pub mod resources;
 pub mod types;
 pub mod validate;
