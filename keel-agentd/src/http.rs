@@ -1338,6 +1338,55 @@ mod tests {
     }
 
     #[test]
+    fn post_backup_returns_a_non_2xx_status_naming_the_failed_volume_on_partial_failure() {
+        // Drives the same partial-failure scenario as
+        // `worker::tests::backup_command_surfaces_a_partial_failure_in_failed_volumes`
+        // all the way through `POST /backup/<id>`, proving `handle_backup`
+        // itself turns a non-empty `failed_volumes` into a non-2xx response
+        // that names the volume that failed, rather than only ever
+        // exercising this at the worker/`Command::Backup` level.
+        let name =
+            "post_backup_returns_a_non_2xx_status_naming_the_failed_volume_on_partial_failure";
+        let socket_path = start_test_server(name);
+
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-1",
+            &sample_spec_yaml_with_volume("web-1", "web-1-data"),
+        );
+        send_request(
+            &socket_path,
+            "PUT",
+            "/jails/web-2",
+            &sample_spec_yaml_with_volume("web-2", "web-2-data"),
+        );
+
+        // Fault-inject exactly like the worker-level test: pre-create a
+        // directory at web-2-data's destination `.zfs` file path inside
+        // `start_test_server`'s deterministic state_dir, forcing
+        // `File::create` to hit a real I/O error for that one volume.
+        let zfs_dir = std::env::temp_dir()
+            .join(format!("keel-agentd-http-test-state-{name}"))
+            .join("backups/backup-1/zfs");
+        std::fs::create_dir_all(zfs_dir.join("web-2-data.zfs")).unwrap();
+
+        let (status, body) = send_request(&socket_path, "POST", "/backup/backup-1", "");
+        assert_ne!(
+            status, 200,
+            "a partial backup failure must not be reported as success, got body: {body}"
+        );
+        assert!(
+            body.contains("web-2-data"),
+            "expected the failed volume named in the response body, got: {body}"
+        );
+        assert!(
+            body.contains("backed up 1"),
+            "expected the response to acknowledge the one volume that did succeed, got: {body}"
+        );
+    }
+
+    #[test]
     fn delete_replica_target_on_an_unknown_name_is_still_200() {
         // Idempotent by design (mirrors ReplicaTargetRegistry::remove's own
         // no-op-on-absent contract): deleting a target that's already gone,

@@ -795,6 +795,96 @@ mod tests {
         assert_eq!(result.failed_volumes, Vec::<String>::new());
     }
 
+    fn stateful_spec(name: &str, address: &str) -> JailSpec {
+        JailSpec {
+            api_version: "keel/v1".to_string(),
+            kind: "Jail".to_string(),
+            metadata: Metadata {
+                name: name.to_string(),
+            },
+            spec: Spec {
+                image: "base/14.2-web".to_string(),
+                command: vec!["/usr/local/bin/myapp".to_string()],
+                network: NetworkSpec {
+                    vnet: true,
+                    bridge: "keel0".to_string(),
+                    address: address.to_string(),
+                },
+                resources: ResourcesSpec {
+                    cpu: "1".to_string(),
+                    memory: "256M".to_string(),
+                },
+                restart_policy: RestartPolicy::Always,
+                volumes: vec![VolumeMount {
+                    name: format!("{name}-data"),
+                    mount_path: "/data".to_string(),
+                    size: "1G".to_string(),
+                }],
+                replicate_to: None,
+                generation: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn backup_command_surfaces_a_partial_failure_in_failed_volumes() {
+        // Reproduces the same partial-failure scenario Task 4 already
+        // proves at the `backup_agent_state` function level (see
+        // `backup.rs`'s
+        // `backup_agent_state_continues_past_one_failed_volume_and_still_backs_up_the_rest`),
+        // but driven through `Command::Backup` on a live worker, so the
+        // worker/HTTP layer is proven to actually surface a partial
+        // failure rather than silently reporting success.
+        let name = "backup_command_surfaces_a_partial_failure_in_failed_volumes";
+        let commands = spawn_test_worker(name);
+
+        commands
+            .send(Command::Apply(
+                stateful_spec("web-1", "10.0.0.5/24"),
+                mpsc::channel().0,
+            ))
+            .unwrap();
+        commands
+            .send(Command::Apply(
+                stateful_spec("web-2", "10.0.0.6/24"),
+                mpsc::channel().0,
+            ))
+            .unwrap();
+
+        // Round-trip a Get (processed strictly after both Applies by the
+        // single-threaded worker) to confirm the immediate reconcile
+        // provisioned both jails and their volumes before injecting the
+        // fault.
+        let (get_tx, get_rx) = mpsc::channel();
+        commands.send(Command::Get(None, get_tx)).unwrap();
+        let statuses = get_rx.recv().unwrap();
+        assert_eq!(statuses.len(), 2, "expected both jails to be provisioned");
+        assert!(
+            statuses.iter().all(|s| s.running),
+            "expected both jails to be running after the immediate reconcile"
+        );
+
+        // Fault-inject exactly like backup.rs's own test: pre-create a
+        // directory at web-2-data's destination `.zfs` file path, forcing
+        // `File::create` to hit a real I/O error, while web-1's volume is
+        // left intact. `test_state_dir` itself wipes-then-returns the
+        // directory, so the path is reconstructed here rather than calling
+        // it again (which would delete the state the two Applies above
+        // just wrote).
+        let zfs_dir = std::env::temp_dir()
+            .join(format!("keel-agentd-worker-test-{name}"))
+            .join("backups/backup-1/zfs");
+        std::fs::create_dir_all(zfs_dir.join("web-2-data.zfs")).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::Backup("backup-1".to_string(), tx))
+            .unwrap();
+        let result = rx.recv().unwrap().unwrap();
+        assert_eq!(result.volumes, vec!["web-1-data".to_string()]);
+        assert_eq!(result.failed_volumes, vec!["web-2-data".to_string()]);
+    }
+
     #[test]
     fn restore_command_on_an_unknown_backup_id_returns_an_error() {
         let commands =
