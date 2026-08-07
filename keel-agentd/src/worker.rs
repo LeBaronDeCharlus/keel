@@ -32,6 +32,11 @@ pub enum Command {
     ApplyIngress(IngressSpec, Sender<Result<(), ReconcileError>>),
     GetIngress(Option<String>, Sender<Vec<crate::wire::IngressStatus>>),
     DeleteIngress(String, Sender<Result<(), ReconcileError>>),
+    Backup(
+        String,
+        Sender<Result<crate::wire::BackupResult, crate::backup::BackupError>>,
+    ),
+    Restore(String, Sender<Result<(), crate::backup::BackupError>>),
 }
 
 /// `replicate_tls` is the TLS material the replication *sender* side
@@ -206,6 +211,14 @@ fn handle_command<
         Command::DeleteIngress(name, reply) => {
             let result = reconciler.delete_ingress(&name);
             let _ = reconciler.reconcile(Instant::now());
+            let _ = reply.send(result);
+        }
+        Command::Backup(id, reply) => {
+            let result = crate::backup::backup_agent_state(reconciler, zfs, pool, &id);
+            let _ = reply.send(result);
+        }
+        Command::Restore(id, reply) => {
+            let result = crate::backup::restore_agent_state(reconciler, zfs, pool, &id);
             let _ = reply.send(result);
         }
     }
@@ -759,6 +772,41 @@ mod tests {
             replicating.contains("db-0"),
             "expected the re-apply to start tracking a new replication loop"
         );
+    }
+
+    #[test]
+    fn backup_command_backs_up_every_provisioned_volume() {
+        let commands = spawn_test_worker("backup_command_backs_up_every_provisioned_volume");
+        commands
+            .send(Command::Apply(sample_spec("web-1"), mpsc::channel().0))
+            .unwrap();
+        // Wait for the immediate reconcile Apply triggers by round-tripping
+        // a Get before issuing Backup.
+        let (get_tx, get_rx) = mpsc::channel();
+        commands.send(Command::Get(None, get_tx)).unwrap();
+        get_rx.recv().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::Backup("backup-1".to_string(), tx))
+            .unwrap();
+        let result = rx.recv().unwrap().unwrap();
+        assert_eq!(result.volumes, Vec::<String>::new());
+        assert_eq!(result.failed_volumes, Vec::<String>::new());
+    }
+
+    #[test]
+    fn restore_command_on_an_unknown_backup_id_returns_an_error() {
+        let commands =
+            spawn_test_worker("restore_command_on_an_unknown_backup_id_returns_an_error");
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::Restore("missing".to_string(), tx))
+            .unwrap();
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Err(crate::backup::BackupError::UnknownBackup(_))
+        ));
     }
 
     #[test]

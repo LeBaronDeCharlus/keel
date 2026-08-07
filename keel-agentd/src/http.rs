@@ -307,6 +307,8 @@ fn route(
         ("GET", ["ingress"]) => handle_get_ingress(None, commands),
         ("GET", ["ingress", name]) => handle_get_ingress(Some(name.to_string()), commands),
         ("DELETE", ["ingress", name]) => handle_delete_ingress(name, commands),
+        ("POST", ["backup", id]) => handle_backup(id, commands),
+        ("POST", ["restore", id]) => handle_restore(id, commands),
         _ => error_response(
             404,
             format!("no route for {} {}", request.method, request.path),
@@ -574,6 +576,51 @@ fn handle_delete_volume(name: &str, commands: &Sender<Command>) -> (u16, Vec<u8>
     match reply_rx.recv() {
         Ok(Ok(())) => (200, Vec::new()),
         Ok(Err(e)) => error_response(status_for_error(&e), e.to_string()),
+        Err(_) => error_response(500, "reconciler worker did not respond".to_string()),
+    }
+}
+
+fn handle_backup(id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if commands
+        .send(Command::Backup(id.to_string(), reply_tx))
+        .is_err()
+    {
+        return error_response(500, "reconciler worker is not running".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(Ok(result)) if result.failed_volumes.is_empty() => yaml_response(200, &result),
+        // Some volumes were backed up successfully and remain on disk even
+        // though this response is non-2xx: the failure here is reported so
+        // the control plane's manifest doesn't silently look complete, not
+        // to imply nothing was captured.
+        Ok(Ok(result)) => error_response(
+            500,
+            format!(
+                "backed up {} volume(s), failed on: {}",
+                result.volumes.len(),
+                result.failed_volumes.join(", ")
+            ),
+        ),
+        Ok(Err(e)) => error_response(500, e.to_string()),
+        Err(_) => error_response(500, "reconciler worker did not respond".to_string()),
+    }
+}
+
+fn handle_restore(id: &str, commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if commands
+        .send(Command::Restore(id.to_string(), reply_tx))
+        .is_err()
+    {
+        return error_response(500, "reconciler worker is not running".to_string());
+    }
+    match reply_rx.recv() {
+        Ok(Ok(())) => (200, Vec::new()),
+        Ok(Err(e @ crate::backup::BackupError::UnknownBackup(_))) => {
+            error_response(404, e.to_string())
+        }
+        Ok(Err(e)) => error_response(500, e.to_string()),
         Err(_) => error_response(500, "reconciler worker did not respond".to_string()),
     }
 }
@@ -1274,6 +1321,20 @@ mod tests {
 
         let (status, _) = send_request(&socket_path, "GET", "/replica-targets/db-0", "");
         assert_eq!(status, 404, "expected the target to be gone after DELETE");
+    }
+
+    #[test]
+    fn backup_then_restore_over_http_round_trips() {
+        let socket = start_test_server("backup_then_restore_over_http_round_trips");
+
+        let (status, _) = send_request(&socket, "POST", "/backup/backup-1", "");
+        assert_eq!(status, 200);
+
+        let (status, _) = send_request(&socket, "POST", "/restore/backup-1", "");
+        assert_eq!(status, 200);
+
+        let (status, body) = send_request(&socket, "POST", "/restore/unknown-id", "");
+        assert_eq!(status, 404, "got: {body}");
     }
 
     #[test]
