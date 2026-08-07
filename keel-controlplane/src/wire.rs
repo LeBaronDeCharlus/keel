@@ -76,6 +76,19 @@ pub struct NodeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupComponentResult {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupManifest {
+    pub id: String,
+    pub controlplane: BackupComponentResult,
+    pub nodes: std::collections::HashMap<String, BackupComponentResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub pod_cidr: String,
 }

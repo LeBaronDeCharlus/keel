@@ -87,8 +87,10 @@ own local `<state_dir>/backups/<id>/agent/`.
 `Reconciler::list_volumes` already uses, `keel-agentd/src/reconciler.rs`),
 take a ZFS snapshot named `<id>` and `send_snapshot` it
 (`keel-zfs/src/lib.rs`) to a local file at
-`<state_dir>/backups/<id>/zfs/<volume-name>.zfs`, instead of streaming it
-over the TCP wire protocol the way Milestone 19's replication does.
+`<state_dir>/backups/<id>/zfs/<volume-name>.zfs`. `send_snapshot` and
+`receive_snapshot` already take a generic `Write`/`Read` sink rather than
+a TCP-specific type, so no new `keel-zfs` API is needed here - only a
+`File` passed in where Milestone 19's replication passes a TCP stream.
 
 Jail *rootfs* datasets (`<pool>/keel/jails/*`, `record::jail_dataset_path`)
 are deliberately **not** snapshotted. They're ZFS clones of a base image
@@ -141,9 +143,18 @@ plane responds 404 if `<id>` doesn't match a backup it knows about.
      after the backup was taken) is left untouched, not destroyed - it
      simply won't be referenced by any restored JailRecord unless a
      surviving jail spec still points at it.
-   - Let the reconciler's next tick recreate every jail from the restored
-     JailRecords, exactly like normal provisioning: clone rootfs fresh
-     from the base image, remount the now-restored volumes.
+   - Requires an operator-triggered restart of `keel-agentd` afterward to
+     load the restored `JailRecords` into memory: `Reconciler` only reads
+     `state_dir` once, inside `Reconciler::new` at process startup
+     (`keel-agentd/src/reconciler.rs`) - restoring the files on disk while
+     the process keeps running would leave its in-memory `records` map
+     (already emptied by the teardown step above) unaware of the restored
+     records, so nothing would reconcile them back into existence. This is
+     the same constraint the control plane already has (see step 4 below),
+     not a new one introduced here. Once restarted, the reconciler's first
+     reconcile pass recreates every jail from the restored `JailRecords`,
+     exactly like normal provisioning: clone rootfs fresh from the base
+     image, remount the now-restored volumes.
 4. The control plane restores its own state files from
    `backups/<id>/controlplane/` the same way, and requires an
    operator-triggered restart afterward to pick them up - consistent with
@@ -157,7 +168,29 @@ plane responds 404 if `<id>` doesn't match a backup it knows about.
   resulting manifest summary.
 - `keelctl backup list` - reads and prints known backup manifests.
 - `keelctl restore <id> --yes` - triggers a cluster-wide restore; refuses
-  to run without `--yes`.
+  to run without `--yes`. Prints a reminder that a restart of
+  `keel-controlplane` and every restored node's `keel-agentd` is required
+  before the restored state takes effect (see the Restore flow's steps 3
+  and 4).
+
+## Known Limitations
+
+A backup or restore runs on `keel-agentd`'s single reconciler worker
+thread, and holds it for the whole operation - a state-dir copy plus a
+full `zfs send`/`receive` per volume. While that's in flight the node
+sends no heartbeats, so the control plane's 15-second liveness window
+expires and the node shows up as `Dead` in `keelctl get nodes` and in the
+dashboard for the entire duration of a large backup, even though it is
+perfectly healthy and doing exactly what it was asked to do. (A node
+marked `Dead` mid-backup is also skipped by any *other* cluster-wide
+operation that fans out only to Alive nodes while it's busy.) This is a
+known limitation, not a bug: nothing is lost or corrupted, and the node
+resumes heartbeating as soon as the operation completes. A future
+milestone could remove it by moving the ZFS I/O off the worker thread
+(e.g. a dedicated backup thread the worker hands the job to, with the HTTP
+handler polling for completion), which is a large enough change to the
+agent's concurrency model to deserve its own task rather than being folded
+into this one.
 
 ## Error Handling
 

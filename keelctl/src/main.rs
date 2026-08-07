@@ -58,9 +58,11 @@ fn main() -> ExitCode {
         Some((cmd, rest)) if cmd == "cordon" => run_cordon(&target, rest),
         Some((cmd, rest)) if cmd == "uncordon" => run_uncordon(&target, rest),
         Some((cmd, rest)) if cmd == "drain" => run_drain(&target, rest),
+        Some((cmd, rest)) if cmd == "backup" => run_backup(&target, rest),
+        Some((cmd, rest)) if cmd == "restore" => run_restore(&target, rest),
         _ => {
             eprintln!(
-                "usage: keelctl <apply -f FILE|get [name]|delete NAME|delete-volume NAME|force-repin NAME|cordon NODE|uncordon NODE|drain NODE> [--socket PATH|--control-plane-addr ADDR --node ID]"
+                "usage: keelctl <apply -f FILE|get [name]|delete NAME|delete-volume NAME|force-repin NAME|cordon NODE|uncordon NODE|drain NODE|backup create|backup list|restore ID --yes> [--socket PATH|--control-plane-addr ADDR --node ID]"
             );
             return ExitCode::FAILURE;
         }
@@ -241,6 +243,39 @@ fn run_drain(target: &Target, args: &[String]) -> Result<String, String> {
     let node = args.first().ok_or("drain requires a node id")?;
     let path = format!("/nodes/{node}/drain");
     success_body(dispatch(target, "POST", &path, "")).map(|_| String::new())
+}
+
+fn run_backup(target: &Target, args: &[String]) -> Result<String, String> {
+    match args.split_first() {
+        Some((cmd, _)) if cmd == "create" => success_body(dispatch(target, "POST", "/backup", "")),
+        Some((cmd, _)) if cmd == "list" => success_body(dispatch(target, "GET", "/backup", "")),
+        _ => Err("backup requires a subcommand: create|list".to_string()),
+    }
+}
+
+fn run_restore(target: &Target, args: &[String]) -> Result<String, String> {
+    // `--yes` may appear before or after the id (`restore --yes ID` and
+    // `restore ID --yes` are both documented forms), so the id lookup must
+    // skip it regardless of position rather than blindly taking
+    // `args.first()` -- otherwise `restore --yes ID` would treat `--yes`
+    // itself as the id, and a flag-only `restore --yes` (no id at all) would
+    // slip past the "requires a backup id" check instead of triggering it.
+    let id = args
+        .iter()
+        .find(|a| *a != "--yes")
+        .ok_or("restore requires a backup id")?;
+    if !args.iter().any(|a| a == "--yes") {
+        return Err("restore is destructive; pass --yes to confirm".to_string());
+    }
+    // Nothing hot-reloads restored state: `Reconciler::new` and the control
+    // plane's `main.rs` read their state dirs only at process startup, so a
+    // `success: true` manifest alone would leave an operator believing the
+    // restore had already taken effect. The design doc's CLI surface calls
+    // for this reminder explicitly.
+    let manifest = success_body(dispatch(target, "POST", &format!("/restore/{id}"), ""))?;
+    Ok(format!(
+        "{manifest}\nRestore complete. Restart keel-controlplane and keel-agentd on every restored node NOW, before running any other command against this cluster, to load the restored state.\n"
+    ))
 }
 
 /// Tries `/jails/<name>` first; on a `404`, retries against
@@ -651,5 +686,20 @@ mod tests {
     fn run_drain_with_no_node_argument_is_a_usage_error() {
         let target = Target::Socket(PathBuf::from("/var/run/keel-agentd.sock"));
         assert!(run_drain(&target, &[]).is_err());
+    }
+
+    #[test]
+    fn run_restore_with_only_the_yes_flag_and_no_id_is_a_usage_error() {
+        // Regression test: `args.first()` used to grab "--yes" itself as the
+        // id whenever no real id followed it, so this flag-only invocation
+        // slipped past the "requires a backup id" check and went on to
+        // dispatch a malformed `POST /restore/--yes` instead of failing with
+        // a clear usage error. An unroutable socket path proves dispatch is
+        // never reached: if it were, this would fail with a connection
+        // error rather than the expected message below.
+        let target = Target::Socket(PathBuf::from("/nonexistent/keel-agentd.sock"));
+        let err = run_restore(&target, &["--yes".to_string()])
+            .expect_err("restore with only --yes and no id must fail");
+        assert_eq!(err, "restore requires a backup id");
     }
 }

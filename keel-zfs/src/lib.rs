@@ -22,6 +22,14 @@ pub trait ZfsManager {
     /// this does not create `dataset`'s parent (no `-p`).
     fn create_volume(&self, dataset: &str, quota: &str) -> Result<(), ZfsError>;
 
+    /// Sets (or re-sets) the `quota` property on a dataset that already
+    /// exists, unlike `create_volume`'s create-time `-o quota=`. Restore
+    /// needs this because `send_snapshot`/`receive_snapshot` carry no ZFS
+    /// properties, so a received volume dataset comes back with no quota at
+    /// all, and `create_volume` no-ops on it (it already exists) rather than
+    /// reapplying the declared size.
+    fn set_quota(&self, dataset: &str, quota: &str) -> Result<(), ZfsError>;
+
     fn destroy_dataset(&self, dataset: &str) -> Result<(), ZfsError>;
 
     fn snapshot(&self, dataset: &str, snapshot: &str) -> Result<(), ZfsError>;

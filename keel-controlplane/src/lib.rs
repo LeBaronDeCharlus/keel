@@ -1,4 +1,5 @@
 pub mod addresses;
+pub mod backup;
 pub mod cordoned;
 pub mod http;
 pub mod pending_fences;

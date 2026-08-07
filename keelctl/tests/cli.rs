@@ -596,3 +596,70 @@ fn drain_a_known_empty_node_succeeds() {
     let (ok, _stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["drain", "node-1"]);
     assert!(ok, "drain failed: {stderr}");
 }
+
+#[test]
+fn backup_create_list_and_restore_round_trip_through_the_control_plane() {
+    let node_addr = start_test_agentd_tcp("backup_round_trip");
+    let control_plane_addr = start_test_control_plane_with_node("node-1", &node_addr);
+
+    let (ok, create_stdout, stderr) =
+        run_keelctl_scheduled(&control_plane_addr, &["backup", "create"]);
+    assert!(ok, "backup create failed: {stderr}");
+    assert!(
+        create_stdout.contains("success: true"),
+        "expected a successful backup manifest, got: {create_stdout}"
+    );
+    let id = create_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("id: "))
+        .expect("expected an 'id: <value>' line in the backup create output")
+        .trim()
+        .to_string();
+
+    let (ok, list_stdout, stderr) = run_keelctl_scheduled(&control_plane_addr, &["backup", "list"]);
+    assert!(ok, "backup list failed: {stderr}");
+    assert!(
+        list_stdout.contains(&id),
+        "expected the created backup's id to show up in the list, got: {list_stdout}"
+    );
+
+    let (ok, restore_stdout, stderr) =
+        run_keelctl_scheduled(&control_plane_addr, &["restore", &id, "--yes"]);
+    assert!(ok, "restore failed: {stderr}");
+    assert!(
+        restore_stdout.contains("success: true"),
+        "expected a successful restore manifest, got: {restore_stdout}"
+    );
+    // Neither side hot-reloads restored state (both read their state dir
+    // only at process startup), so the manifest alone would leave an
+    // operator believing the restore had already taken effect.
+    assert!(
+        restore_stdout.contains("Restart keel-controlplane"),
+        "expected the restart reminder the design doc requires, got: {restore_stdout}"
+    );
+
+    // `--yes` before the id must work identically to `--yes` after it: the
+    // id lookup has to skip the flag regardless of its position, rather than
+    // blindly taking the first token (which would send the literal id
+    // "--yes" to the control plane).
+    let (ok, restore_stdout, stderr) =
+        run_keelctl_scheduled(&control_plane_addr, &["restore", "--yes", &id]);
+    assert!(ok, "flag-first restore failed: {stderr}");
+    assert!(
+        restore_stdout.contains("success: true"),
+        "expected a successful restore manifest, got: {restore_stdout}"
+    );
+}
+
+#[test]
+fn restore_without_yes_is_rejected_without_contacting_the_control_plane() {
+    // An unroutable address: if this reached dispatch() at all, the test
+    // would hang or fail with a connection error instead of the
+    // confirmation-required message below.
+    let (ok, _stdout, stderr) = run_keelctl_scheduled("127.0.0.1:1", &["restore", "some-id"]);
+    assert!(!ok, "expected restore without --yes to fail");
+    assert!(
+        stderr.contains("--yes"),
+        "expected the confirmation-required message, got: {stderr}"
+    );
+}

@@ -191,6 +191,14 @@ pub enum Command {
     PrepareDrainRepin(String, Sender<Result<ForceRepinPrep, ForceRepinError>>),
     Cordon(String, Sender<Result<(), UnknownNode>>),
     Uncordon(String, Sender<Result<(), UnknownNode>>),
+    BackupControlPlaneState(String, Sender<Result<(), crate::backup::BackupError>>),
+    RestoreControlPlaneState(String, Sender<Result<(), crate::backup::BackupError>>),
+    SaveBackupManifest(
+        wire::BackupManifest,
+        Sender<Result<(), crate::backup::BackupError>>,
+    ),
+    ListBackupManifests(Sender<Vec<wire::BackupManifest>>),
+    GetBackupManifest(String, Sender<Option<wire::BackupManifest>>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -728,6 +736,27 @@ fn handle_command(
                 Err(UnknownNode(node_id))
             };
             let _ = reply.send(result);
+        }
+        Command::BackupControlPlaneState(id, reply) => {
+            let _ = reply.send(crate::backup::backup_control_plane_state(state_dir, &id));
+        }
+        Command::RestoreControlPlaneState(id, reply) => {
+            let _ = reply.send(crate::backup::restore_control_plane_state(state_dir, &id));
+        }
+        Command::SaveBackupManifest(manifest, reply) => {
+            let path = state_dir
+                .join("backups")
+                .join(&manifest.id)
+                .join("manifest.yaml");
+            let result =
+                crate::store::save(&path, &manifest).map_err(crate::backup::BackupError::Io);
+            let _ = reply.send(result);
+        }
+        Command::ListBackupManifests(reply) => {
+            let _ = reply.send(crate::backup::list_manifests(state_dir));
+        }
+        Command::GetBackupManifest(id, reply) => {
+            let _ = reply.send(crate::backup::get_manifest(state_dir, &id));
         }
     }
 }
@@ -3186,5 +3215,95 @@ mod tests {
             prepare_force_repin(&commands, "db-0"),
             Err(ForceRepinError::NoFreshStandby)
         );
+    }
+
+    #[test]
+    fn backup_control_plane_state_command_writes_the_state_dir_into_the_backup_tree() {
+        let state_dir = fresh_state_dir();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            state_dir.clone(),
+        )
+        .1;
+
+        let (rec_tx, rec_rx) = mpsc::channel();
+        commands
+            .send(Command::RecordPlacement(
+                "web-0".to_string(),
+                "node-1".to_string(),
+                rec_tx,
+            ))
+            .unwrap();
+        rec_rx.recv().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::BackupControlPlaneState("backup-1".to_string(), tx))
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+
+        assert!(state_dir
+            .join("backups")
+            .join("backup-1")
+            .join("controlplane")
+            .join("placements.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn save_then_list_then_get_backup_manifest_commands_round_trip() {
+        let commands = spawn(
+            Registry::new(test_cluster_cidr()),
+            Placements::new(),
+            Services::new(test_service_cidr()),
+            UsedAddresses::new(),
+            Standbys::new(),
+            PendingFences::new(),
+            Cordoned::new(),
+            fresh_state_dir(),
+        )
+        .1;
+        let manifest = wire::BackupManifest {
+            id: "backup-1".to_string(),
+            controlplane: wire::BackupComponentResult {
+                success: true,
+                error: None,
+            },
+            nodes: std::collections::HashMap::new(),
+        };
+
+        let (save_tx, save_rx) = mpsc::channel();
+        commands
+            .send(Command::SaveBackupManifest(manifest.clone(), save_tx))
+            .unwrap();
+        save_rx.recv().unwrap().unwrap();
+
+        let (list_tx, list_rx) = mpsc::channel();
+        commands
+            .send(Command::ListBackupManifests(list_tx))
+            .unwrap();
+        assert_eq!(list_rx.recv().unwrap(), vec![manifest.clone()]);
+
+        let (get_tx, get_rx) = mpsc::channel();
+        commands
+            .send(Command::GetBackupManifest("backup-1".to_string(), get_tx))
+            .unwrap();
+        assert_eq!(get_rx.recv().unwrap(), Some(manifest));
+
+        let (get_missing_tx, get_missing_rx) = mpsc::channel();
+        commands
+            .send(Command::GetBackupManifest(
+                "missing".to_string(),
+                get_missing_tx,
+            ))
+            .unwrap();
+        assert_eq!(get_missing_rx.recv().unwrap(), None);
     }
 }

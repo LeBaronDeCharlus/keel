@@ -61,6 +61,10 @@ impl ZfsManager for CliZfsManager {
         Self::run_checked(&["create", "-o", &format!("quota={quota}"), dataset])
     }
 
+    fn set_quota(&self, dataset: &str, quota: &str) -> Result<(), ZfsError> {
+        Self::run_checked(&["set", &format!("quota={quota}"), dataset])
+    }
+
     fn destroy_dataset(&self, dataset: &str) -> Result<(), ZfsError> {
         // Immediately after a jail using this dataset as its rootfs is torn
         // down (`jail -r`), the kernel can take a brief moment to release

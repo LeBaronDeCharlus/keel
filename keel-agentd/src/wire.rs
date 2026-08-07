@@ -28,6 +28,12 @@ pub struct VolumeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupResult {
+    pub volumes: Vec<String>,
+    pub failed_volumes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplicaTargetStatus {
     pub replica_name: String,
     pub ready: bool,

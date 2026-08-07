@@ -1,4 +1,5 @@
 use crate::tls;
+use crate::wire;
 use crate::wire::{Heartbeat, NodeRegistration, NodeState, NodeStatus, RegisterResponse};
 use crate::worker::{
     Command, ForceRepinError, ForceRepinPrep, PlacementKind, ReplicaAction, ScheduleOrResolveError,
@@ -238,6 +239,9 @@ fn route(
         ("POST", ["replicas", name, "force-repin"]) => {
             handle_force_repin(name, commands, client_config)
         }
+        ("POST", ["backup"]) => handle_backup_create(commands, client_config),
+        ("GET", ["backup"]) => handle_backup_list(commands),
+        ("POST", ["restore", id]) => handle_restore(id, commands, client_config),
         ("POST", ["nodes", id, "cordon"]) => handle_cordon(id, commands),
         ("POST", ["nodes", id, "uncordon"]) => handle_uncordon(id, commands),
         ("POST", ["nodes", id, "drain"]) => handle_drain(id, commands, client_config),
@@ -355,6 +359,214 @@ fn handle_force_repin(
         Ok(body) => (200, body),
         Err(response) => response,
     }
+}
+
+fn handle_backup_create(
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
+    let id = crate::backup::generate_backup_id();
+
+    let (cp_tx, cp_rx) = mpsc::channel();
+    if commands
+        .send(Command::BackupControlPlaneState(id.clone(), cp_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let controlplane = match cp_rx.recv() {
+        Ok(Ok(())) => wire::BackupComponentResult {
+            success: true,
+            error: None,
+        },
+        Ok(Err(e)) => wire::BackupComponentResult {
+            success: false,
+            error: Some(e.to_string()),
+        },
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let (list_tx, list_rx) = mpsc::channel();
+    if commands.send(Command::List(list_tx)).is_err() {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let nodes = match list_rx.recv() {
+        Ok(nodes) => nodes,
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let node_results = fanout_backup_or_restore(
+        nodes,
+        &format!("/backup/{id}"),
+        "node was not Alive when backup create ran",
+        client_config,
+    );
+
+    let manifest = wire::BackupManifest {
+        id,
+        controlplane,
+        nodes: node_results,
+    };
+    let (save_tx, save_rx) = mpsc::channel();
+    if commands
+        .send(Command::SaveBackupManifest(manifest.clone(), save_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match save_rx.recv() {
+        Ok(Ok(())) => yaml_response(200, &manifest),
+        Ok(Err(e)) => error_response(
+            500,
+            format!("backup completed but failed to write manifest: {e}"),
+        ),
+        Err(_) => error_response(500, "control plane worker did not respond".to_string()),
+    }
+}
+
+fn handle_backup_list(commands: &Sender<Command>) -> (u16, Vec<u8>) {
+    let (tx, rx) = mpsc::channel();
+    if commands.send(Command::ListBackupManifests(tx)).is_err() {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    match rx.recv() {
+        Ok(manifests) => yaml_response(200, &manifests),
+        Err(_) => error_response(500, "control plane worker did not respond".to_string()),
+    }
+}
+
+fn handle_restore(
+    id: &str,
+    commands: &Sender<Command>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> (u16, Vec<u8>) {
+    let (get_tx, get_rx) = mpsc::channel();
+    if commands
+        .send(Command::GetBackupManifest(id.to_string(), get_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let manifest = match get_rx.recv() {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return error_response(404, format!("no backup '{id}' found")),
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+    // A backup whose control-plane step failed can never be restored (the
+    // `backups/<id>/controlplane/` tree is missing or incomplete), so refuse
+    // before fanning out -- otherwise every node would tear its jails down
+    // for an operation that was always going to fail on this side. Per-node
+    // failures are deliberately *not* a reason to refuse: backup is
+    // non-atomic across nodes by design, and a node whose own backup failed
+    // 404s cleanly on its own `/restore/<id>`.
+    if !manifest.controlplane.success {
+        return error_response(
+            409,
+            format!(
+                "backup '{id}' has no usable control-plane state (backup-time error: {})",
+                manifest.controlplane.error.as_deref().unwrap_or("unknown")
+            ),
+        );
+    }
+
+    let (list_tx, list_rx) = mpsc::channel();
+    if commands.send(Command::List(list_tx)).is_err() {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let nodes = match list_rx.recv() {
+        Ok(nodes) => nodes,
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let node_results = fanout_backup_or_restore(
+        nodes,
+        &format!("/restore/{id}"),
+        "node was not reachable during restore",
+        client_config,
+    );
+
+    let (cp_tx, cp_rx) = mpsc::channel();
+    if commands
+        .send(Command::RestoreControlPlaneState(id.to_string(), cp_tx))
+        .is_err()
+    {
+        return error_response(500, "control plane worker is not running".to_string());
+    }
+    let controlplane = match cp_rx.recv() {
+        Ok(Ok(())) => wire::BackupComponentResult {
+            success: true,
+            error: None,
+        },
+        Ok(Err(e)) => wire::BackupComponentResult {
+            success: false,
+            error: Some(e.to_string()),
+        },
+        Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+
+    let manifest = wire::BackupManifest {
+        id: id.to_string(),
+        controlplane,
+        nodes: node_results,
+    };
+    yaml_response(200, &manifest)
+}
+
+/// Shared by `handle_backup_create` and `handle_restore`: for each known
+/// node, skip it with `not_alive_message` if it isn't `Alive`, otherwise
+/// forward a `POST` to `path` on that node and classify the outcome into a
+/// `BackupComponentResult`. The two callers differ only in the path
+/// (`/backup/{id}` vs `/restore/{id}`) and the skip message, exactly the
+/// kind of shared per-node logic `execute_repin` above already factors out
+/// for `handle_force_repin` and `drain_stateful_replica`.
+///
+/// Unlike every other forwarding call site, this one uses
+/// `BACKUP_FANOUT_READ_TIMEOUT` rather than `FORWARD_READ_TIMEOUT`: a node
+/// answers `/backup/<id>` and `/restore/<id>` only once the whole
+/// operation is done, which is minutes of `zfs send`/`receive` on real
+/// data, not seconds.
+fn fanout_backup_or_restore(
+    nodes: Vec<NodeStatus>,
+    path: &str,
+    not_alive_message: &str,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> std::collections::HashMap<String, wire::BackupComponentResult> {
+    let mut results = std::collections::HashMap::new();
+    for node in nodes {
+        let result = if node.status != wire::NodeState::Alive {
+            wire::BackupComponentResult {
+                success: false,
+                error: Some(not_alive_message.to_string()),
+            }
+        } else {
+            match forward_with_timeout(
+                &node.addr,
+                "POST",
+                path,
+                &[],
+                client_config,
+                BACKUP_FANOUT_READ_TIMEOUT,
+            ) {
+                Ok((status, _)) if (200..300).contains(&status) => wire::BackupComponentResult {
+                    success: true,
+                    error: None,
+                },
+                Ok((status, body)) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(format!(
+                        "status {status}: {}",
+                        String::from_utf8_lossy(&body)
+                    )),
+                },
+                Err(e) => wire::BackupComponentResult {
+                    success: false,
+                    error: Some(e),
+                },
+            }
+        };
+        results.insert(node.id, result);
+    }
+    results
 }
 
 /// Shared by `handle_force_repin` and `drain`'s stateful-replica case
@@ -1222,6 +1434,12 @@ fn handle_list(commands: &Sender<Command>) -> (u16, Vec<u8>) {
 
 const FORWARD_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const FORWARD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Far larger than `FORWARD_READ_TIMEOUT` because a node's `/backup/<id>`
+/// and `/restore/<id>` send no response bytes at all until the whole
+/// operation has finished -- a state-dir copy plus a full `zfs
+/// send`/`receive` per volume, which on real data routinely takes minutes,
+/// not the seconds an ordinary jail/service call takes.
+const BACKUP_FANOUT_READ_TIMEOUT: Duration = Duration::from_secs(1800);
 
 fn handle_forward(
     id: &str,
@@ -1249,12 +1467,33 @@ fn handle_forward(
     }
 }
 
+/// The ordinary, short-read-timeout forward used by every regular
+/// jail/service/node call. Long-running endpoints (backup/restore) go
+/// through `forward_with_timeout` directly with their own budget.
 fn forward(
     addr: &str,
     method: &str,
     path: &str,
     body: &[u8],
     client_config: &Arc<rustls::ClientConfig>,
+) -> Result<(u16, Vec<u8>), String> {
+    forward_with_timeout(
+        addr,
+        method,
+        path,
+        body,
+        client_config,
+        FORWARD_READ_TIMEOUT,
+    )
+}
+
+fn forward_with_timeout(
+    addr: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    client_config: &Arc<rustls::ClientConfig>,
+    read_timeout: Duration,
 ) -> Result<(u16, Vec<u8>), String> {
     let socket_addr = addr
         .to_socket_addrs()
@@ -1263,7 +1502,7 @@ fn forward(
         .ok_or_else(|| "could not resolve address".to_string())?;
     let tcp_stream = TcpStream::connect_timeout(&socket_addr, FORWARD_CONNECT_TIMEOUT)
         .map_err(|e| e.to_string())?;
-    tcp_stream.set_read_timeout(Some(FORWARD_READ_TIMEOUT)).ok();
+    tcp_stream.set_read_timeout(Some(read_timeout)).ok();
     let server_name = tls::server_name_from_addr(addr)?;
     let conn = rustls::ClientConnection::new(Arc::clone(client_config), server_name)
         .map_err(|e| e.to_string())?;
@@ -1761,6 +2000,55 @@ mod tests {
     }
 
     /// Like `start_fake_remote_tls_agentd_recording_deletes`, but records
+    /// every request's full request line (`"<METHOD> <path>"`), so a test
+    /// can assert a node was -- or, more usefully, was *not* -- contacted at
+    /// all.
+    fn start_fake_remote_tls_agentd_recording_request_lines(
+        status: u16,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
+        );
+        let request_lines = Arc::new(Mutex::new(Vec::new()));
+        let thread_lines = Arc::clone(&request_lines);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                if let Some(first_line) = request_text.lines().next() {
+                    thread_lines.lock().unwrap().push(first_line.to_string());
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = tls_stream.write_all(response.as_bytes());
+                let _ = tls_stream.flush();
+            }
+        });
+        (addr, request_lines)
+    }
+
+    /// Like `start_fake_remote_tls_agentd_recording_deletes`, but records
     /// every `PUT /jails/<name>` request's raw body instead of `DELETE`
     /// paths, so a test can inspect the exact `JailSpec` YAML the control
     /// plane actually sent when scheduling a replica.
@@ -2070,6 +2358,72 @@ mod tests {
         let cp_addr = start_test_server();
         let (status, _) = send_request(&cp_addr, "DELETE", "/nodes/missing/volumes/web-data", "");
         assert_eq!(status, 404);
+    }
+
+    /// A "node" that completes the TLS handshake and reads the request but
+    /// never writes a single response byte, so the only thing that can end
+    /// the client's read loop is its own read timeout.
+    fn start_fake_remote_tls_agentd_that_never_responds() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
+        );
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut buf = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
+                }
+                // Keep the connection open (and silent) so the client's read
+                // never sees EOF -- only its timeout can break the loop.
+                held.push(tls_stream);
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn forward_with_timeout_applies_the_read_timeout_it_was_given() {
+        // The production backup/restore fanout passes a 30-minute budget
+        // (BACKUP_FANOUT_READ_TIMEOUT) instead of the 5s FORWARD_READ_TIMEOUT
+        // every other call site uses; no test can wait 30 minutes to observe
+        // that, so what's proven here is the plumbing: the timeout that gets
+        // applied to the socket is the one passed in, not the constant.
+        let node_addr = start_fake_remote_tls_agentd_that_never_responds();
+        let started = std::time::Instant::now();
+        let result = forward_with_timeout(
+            &node_addr,
+            "POST",
+            "/backup/test-id",
+            &[],
+            &client_tls_config(),
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            result.is_err(),
+            "expected a silent node to time out, got: {result:?}"
+        );
+        assert!(
+            elapsed < FORWARD_READ_TIMEOUT,
+            "expected the 200ms timeout passed in to apply, not the {FORWARD_READ_TIMEOUT:?} default; timed out after {elapsed:?}"
+        );
     }
 
     #[test]
@@ -3437,6 +3791,95 @@ mod tests {
         assert!(
             node_1_deletes.lock().unwrap().is_empty(),
             "expected the old node's copy to be left alone since the new placement never succeeded"
+        );
+    }
+
+    #[test]
+    fn backup_create_fans_out_to_every_alive_node_and_the_result_is_listable() {
+        let (cp_addr, _commands) = start_test_server_with_commands();
+        let node_b = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-b", &node_b);
+
+        let (status, body) = send_request(&cp_addr, "POST", "/backup", "");
+        assert_eq!(status, 200, "got: {body}");
+        assert!(body.contains("success: true"), "got: {body}");
+        assert!(body.contains("node-b"), "got: {body}");
+
+        let (status, list_body) = send_request(&cp_addr, "GET", "/backup", "");
+        assert_eq!(status, 200);
+        assert!(
+            list_body.contains("id:"),
+            "expected the just-created backup to appear in the list, got: {list_body}"
+        );
+    }
+
+    #[test]
+    fn restore_on_an_unknown_backup_id_returns_404() {
+        let (cp_addr, _commands) = start_test_server_with_commands();
+
+        let (status, body) = send_request(&cp_addr, "POST", "/restore/unknown-id", "");
+        assert_eq!(status, 404, "got: {body}");
+    }
+
+    #[test]
+    fn restore_of_a_backup_whose_control_plane_step_failed_is_refused_without_fanning_out() {
+        // handle_restore used to discard the manifest it fetched, so a
+        // backup recorded with `controlplane: {success: false}` still tore
+        // every node's jails down before failing on the control-plane side,
+        // where it never had any state to restore in the first place.
+        let (cp_addr, commands) = start_test_server_with_commands();
+        let (node_addr, node_requests) = start_fake_remote_tls_agentd_recording_request_lines(200);
+        register_node(&cp_addr, "node-b", &node_addr);
+        node_requests.lock().unwrap().clear();
+
+        let manifest = wire::BackupManifest {
+            id: "2026-08-06T12-34-56Z".to_string(),
+            controlplane: wire::BackupComponentResult {
+                success: false,
+                error: Some("disk full".to_string()),
+            },
+            nodes: std::collections::HashMap::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::SaveBackupManifest(manifest.clone(), tx))
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+
+        let (status, body) =
+            send_request(&cp_addr, "POST", &format!("/restore/{}", manifest.id), "");
+        assert_eq!(status, 409, "got: {body}");
+        assert!(
+            body.contains("no usable control-plane state") && body.contains("disk full"),
+            "expected the control-plane-state error, got: {body}"
+        );
+        assert!(
+            node_requests.lock().unwrap().is_empty(),
+            "no node may be contacted for a backup that can never be restored, got: {:?}",
+            node_requests.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn backup_then_restore_round_trips_through_the_control_plane_and_every_alive_node() {
+        let (cp_addr, _commands) = start_test_server_with_commands();
+        let node_b = start_fake_remote_tls_agentd(200, "");
+        register_node(&cp_addr, "node-b", &node_b);
+
+        let (status, create_body) = send_request(&cp_addr, "POST", "/backup", "");
+        assert_eq!(status, 200, "got: {create_body}");
+        let id = create_body
+            .lines()
+            .find_map(|line| line.strip_prefix("id: "))
+            .expect("expected an 'id: <value>' line in the manifest")
+            .trim()
+            .to_string();
+
+        let (status, restore_body) = send_request(&cp_addr, "POST", &format!("/restore/{id}"), "");
+        assert_eq!(status, 200, "got: {restore_body}");
+        assert!(
+            restore_body.contains("success: true"),
+            "got: {restore_body}"
         );
     }
 }

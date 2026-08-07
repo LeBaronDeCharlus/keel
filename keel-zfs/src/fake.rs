@@ -1,6 +1,6 @@
 use crate::ZfsError;
 use crate::ZfsManager;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::sync::{Arc, Mutex};
@@ -10,6 +10,7 @@ pub struct FakeZfsManager {
     datasets: Arc<Mutex<HashSet<String>>>,
     snapshots: Arc<Mutex<HashSet<String>>>,
     busy: Arc<Mutex<HashSet<String>>>,
+    quotas: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl FakeZfsManager {
@@ -36,6 +37,15 @@ impl FakeZfsManager {
     pub fn unmark_busy(&self, dataset: &str) {
         self.busy.lock().unwrap().remove(dataset);
     }
+
+    /// Test helper: the quota currently recorded for `dataset`, whether it
+    /// came from `create_volume`'s create-time quota or a later
+    /// `set_quota`. `None` for a dataset that has never had one -- notably
+    /// one created by `receive_snapshot`, which (like real ZFS without
+    /// `-p`) carries no properties across.
+    pub fn quota_of(&self, dataset: &str) -> Option<String> {
+        self.quotas.lock().unwrap().get(dataset).cloned()
+    }
 }
 
 impl ZfsManager for FakeZfsManager {
@@ -56,8 +66,27 @@ impl ZfsManager for FakeZfsManager {
         Ok(())
     }
 
-    fn create_volume(&self, dataset: &str, _quota: &str) -> Result<(), ZfsError> {
-        self.datasets.lock().unwrap().insert(dataset.to_string());
+    fn create_volume(&self, dataset: &str, quota: &str) -> Result<(), ZfsError> {
+        if !self.datasets.lock().unwrap().insert(dataset.to_string()) {
+            // Already existed: like the real implementation, this is a no-op
+            // and the quota is deliberately *not* re-applied.
+            return Ok(());
+        }
+        self.quotas
+            .lock()
+            .unwrap()
+            .insert(dataset.to_string(), quota.to_string());
+        Ok(())
+    }
+
+    fn set_quota(&self, dataset: &str, quota: &str) -> Result<(), ZfsError> {
+        if !self.datasets.lock().unwrap().contains(dataset) {
+            return Err(ZfsError::NotFound(dataset.to_string()));
+        }
+        self.quotas
+            .lock()
+            .unwrap()
+            .insert(dataset.to_string(), quota.to_string());
         Ok(())
     }
 
@@ -66,6 +95,7 @@ impl ZfsManager for FakeZfsManager {
             return Err(ZfsError::Busy(dataset.to_string()));
         }
         if self.datasets.lock().unwrap().remove(dataset) {
+            self.quotas.lock().unwrap().remove(dataset);
             Ok(())
         } else {
             Err(ZfsError::NotFound(dataset.to_string()))
@@ -237,6 +267,66 @@ mod tests {
         zfs.create_volume("zroot/keel/volumes/web-data", "1G")
             .unwrap();
         assert!(zfs.dataset_exists("zroot/keel/volumes/web-data").unwrap());
+    }
+
+    #[test]
+    fn create_volume_records_its_quota_and_does_not_re_apply_it_on_a_second_call() {
+        let zfs = FakeZfsManager::new();
+        zfs.create_volume("zroot/keel/volumes/web-data", "1G")
+            .unwrap();
+        assert_eq!(
+            zfs.quota_of("zroot/keel/volumes/web-data"),
+            Some("1G".to_string())
+        );
+        zfs.create_volume("zroot/keel/volumes/web-data", "5G")
+            .unwrap();
+        assert_eq!(
+            zfs.quota_of("zroot/keel/volumes/web-data"),
+            Some("1G".to_string()),
+            "create_volume is idempotent and must not re-apply a quota to an existing dataset"
+        );
+    }
+
+    #[test]
+    fn set_quota_applies_a_quota_to_an_existing_dataset() {
+        let zfs = FakeZfsManager::new();
+        zfs.seed_dataset("zroot/keel/volumes/web-data");
+        assert_eq!(zfs.quota_of("zroot/keel/volumes/web-data"), None);
+        zfs.set_quota("zroot/keel/volumes/web-data", "2G").unwrap();
+        assert_eq!(
+            zfs.quota_of("zroot/keel/volumes/web-data"),
+            Some("2G".to_string())
+        );
+    }
+
+    #[test]
+    fn set_quota_on_an_unknown_dataset_returns_not_found() {
+        let zfs = FakeZfsManager::new();
+        assert!(matches!(
+            zfs.set_quota("zroot/keel/volumes/missing", "1G"),
+            Err(ZfsError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn receive_snapshot_leaves_the_received_dataset_with_no_quota() {
+        // Mirrors real `zfs send`/`receive` without `-p`: properties, quota
+        // included, do not travel with the stream. This is exactly why
+        // restore has to re-apply the declared size itself.
+        let zfs = FakeZfsManager::new();
+        zfs.create_volume("zroot/keel/volumes/web-data", "1G")
+            .unwrap();
+        zfs.snapshot("zroot/keel/volumes/web-data", "backup-1")
+            .unwrap();
+        let mut stream = Vec::new();
+        zfs.send_snapshot("zroot/keel/volumes/web-data", "backup-1", None, &mut stream)
+            .unwrap();
+
+        let target = FakeZfsManager::new();
+        target
+            .receive_snapshot("zroot/keel/volumes/web-data", &mut stream.as_slice())
+            .unwrap();
+        assert_eq!(target.quota_of("zroot/keel/volumes/web-data"), None);
     }
 
     #[test]
