@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum BackupError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("no backup '{0}' found")]
+    UnknownBackup(String),
 }
 
 const SKIP_TOP_LEVEL: &[&str] = &["backups"];
@@ -65,6 +67,15 @@ pub fn restore_control_plane_state(state_dir: &Path, backup_id: &str) -> Result<
         .join("backups")
         .join(backup_id)
         .join("controlplane");
+    // Validate before destroying anything live: if this backup's
+    // control-plane step never completed (or its directory was removed),
+    // wiping first would empty the live state dir and then fail on the
+    // copy, leaving nothing to restore from. Mirrors the same
+    // check-before-teardown guard `keel_agentd::backup::restore_agent_state`
+    // already does on `backups/<id>/agent`.
+    if !src.is_dir() {
+        return Err(BackupError::UnknownBackup(backup_id.to_string()));
+    }
     keel_spec::fs_copy::wipe_dir_contents(state_dir, SKIP_TOP_LEVEL)?;
     keel_spec::fs_copy::copy_dir_recursive(&src, state_dir, &[])?;
     Ok(())
@@ -165,6 +176,29 @@ mod tests {
         assert!(
             !state_dir.join("standbys.yaml").exists(),
             "a file created after the backup was taken must not survive restore"
+        );
+    }
+
+    #[test]
+    fn restore_control_plane_state_on_a_missing_backup_leaves_live_state_untouched() {
+        // The wipe used to run before anything validated that the backup's
+        // `controlplane/` directory existed at all, so restoring an id whose
+        // control-plane step had failed (or never existed) emptied the live
+        // state dir and *then* errored -- total loss with nothing to restore
+        // from.
+        let state_dir = fresh_state_dir("restore_missing");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("placements.yaml"), "web-0: node-1\n").unwrap();
+
+        let result = restore_control_plane_state(&state_dir, "never-taken");
+        assert!(
+            matches!(result, Err(BackupError::UnknownBackup(_))),
+            "expected UnknownBackup, got: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("placements.yaml")).unwrap(),
+            "web-0: node-1\n",
+            "live control-plane state must survive a restore of an unusable backup"
         );
     }
 

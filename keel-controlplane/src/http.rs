@@ -447,10 +447,26 @@ fn handle_restore(
     {
         return error_response(500, "control plane worker is not running".to_string());
     }
-    match get_rx.recv() {
-        Ok(Some(_)) => {}
+    let manifest = match get_rx.recv() {
+        Ok(Some(manifest)) => manifest,
         Ok(None) => return error_response(404, format!("no backup '{id}' found")),
         Err(_) => return error_response(500, "control plane worker did not respond".to_string()),
+    };
+    // A backup whose control-plane step failed can never be restored (the
+    // `backups/<id>/controlplane/` tree is missing or incomplete), so refuse
+    // before fanning out -- otherwise every node would tear its jails down
+    // for an operation that was always going to fail on this side. Per-node
+    // failures are deliberately *not* a reason to refuse: backup is
+    // non-atomic across nodes by design, and a node whose own backup failed
+    // 404s cleanly on its own `/restore/<id>`.
+    if !manifest.controlplane.success {
+        return error_response(
+            409,
+            format!(
+                "backup '{id}' has no usable control-plane state (backup-time error: {})",
+                manifest.controlplane.error.as_deref().unwrap_or("unknown")
+            ),
+        );
     }
 
     let (list_tx, list_rx) = mpsc::channel();
@@ -1981,6 +1997,55 @@ mod tests {
             }
         });
         (addr, deletes)
+    }
+
+    /// Like `start_fake_remote_tls_agentd_recording_deletes`, but records
+    /// every request's full request line (`"<METHOD> <path>"`), so a test
+    /// can assert a node was -- or, more usefully, was *not* -- contacted at
+    /// all.
+    fn start_fake_remote_tls_agentd_recording_request_lines(
+        status: u16,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server_config = Arc::new(
+            tls::load_server_config(
+                &fixture("fixture-node.crt"),
+                &fixture("fixture-node.key"),
+                &fixture("ca.crt"),
+                &fixture("crl.pem"),
+            )
+            .unwrap(),
+        );
+        let request_lines = Arc::new(Mutex::new(Vec::new()));
+        let thread_lines = Arc::clone(&request_lines);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+                    continue;
+                };
+                let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match tls_stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                if let Some(first_line) = request_text.lines().next() {
+                    thread_lines.lock().unwrap().push(first_line.to_string());
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = tls_stream.write_all(response.as_bytes());
+                let _ = tls_stream.flush();
+            }
+        });
+        (addr, request_lines)
     }
 
     /// Like `start_fake_remote_tls_agentd_recording_deletes`, but records
@@ -3754,6 +3819,45 @@ mod tests {
 
         let (status, body) = send_request(&cp_addr, "POST", "/restore/unknown-id", "");
         assert_eq!(status, 404, "got: {body}");
+    }
+
+    #[test]
+    fn restore_of_a_backup_whose_control_plane_step_failed_is_refused_without_fanning_out() {
+        // handle_restore used to discard the manifest it fetched, so a
+        // backup recorded with `controlplane: {success: false}` still tore
+        // every node's jails down before failing on the control-plane side,
+        // where it never had any state to restore in the first place.
+        let (cp_addr, commands) = start_test_server_with_commands();
+        let (node_addr, node_requests) = start_fake_remote_tls_agentd_recording_request_lines(200);
+        register_node(&cp_addr, "node-b", &node_addr);
+        node_requests.lock().unwrap().clear();
+
+        let manifest = wire::BackupManifest {
+            id: "2026-08-06T12-34-56Z".to_string(),
+            controlplane: wire::BackupComponentResult {
+                success: false,
+                error: Some("disk full".to_string()),
+            },
+            nodes: std::collections::HashMap::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        commands
+            .send(Command::SaveBackupManifest(manifest.clone(), tx))
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+
+        let (status, body) =
+            send_request(&cp_addr, "POST", &format!("/restore/{}", manifest.id), "");
+        assert_eq!(status, 409, "got: {body}");
+        assert!(
+            body.contains("no usable control-plane state") && body.contains("disk full"),
+            "expected the control-plane-state error, got: {body}"
+        );
+        assert!(
+            node_requests.lock().unwrap().is_empty(),
+            "no node may be contacted for a backup that can never be restored, got: {:?}",
+            node_requests.lock().unwrap()
+        );
     }
 
     #[test]
